@@ -5,10 +5,14 @@
 //! Lattice work runs on the tokio runtime and posts [`Msg`]s; the UI loop is
 //! `block_in_place`. The watcher is non-recursive and capped (no EMFILE).
 
+mod hal_view;
 mod help;
 mod leader;
+mod mouse;
+mod neighbors_view;
 mod palette;
 mod preview;
+mod tags_view;
 mod tasks_view;
 mod theme;
 mod tree;
@@ -21,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-    MouseButton, MouseEvent, MouseEventKind,
+    MouseEvent,
 };
 use notify::{RecursiveMode, Watcher};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -32,12 +36,14 @@ use ratatui::{DefaultTerminal, Frame};
 use ratatui_textarea::{Input, TextArea};
 
 use crate::error::{LapisError, Result};
-use crate::lattice::{Client, Hit, Mode as SearchMode, Neighbor, SearchParams};
+use crate::lattice::{Client, Document, Hit, ListParams, Mode as SearchMode, Neighbor, SearchParams};
 use crate::ops::Ctx;
 use crate::tasks::Task;
 use crate::{hal, notes, tasks, templates, write};
 use leader::Cmd;
+use mouse::{Action as MouseAction, Regions, Target};
 use palette::{Item, Palette};
+use tags_view::{Pick, TagsBrowser};
 use tasks_view::{TasksView, View};
 use tree::Tree;
 use vim::{Action, Vim};
@@ -47,6 +53,7 @@ use vim::{Action, Vim};
 enum Msg {
     Search(u64, std::result::Result<Vec<Hit>, String>),
     Neighbors(String, std::result::Result<Vec<Neighbor>, String>),
+    Documents(std::result::Result<Vec<Document>, String>),
     Reindexed(String, std::result::Result<Option<u64>, String>),
     Tasks(Vec<Task>),
     Health(bool),
@@ -77,6 +84,7 @@ enum Overlay {
     Buffers(usize),
     Restore(usize, Vec<String>),
     Templates(usize, Vec<templates::Template>),
+    Tags(TagsBrowser),
     /// (title, input, purpose)
     Prompt(String, String, PromptKind),
     /// Ctrl+W pane prefix
@@ -114,16 +122,6 @@ impl Tab {
             self.preview_for = body;
         }
     }
-}
-
-/// Screen regions from the last draw, for mouse hit-testing.
-#[derive(Default, Clone, Copy)]
-struct Regions {
-    sidebar: Rect,
-    tabs: Rect,
-    editor: Rect,
-    preview: Rect,
-    bottom: Rect,
 }
 
 struct App {
@@ -313,6 +311,28 @@ impl App {
         if let Some(t) = self.tasks.as_mut() {
             t.loading = true;
         }
+        tokio::task::spawn_blocking(move || {
+            let list = tasks::list(&root, &tasks::Filter::default()).unwrap_or_default();
+            let _ = tx.send(Msg::Tasks(list));
+        });
+    }
+
+    /// `Space #`: tags from the lattice document table plus inline task tags.
+    fn open_tags(&mut self) {
+        self.overlay = Some(Overlay::Tags(TagsBrowser::new()));
+        let tx = self.tx.clone();
+        match self.client.clone() {
+            Some(client) => {
+                tokio::spawn(async move {
+                    let p = ListParams { limit: 1000, ..ListParams::default() };
+                    let r = client.documents(&p).await.map_err(|e| e.to_string());
+                    let _ = tx.send(Msg::Documents(r));
+                });
+            }
+            None => self.set_status("lattice client unavailable; tags from tasks only"),
+        }
+        let root = self.root();
+        let tx = self.tx.clone();
         tokio::task::spawn_blocking(move || {
             let list = tasks::list(&root, &tasks::Filter::default()).unwrap_or_default();
             let _ = tx.send(Msg::Tasks(list));
@@ -581,6 +601,7 @@ impl App {
                 }
             }
             Cmd::Hal => self.show_hal = !self.show_hal,
+            Cmd::Tags => self.open_tags(),
             Cmd::Buffers => {
                 if !self.tabs.is_empty() {
                     self.overlay = Some(Overlay::Buffers(self.active));
@@ -839,7 +860,22 @@ impl App {
                     };
                     self.set_status(s);
                 }
+                Msg::Documents(r) => {
+                    if let Some(Overlay::Tags(b)) = self.overlay.as_mut() {
+                        b.loading = false;
+                        match r {
+                            Ok(docs) => b.add_documents(&docs),
+                            Err(e) => self.set_status(format!("documents: {e}")),
+                        }
+                    }
+                }
                 Msg::Tasks(list) => {
+                    if let Some(Overlay::Tags(b)) = self.overlay.as_mut() {
+                        b.add_tasks(&list);
+                        if self.client.is_none() {
+                            b.loading = false;
+                        }
+                    }
                     if let Some(t) = self.tasks.as_mut() {
                         t.set_tasks(list);
                     }
@@ -1104,6 +1140,46 @@ impl App {
                 }
                 _ => self.overlay = Some(Overlay::Restore(sel, items)),
             },
+            Overlay::Tags(mut b) => match k.code {
+                KeyCode::Esc => {
+                    if b.back() {
+                        self.overlay = Some(Overlay::Tags(b));
+                    }
+                }
+                KeyCode::Enter => match b.enter() {
+                    Pick::Note(path) => {
+                        self.open_note(&path);
+                        self.tasks = None;
+                        self.focus = Focus::Editor;
+                    }
+                    Pick::Tag(_) | Pick::Nothing => self.overlay = Some(Overlay::Tags(b)),
+                },
+                KeyCode::Down => {
+                    b.down();
+                    self.overlay = Some(Overlay::Tags(b));
+                }
+                KeyCode::Up => {
+                    b.up();
+                    self.overlay = Some(Overlay::Tags(b));
+                }
+                KeyCode::Char('j') if b.open.is_some() || k.modifiers.contains(KeyModifiers::CONTROL) => {
+                    b.down();
+                    self.overlay = Some(Overlay::Tags(b));
+                }
+                KeyCode::Char('k') if b.open.is_some() || k.modifiers.contains(KeyModifiers::CONTROL) => {
+                    b.up();
+                    self.overlay = Some(Overlay::Tags(b));
+                }
+                KeyCode::Backspace => {
+                    b.backspace();
+                    self.overlay = Some(Overlay::Tags(b));
+                }
+                KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => {
+                    b.type_char(c);
+                    self.overlay = Some(Overlay::Tags(b));
+                }
+                _ => self.overlay = Some(Overlay::Tags(b)),
+            },
             Overlay::Templates(sel, items) => match k.code {
                 KeyCode::Esc => {}
                 KeyCode::Enter => {
@@ -1358,87 +1434,78 @@ impl App {
     // ---------------------------------------------------------------- mouse
 
     fn mouse(&mut self, m: MouseEvent) {
-        let r = self.regions;
-        let inside =
-            |a: Rect, x: u16, y: u16| x >= a.x && x < a.x + a.width && y >= a.y && y < a.y + a.height;
-        match m.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
+        let Some(action) = mouse::classify(&self.regions, &m) else { return };
+        match action {
+            MouseAction::Click(target) => {
                 if self.overlay.is_some() {
                     return;
                 }
-                if inside(r.sidebar, m.column, m.row) {
-                    self.focus = Focus::Sidebar;
-                    let row = (m.row.saturating_sub(r.sidebar.y + 1)) as usize + self.sidebar_scroll;
-                    let rows = self.tree.visible();
-                    if row < rows.len() {
-                        let was = self.sel;
-                        self.sel = row;
-                        if was == row {
-                            // second click opens / toggles
-                            let (_, e) = rows[row].clone();
-                            let root = self.root();
-                            if e.is_dir {
-                                if !self.tree.expanded.remove(&e.rel) {
-                                    self.tree.load(&root, &e.rel);
-                                    self.tree.expanded.insert(e.rel);
+                match target {
+                    Target::Sidebar { row } => {
+                        self.focus = Focus::Sidebar;
+                        let row = row + self.sidebar_scroll;
+                        let rows = self.tree.visible();
+                        if row < rows.len() {
+                            let was = self.sel;
+                            self.sel = row;
+                            if was == row {
+                                // second click opens / toggles
+                                let (_, e) = rows[row].clone();
+                                let root = self.root();
+                                if e.is_dir {
+                                    if !self.tree.expanded.remove(&e.rel) {
+                                        self.tree.load(&root, &e.rel);
+                                        self.tree.expanded.insert(e.rel);
+                                    }
+                                } else {
+                                    self.open_note(&e.rel);
+                                    self.tasks = None;
                                 }
-                            } else {
-                                self.open_note(&e.rel);
-                                self.tasks = None;
                             }
                         }
                     }
-                } else if inside(r.tabs, m.column, m.row) {
-                    // tabs are laid out as " name " cells; find by x
-                    let mut x = r.tabs.x;
-                    for (i, t) in self.tabs.iter().enumerate() {
-                        let w = tab_label(t).chars().count() as u16 + 3;
-                        if m.column >= x && m.column < x + w {
+                    Target::Tabs { x } => {
+                        let widths: Vec<usize> =
+                            self.tabs.iter().map(|t| tab_label(t).chars().count()).collect();
+                        if let Some(i) = mouse::tab_at(&widths, x) {
                             self.active = i;
                             self.focus = Focus::Editor;
-                            break;
                         }
-                        x += w;
                     }
-                } else if inside(r.editor, m.column, m.row) {
-                    self.focus = if self.tasks.is_some() { Focus::Tasks } else { Focus::Editor };
-                } else if inside(r.preview, m.column, m.row) {
-                    self.focus = Focus::Preview;
-                } else if inside(r.bottom, m.column, m.row) && self.show_neighbors {
-                    let row = (m.row.saturating_sub(r.bottom.y + 1)) as usize;
-                    if let Some(n) = self.neighbors.get(row) {
-                        let p = n.path.clone();
-                        self.open_note(&p);
+                    Target::Editor => {
+                        self.focus = if self.tasks.is_some() { Focus::Tasks } else { Focus::Editor };
+                    }
+                    Target::Preview => self.focus = Focus::Preview,
+                    Target::Bottom { row } => {
+                        if self.show_neighbors
+                            && let Some(n) = self.neighbors.get(row)
+                        {
+                            let p = n.path.clone();
+                            self.open_note(&p);
+                        }
                     }
                 }
             }
-            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
-                let down = matches!(m.kind, MouseEventKind::ScrollDown);
-                if inside(r.sidebar, m.column, m.row) {
+            MouseAction::Scroll { target, down } => match target {
+                Target::Sidebar { .. } => {
                     let n = self.tree.visible().len();
-                    self.sel = if down {
-                        (self.sel + 3).min(n.saturating_sub(1))
-                    } else {
-                        self.sel.saturating_sub(3)
-                    };
-                } else if inside(r.preview, m.column, m.row) {
+                    self.sel = mouse::scroll(self.sel, n, down, 3);
+                }
+                Target::Preview => {
                     if let Some(t) = self.tab_mut() {
-                        let max = t.preview.len() as u16;
-                        t.preview_scroll = if down {
-                            (t.preview_scroll + 3).min(max.saturating_sub(1))
-                        } else {
-                            t.preview_scroll.saturating_sub(3)
-                        };
+                        let max = t.preview.len();
+                        t.preview_scroll = mouse::scroll(t.preview_scroll as usize, max, down, 3) as u16;
                     }
-                } else if inside(r.editor, m.column, m.row) {
+                }
+                Target::Editor => {
                     if let Some(tv) = self.tasks.as_mut() {
                         if down { tv.down() } else { tv.up() }
                     } else if let Some(t) = self.tab_mut() {
                         t.text.scroll((if down { 3 } else { -3 }, 0));
                     }
                 }
-            }
-            _ => {}
+                Target::Tabs { .. } | Target::Bottom { .. } => {}
+            },
         }
     }
 
@@ -1626,34 +1693,10 @@ impl App {
     }
 
     fn draw_hal(&self, f: &mut Frame, area: Rect) {
-        let mut lines: Vec<Line> = Vec::new();
-        match self.tab() {
-            Some(t) if t.hal_valid => {
-                for key in ["name", "type", "doc_type", "domain", "status", "priority", "created", "updated"]
-                {
-                    if let Some(v) = t.hal.get(key) {
-                        let val = match v {
-                            serde_json::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        };
-                        lines.push(Line::from(vec![
-                            Span::styled(format!("{key:<9}"), theme::accent()),
-                            Span::raw(val),
-                        ]));
-                    }
-                }
-                lines.push(Line::default());
-                let rest = write::to_yaml(&t.hal).unwrap_or_default();
-                for l in rest.lines() {
-                    lines.push(Line::from(Span::styled(l.to_string(), theme::dim())));
-                }
-            }
-            Some(_) => lines.push(Line::from(Span::styled(
-                "frontmatter is not valid YAML",
-                Style::default().fg(theme::WARN),
-            ))),
-            None => {}
-        }
+        let lines: Vec<Line> = match self.tab() {
+            Some(t) => hal_view::lines(&t.hal, t.hal_valid),
+            None => vec![],
+        };
         f.render_widget(
             Paragraph::new(Text::from(lines))
                 .block(Block::default().borders(Borders::ALL).title(" HAL ").border_style(theme::chrome()))
@@ -1666,15 +1709,9 @@ impl App {
         let items: Vec<ListItem> = if self.neighbors.is_empty() {
             vec![ListItem::new(Span::styled("(no hop-1 neighbors, or still loading)", theme::dim()))]
         } else {
-            self.neighbors
+            neighbors_view::rows(&self.neighbors)
                 .iter()
-                .map(|n| {
-                    let arrow = if n.direction == "in" { "◀ " } else { "▶ " };
-                    ListItem::new(Line::from(vec![
-                        Span::styled(arrow, theme::chrome()),
-                        Span::raw(n.path.clone()),
-                    ]))
-                })
+                .map(|r| ListItem::new(neighbors_view::line(r)))
                 .collect()
         };
         let title = format!(" hop-1 neighbors · {} ", self.neighbors_for);
@@ -1900,6 +1937,13 @@ impl App {
             }
             Overlay::Restore(sel, items) => {
                 self.draw_picker(f, area, " trash  (Enter restores) ", *sel, items.clone());
+            }
+            Overlay::Tags(b) => {
+                let mut rows = b.rows();
+                if rows.is_empty() && !b.loading {
+                    rows.push("(no tags)".into());
+                }
+                self.draw_picker(f, area, &b.title(), b.selected_index(), rows);
             }
             Overlay::Templates(sel, items) => {
                 self.draw_picker(

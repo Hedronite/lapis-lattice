@@ -29,6 +29,7 @@ pub enum Cmd {
     CopyPath,
     Neighbors,
     Hal,
+    Tags,
     Buffers,
     TabNext,
     TabPrev,
@@ -70,6 +71,7 @@ impl Cmd {
             Cmd::CopyPath => "copy path to status",
             Cmd::Neighbors => "neighbors (hop-1)",
             Cmd::Hal => "HAL inspector",
+            Cmd::Tags => "tags browser",
             Cmd::Buffers => "open buffers",
             Cmd::TabNext => "next tab",
             Cmd::TabPrev => "previous tab",
@@ -110,7 +112,12 @@ pub fn table() -> Vec<Node> {
         Group(
             's',
             "search",
-            vec![Leaf('f', Cmd::FindNote), Leaf('t', Cmd::SearchText), Leaf('c', Cmd::Commands)],
+            vec![
+                Leaf('f', Cmd::FindNote),
+                Leaf('t', Cmd::SearchText),
+                Leaf('#', Cmd::Tags),
+                Leaf('c', Cmd::Commands),
+            ],
         ),
         Leaf('e', Cmd::ToggleSidebar),
         Leaf('p', Cmd::Outline),
@@ -163,6 +170,7 @@ pub fn table() -> Vec<Node> {
         ),
         Leaf('g', Cmd::Neighbors),
         Leaf('y', Cmd::Hal),
+        Leaf('#', Cmd::Tags),
         Leaf('o', Cmd::Buffers),
         Group('b', "tabs", vec![Leaf('n', Cmd::TabNext), Leaf('p', Cmd::TabPrev), Leaf('x', Cmd::TabClose)]),
         Leaf('r', Cmd::Refresh),
@@ -235,7 +243,9 @@ mod tests {
         assert_eq!(step(&['t', 'k']), Step::Run(Cmd::Kanban));
         assert_eq!(step(&['l', 'e']), Step::Run(Cmd::ExternalEditor));
         assert_eq!(step(&['z', 'p']), Step::Run(Cmd::TogglePreview));
-        assert_eq!(step(&['#']), Step::Unknown);
+        assert_eq!(step(&['#']), Step::Run(Cmd::Tags));
+        assert_eq!(step(&['s', '#']), Step::Run(Cmd::Tags));
+        assert_eq!(step(&['%']), Step::Unknown);
         assert_eq!(step(&['t', '#']), Step::Unknown);
     }
 

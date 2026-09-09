@@ -60,3 +60,21 @@ pub fn mode(mode: &str) -> Style {
     };
     Style::default().bg(bg).fg(BLUE_DEEP).add_modifier(Modifier::BOLD)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lapis_palette_constants() {
+        assert_eq!(BLUE, Color::Rgb(0x1F, 0x2D, 0x68));
+        assert_eq!(REGENT, Color::Rgb(0x80, 0x9D, 0xAF));
+        assert_eq!(CREAM, Color::Rgb(0xF3, 0xE9, 0xD2));
+        assert_eq!(GOLD, Color::Rgb(0xD9, 0xB8, 0x5C));
+        assert_eq!(base().bg, Some(BLUE));
+        assert_eq!(base().fg, Some(CREAM));
+        assert_eq!(chrome().fg, Some(REGENT));
+        assert_eq!(focused().fg, Some(GOLD));
+        assert_eq!(accent().fg, Some(GOLD));
+    }
+}

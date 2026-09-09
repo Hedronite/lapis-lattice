@@ -119,10 +119,9 @@ impl Vim {
                     let p = self.prompt.take().unwrap();
                     return self.run_prompt(p, ta);
                 }
+                Key::Backspace if p.text.is_empty() => self.prompt = None,
                 Key::Backspace => {
-                    if p.text.pop().is_none() {
-                        self.prompt = None;
-                    }
+                    p.text.pop();
                 }
                 Key::Char(c) if !input.ctrl => p.text.push(c),
                 _ => {}
@@ -625,6 +624,25 @@ mod tests {
         assert_eq!((t.cursor().0, t.cursor().1), (0, 0));
         feed(&mut v, &mut t, "G");
         assert_eq!(t.cursor().0, 1);
+    }
+
+    #[test]
+    fn h_and_k_move_cursor() {
+        let mut v = Vim::new();
+        let mut t = ta("hello world\nline2\nline3");
+        feed(&mut v, &mut t, "jj4l");
+        assert_eq!((t.cursor().0, t.cursor().1), (2, 4));
+        feed(&mut v, &mut t, "h");
+        assert_eq!((t.cursor().0, t.cursor().1), (2, 3));
+        feed(&mut v, &mut t, "2h");
+        assert_eq!((t.cursor().0, t.cursor().1), (2, 1));
+        feed(&mut v, &mut t, "k");
+        assert_eq!((t.cursor().0, t.cursor().1), (1, 1));
+        feed(&mut v, &mut t, "k");
+        assert_eq!((t.cursor().0, t.cursor().1), (0, 1));
+        // clamped at the edges
+        feed(&mut v, &mut t, "kk5h");
+        assert_eq!((t.cursor().0, t.cursor().1), (0, 0));
     }
 
     #[test]

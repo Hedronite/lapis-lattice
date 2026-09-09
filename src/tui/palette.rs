@@ -96,4 +96,35 @@ mod tests {
         assert!(!q.is_commands());
         assert!(q.items.is_empty());
     }
+
+    #[test]
+    fn lattice_hit_becomes_note_item() {
+        let hit = Hit {
+            path: "foundry/lapis/SPEC.md".into(),
+            kind: crate::notes::Kind::Markdown,
+            title: "Lapis · SPEC".into(),
+            heading: Some("Goals".into()),
+            snippet: Some("ignored when a heading exists".into()),
+            score: Some(0.9),
+            rank: Some(1),
+            domain: None,
+            doc_type: None,
+            tags: vec![],
+            chunk_id: None,
+            chunk_index: None,
+        };
+        let mut p = Palette::new("spec");
+        p.pending = true;
+        p.set_hits(vec![hit]);
+        assert!(!p.pending);
+        assert_eq!(p.sel, 0);
+        assert_eq!(
+            p.selected(),
+            Some(&Item::Note {
+                path: "foundry/lapis/SPEC.md".into(),
+                title: "Lapis · SPEC".into(),
+                snippet: Some("Goals".into()),
+            })
+        );
+    }
 }
