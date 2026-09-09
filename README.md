@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-809DAF?style=flat&colorA=1F2D68" alt="MIT"></a>
-  <a href="#status"><img src="https://img.shields.io/badge/Status-spec--draft-809DAF?style=flat&colorA=1F2D68" alt="spec-draft"></a>
+  <a href="#status"><img src="https://img.shields.io/badge/Status-live-809DAF?style=flat&colorA=1F2D68" alt="live"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-stable-809DAF?style=flat&colorA=1F2D68&logo=rust&logoColor=809DAF" alt="Rust"></a>
   <a href="https://hedronite.com"><img src="https://img.shields.io/badge/Hedronite-hedronite.com-809DAF?style=flat&colorA=1F2D68" alt="Hedronite"></a>
 </p>
@@ -51,7 +51,8 @@ Underneath, **Lapis Lattice** is the RAG engine: BM25, vector search, fused rank
 - **Writes that stay boring** — create, append, rename, trash. The index updates after the file does. Search never mutates the vault.
 
 ```text
-lapis tui
+lapis                         # TUI (default vault)
+lapis tui --vault ~/Notes     # explicit vault
 lapis search --json "hybrid retrieval"
 lapis read --json notes/plan.md
 lapis task list --json
@@ -82,6 +83,8 @@ Use it as a personal wiki, a project vault, or the memory layer next to an agent
 
 ## Status
 
-Spec-draft. The `lapis` binary is not in this tree yet. License is MIT.
+**Live** (terminal TUI + CLI + MCP). Rust, Ratatui, MIT. Builds on a remote box (`scripts/apiary-cargo.sh`); do not cargo on a laptop.
+
+Next: theme switcher / color customizer; GPUI desktop with an HTML **renderer** (not a browser) and an Obsidian-like visual knowledge graph canvas. See the v0.2 notes in the Atrium foundry vault.
 
 Inspired by [ZenNotes](https://github.com/ZenNotes/tui) and Obsidian. Notices: [CREDITS.md](CREDITS.md).

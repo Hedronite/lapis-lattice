@@ -195,8 +195,13 @@ pub struct DailyReport {
     pub reindex_error: Option<String>,
 }
 
-pub async fn daily(ctx: &Ctx, date: Option<&str>, no_reindex: bool) -> Result<DailyReport> {
-    let d = write::daily(&ctx.vault.root, date, ctx.cfg.operator.name.clone())?;
+pub async fn periodic(
+    ctx: &Ctx,
+    period: write::Period,
+    date: Option<&str>,
+    no_reindex: bool,
+) -> Result<DailyReport> {
+    let d = write::periodic(&ctx.vault.root, period, date, ctx.cfg.operator.name.clone())?;
     let (reindex, reindex_error) = if no_reindex || !d.created {
         (None, None)
     } else {
@@ -213,4 +218,27 @@ pub async fn daily(ctx: &Ctx, date: Option<&str>, no_reindex: bool) -> Result<Da
 pub fn trash(ctx: &Ctx, rel: &str) -> Result<write::Trashed> {
     let bucket = overlay::load(&ctx.vault.root)?.0.buckets.trash;
     write::trash(&ctx.vault.root, rel, &bucket)
+}
+
+pub fn trash_bucket(ctx: &Ctx) -> String {
+    overlay::load(&ctx.vault.root).map(|(o, _)| o.buckets.trash).unwrap_or_else(|_| ".lapis/trash".into())
+}
+
+/// Restore, then kick the index for the restored path.
+pub async fn restore(
+    ctx: &Ctx,
+    trashed_rel: &str,
+    no_reindex: bool,
+) -> Result<(write::Trashed, Option<Reindex>, Option<String>)> {
+    let bucket = trash_bucket(ctx);
+    let t = write::restore(&ctx.vault.root, trashed_rel, &bucket)?;
+    let (reindex, err) = if no_reindex {
+        (None, None)
+    } else {
+        match ctx.client()?.reindex(&t.path).await {
+            Ok(r) => (Some(r), None),
+            Err(e) => (None, Some(e.to_string())),
+        }
+    };
+    Ok((t, reindex, err))
 }

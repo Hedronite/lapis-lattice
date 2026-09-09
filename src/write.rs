@@ -15,6 +15,7 @@ use crate::error::{LapisError, Result};
 use crate::hal;
 use crate::notes;
 use crate::taxonomy;
+use crate::templates;
 
 pub const HAL_VERSION: &str = "1.0";
 pub const AUTHORITATIVE_MARKER: &str = "<!--hal:authoritative:yaml-->";
@@ -36,6 +37,11 @@ pub struct CreateOpts {
     pub operator: Option<String>,
     /// Default bucket when `path` is absent (overlay `buckets.inbox`).
     pub inbox: String,
+    /// `{{director}}` for mail-room templates (default: operator).
+    pub director: Option<String>,
+    /// Date the template placeholders refer to (`{{date}}`, `{{week}}`,
+    /// `{{month}}`); default today. `created`/`updated` are always today.
+    pub template_date: Option<jiff::civil::Date>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -130,21 +136,34 @@ pub fn to_yaml(m: &Map<String, Value>) -> Result<String> {
     Ok(s.strip_prefix("---\n").unwrap_or(&s).trim_end().to_string())
 }
 
-/// Load `.lapis/templates/<name>.md`, substitute placeholders, split HAL.
-fn load_template(root: &Path, name: &str, title: &str) -> Result<hal::Parsed> {
-    let clean = notes::clean_rel(name)?;
-    let file = root.join(".lapis/templates").join(format!("{clean}.md"));
-    let text = std::fs::read_to_string(&file)
-        .map_err(|_| LapisError::Usage(format!("template not found: .lapis/templates/{clean}.md")))?;
-    Ok(hal::parse(&substitute(&text, title)))
+/// Resolve a template (built-in or `.lapis/templates/<name>.md`), substitute
+/// placeholders, split HAL.
+fn load_template(
+    root: &Path,
+    name: &str,
+    title: &str,
+    director: Option<&str>,
+    date: Option<jiff::civil::Date>,
+) -> Result<hal::Parsed> {
+    let t = templates::find(root, name)?;
+    let vars = template_vars_at(title, director, date.unwrap_or_else(|| jiff::Zoned::now().date()));
+    Ok(hal::parse(&templates::substitute(&t.text, &vars)))
 }
 
-pub fn substitute(text: &str, title: &str) -> String {
-    let today = today();
-    text.replace("{{title}}", title)
-        .replace("{{date:YYYY-MM-DD}}", &today)
-        .replace("{{date}}", &today)
-        .replace("{{cursor}}", "")
+pub fn template_vars_at(title: &str, director: Option<&str>, day: jiff::civil::Date) -> templates::Vars {
+    templates::Vars {
+        title: title.to_string(),
+        date: day.strftime("%Y-%m-%d").to_string(),
+        week: iso_week(&day),
+        month: day.strftime("%Y-%m").to_string(),
+        director: director.unwrap_or("").to_string(),
+    }
+}
+
+/// ISO week label `YYYY-Www` for a date.
+pub fn iso_week(d: &jiff::civil::Date) -> String {
+    let w = d.iso_week_date();
+    format!("{}-W{:02}", w.year(), w.week())
 }
 
 fn is_canon(doc_type: &str) -> bool {
@@ -170,7 +189,8 @@ pub fn create(root: &Path, opts: &CreateOpts) -> Result<Written> {
 
     let mut body = opts.body.clone().unwrap_or_default();
     if let Some(name) = &opts.template {
-        let t = load_template(root, name, &opts.title)?;
+        let director = opts.director.clone().or_else(|| opts.operator.clone());
+        let t = load_template(root, name, &opts.title, director.as_deref(), opts.template_date)?;
         if !t.hal_valid {
             return Err(LapisError::Usage(format!("template {name}: invalid YAML frontmatter")));
         }
@@ -270,6 +290,8 @@ pub fn capture(root: &Path, text: &str, inbox: &str, operator: Option<String>) -
         body: Some(text.to_string()),
         operator,
         inbox: inbox.to_string(),
+        director: None,
+        template_date: None,
     };
     create(root, &opts)
 }
@@ -283,34 +305,112 @@ pub struct Periodic {
     pub date: String,
 }
 
-/// Open-or-create `Daily/YYYY-MM-DD.md` with a HAL create-set
-/// (`doc_type: daily-note`, `domain: vault-operation`, no authoritative marker).
-pub fn daily(root: &Path, date: Option<&str>, operator: Option<String>) -> Result<Periodic> {
-    let date = match date {
-        Some(d) => {
-            jiff::civil::Date::strptime("%Y-%m-%d", d)
-                .map_err(|_| LapisError::Usage(format!("date must be YYYY-MM-DD: {d}")))?;
-            d.to_string()
-        }
-        None => today(),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Period {
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+/// Open-or-create the periodic note for `date` (default today) using the
+/// matching built-in template: `Daily/YYYY-MM-DD.md`, `Weekly/YYYY-Www.md`,
+/// `Monthly/YYYY-MM.md`. HAL create-set, no authoritative marker.
+pub fn periodic(
+    root: &Path,
+    period: Period,
+    date: Option<&str>,
+    operator: Option<String>,
+) -> Result<Periodic> {
+    let day = match date {
+        Some(d) => jiff::civil::Date::strptime("%Y-%m-%d", d)
+            .map_err(|_| LapisError::Usage(format!("date must be YYYY-MM-DD: {d}")))?,
+        None => jiff::Zoned::now().date(),
     };
-    let rel = format!("Daily/{date}.md");
+    let (label, rel, template) = match period {
+        Period::Daily => {
+            let d = day.strftime("%Y-%m-%d").to_string();
+            (d.clone(), format!("Daily/{d}.md"), "builtin.daily")
+        }
+        Period::Weekly => {
+            let w = iso_week(&day);
+            (w.clone(), format!("Weekly/{w}.md"), "builtin.weekly")
+        }
+        Period::Monthly => {
+            let m = day.strftime("%Y-%m").to_string();
+            (m.clone(), format!("Monthly/{m}.md"), "builtin.monthly")
+        }
+    };
     if root.join(&rel).is_file() {
-        return Ok(Periodic { path: rel, created: false, date });
+        return Ok(Periodic { path: rel, created: false, date: label });
     }
     let opts = CreateOpts {
-        title: date.clone(),
-        path: Some(rel.clone()),
-        template: None,
-        doc_type: Some("daily-note".into()),
-        domain: Some("vault-operation".into()),
+        title: label.clone(),
+        path: Some(rel),
+        template: Some(template.into()),
+        doc_type: None,
+        domain: None,
         tags: vec![],
-        body: Some(format!("# {date}\n\n## Tasks\n\n- [ ] \n\n## Notes\n")),
+        body: None,
         operator,
         inbox: "inbox".into(),
+        director: None,
+        template_date: Some(day),
     };
     let w = create(root, &opts)?;
-    Ok(Periodic { path: w.path, created: true, date })
+    Ok(Periodic { path: w.path, created: true, date: label })
+}
+
+/// Move a trashed note back to its original vault-relative path.
+/// `trashed_rel` is the path under the trash bucket (as `trash` reported).
+pub fn restore(root: &Path, trashed_rel: &str, trash_bucket: &str) -> Result<Trashed> {
+    let (trashed_rel, abs) = notes::resolve(root, trashed_rel)?;
+    let bucket = trash_bucket.trim_matches('/');
+    let Some(orig) = trashed_rel.strip_prefix(&format!("{bucket}/")) else {
+        return Err(LapisError::Usage(format!("not in trash ({bucket}/): {trashed_rel}")));
+    };
+    // Strip a `.YYYYMMDD-HHMMSS` collision stamp if trash added one.
+    let orig = match orig.rsplit_once('.') {
+        Some((head, "md")) => match head.rsplit_once('.') {
+            Some((h, stamp))
+                if stamp.len() == 15 && stamp.chars().all(|c| c.is_ascii_digit() || c == '-') =>
+            {
+                format!("{h}.md")
+            }
+            _ => orig.to_string(),
+        },
+        _ => orig.to_string(),
+    };
+    let dest = root.join(&orig);
+    if dest.exists() {
+        return Err(LapisError::Usage(format!("cannot restore, target exists: {orig}")));
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(&abs, &dest)?;
+    Ok(Trashed { path: orig, trashed_to: trashed_rel })
+}
+
+/// Every note currently in the trash bucket (vault-relative, sorted).
+pub fn trash_list(root: &Path, trash_bucket: &str) -> Vec<String> {
+    let base = root.join(trash_bucket.trim_matches('/'));
+    let mut out = Vec::new();
+    let mut stack = vec![base.clone()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "md")
+                && let Ok(rel) = p.strip_prefix(root)
+            {
+                out.push(rel.to_string_lossy().to_string());
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -347,9 +447,47 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn weekly_monthly_and_restore() {
+        let v = vault();
+        let w = periodic(&v, Period::Weekly, Some("2026-09-09"), None).unwrap();
+        assert_eq!(w.path, "Weekly/2026-W37.md");
+        let n = notes::read(&v, &w.path).unwrap();
+        assert_eq!(n.hal["doc_type"], "weekly-note");
+        assert!(n.body.contains("# Week 2026-W37"));
+        let m = periodic(&v, Period::Monthly, Some("2026-09-09"), None).unwrap();
+        assert_eq!(m.path, "Monthly/2026-09.md");
+        assert_eq!(notes::read(&v, &m.path).unwrap().hal["doc_type"], "monthly-note");
+        // trash then restore round-trips the original path
+        let t = trash(&v, &m.path, ".lapis/trash").unwrap();
+        assert!(trash_list(&v, ".lapis/trash").contains(&t.trashed_to));
+        let r = restore(&v, &t.trashed_to, ".lapis/trash").unwrap();
+        assert_eq!(r.path, "Monthly/2026-09.md");
+        assert!(v.join("Monthly/2026-09.md").is_file());
+        assert!(trash_list(&v, ".lapis/trash").is_empty());
+        assert!(matches!(restore(&v, "Weekly/2026-W37.md", ".lapis/trash"), Err(LapisError::Usage(_))));
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn mail_drop_template_targets_director() {
+        let v = vault();
+        std::fs::create_dir_all(v.join("agents/mail_room/Marci")).unwrap();
+        let mut o = opts("Brandmark greenlit");
+        o.path = Some("agents/mail_room/Marci/".into());
+        o.template = Some("builtin.mail_drop".into());
+        o.director = Some("Marci".into());
+        let w = create(&v, &o).unwrap();
+        let n = notes::read(&v, &w.path).unwrap();
+        assert_eq!(n.hal["type"], "mail-drop");
+        assert_eq!(n.hal["to"], "Marci");
+        assert!(n.body.contains("**To:** Marci"));
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
     fn daily_creates_once_then_opens() {
         let v = vault();
-        let d = daily(&v, Some("2026-09-09"), Some("Halo".into())).unwrap();
+        let d = periodic(&v, Period::Daily, Some("2026-09-09"), Some("Halo".into())).unwrap();
         assert_eq!(d.path, "Daily/2026-09-09.md");
         assert!(d.created);
         let n = notes::read(&v, &d.path).unwrap();
@@ -357,10 +495,10 @@ mod tests {
         assert_eq!(n.hal["domain"], "vault-operation");
         assert_eq!(n.hal["name"], "2026-09-09");
         assert!(!std::fs::read_to_string(v.join(&d.path)).unwrap().contains(AUTHORITATIVE_MARKER));
-        let again = daily(&v, Some("2026-09-09"), None).unwrap();
+        let again = periodic(&v, Period::Daily, Some("2026-09-09"), None).unwrap();
         assert!(!again.created);
-        assert!(matches!(daily(&v, Some("nope"), None), Err(LapisError::Usage(_))));
-        assert_eq!(daily(&v, None, None).unwrap().date, today());
+        assert!(matches!(periodic(&v, Period::Daily, Some("nope"), None), Err(LapisError::Usage(_))));
+        assert_eq!(periodic(&v, Period::Daily, None, None).unwrap().date, today());
         let _ = std::fs::remove_dir_all(&v);
     }
 
@@ -473,7 +611,7 @@ mod tests {
         assert!(n.body.contains("# ADR: Use Rust"));
         assert!(n.body.contains(&format!("Date: {}", today())));
         assert!(!n.body.contains("{{"));
-        assert!(matches!(load_template(&v, "nope", "t"), Err(LapisError::Usage(_))));
+        assert!(matches!(load_template(&v, "nope", "t", None, None), Err(LapisError::Usage(_))));
         let _ = std::fs::remove_dir_all(&v);
     }
 

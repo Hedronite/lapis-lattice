@@ -27,8 +27,16 @@ pub struct Cli {
     #[command(flatten)]
     pub global: Global,
 
+    /// Omitted → the TUI, so a bare `lapis` opens the vault.
     #[command(subcommand)]
-    pub command: Command,
+    pub subcommand: Option<Command>,
+}
+
+impl Cli {
+    /// The subcommand to run; a bare `lapis` is `lapis tui`.
+    pub fn command(self) -> Command {
+        self.subcommand.unwrap_or(Command::Tui)
+    }
 }
 
 #[derive(Debug, Args, Clone)]
@@ -87,6 +95,21 @@ pub enum Command {
     /// Open or create today's `Daily/YYYY-MM-DD.md` (HAL create-set, doc_type daily-note).
     Daily(DailyArgs),
 
+    /// Open or create this week's `Weekly/YYYY-Www.md`.
+    Weekly(DailyArgs),
+
+    /// Open or create this month's `Monthly/YYYY-MM.md`.
+    Monthly(DailyArgs),
+
+    /// Restore a trashed note (path under `.lapis/trash/`) to where it came from.
+    Restore(TrashArgs),
+
+    /// Templates: built-ins (`builtin.daily`, `builtin.mail_drop`, …) and `.lapis/templates/`.
+    Template {
+        #[command(subcommand)]
+        command: TemplateCommand,
+    },
+
     /// Move a note to the trash bucket (`.lapis/trash/`), keeping its path for restore.
     Trash(TrashArgs),
 
@@ -113,6 +136,17 @@ pub struct TrashArgs {
     /// Vault-relative note path.
     #[arg(value_name = "PATH")]
     pub path: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TemplateCommand {
+    /// List available templates.
+    List,
+    /// Print a template's raw text.
+    Show {
+        #[arg(value_name = "ID")]
+        id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -182,6 +216,10 @@ pub struct CreateArgs {
     /// Body text (default: `# <title>`). Use `--stdin` to read it from stdin.
     #[arg(long, value_name = "TEXT", conflicts_with = "stdin")]
     pub body: Option<String>,
+
+    /// `{{director}}` for mail-room templates (default: config operator).
+    #[arg(long, value_name = "NAME")]
+    pub director: Option<String>,
 
     /// Read the body from stdin.
     #[arg(long)]
@@ -346,7 +384,7 @@ mod tests {
         let c = Cli::try_parse_from(["lapis", "search", "--json", "Hedronite", "--vault", "/tmp"]).unwrap();
         assert!(c.global.json);
         assert_eq!(c.global.vault.as_deref(), Some("/tmp"));
-        match c.command {
+        match c.command() {
             Command::Search(s) => {
                 assert_eq!(s.query_text(), "Hedronite");
                 assert_eq!(s.limit, 10);
@@ -357,7 +395,7 @@ mod tests {
         let c =
             Cli::try_parse_from(["lapis", "--json", "search", "two", "words", "--mode", "bm25", "-n", "3"])
                 .unwrap();
-        match c.command {
+        match c.command() {
             Command::Search(s) => {
                 assert_eq!(s.query_text(), "two words");
                 assert_eq!(s.mode, Mode::Bm25);
@@ -370,10 +408,10 @@ mod tests {
     #[test]
     fn parses_vault_info_and_read() {
         let c = Cli::try_parse_from(["lapis", "vault", "info", "--json"]).unwrap();
-        assert!(matches!(c.command, Command::Vault { command: VaultCommand::Info }));
         assert!(c.global.json);
+        assert!(matches!(c.command(), Command::Vault { command: VaultCommand::Info }));
         let c = Cli::try_parse_from(["lapis", "read", "foundry/lapis/SPEC.md"]).unwrap();
-        match c.command {
+        match c.command() {
             Command::Read(r) => assert_eq!(r.path, "foundry/lapis/SPEC.md"),
             _ => panic!("expected read"),
         }
@@ -384,7 +422,7 @@ mod tests {
         let c =
             Cli::try_parse_from(["lapis", "list", "--json", "foundry/lapis/", "--status", "live", "-n", "5"])
                 .unwrap();
-        match c.command {
+        match c.command() {
             Command::List(l) => {
                 assert_eq!(l.prefix.as_deref(), Some("foundry/lapis/"));
                 assert_eq!(l.status.as_deref(), Some("live"));
@@ -411,7 +449,7 @@ mod tests {
             "b",
         ])
         .unwrap();
-        match c.command {
+        match c.command() {
             Command::Create(a) => {
                 assert_eq!(a.title, "ship-smoke");
                 assert_eq!(a.tags, ["a", "b"]);
@@ -421,26 +459,33 @@ mod tests {
         }
         assert!(Cli::try_parse_from(["lapis", "create"]).is_err());
         let c = Cli::try_parse_from(["lapis", "append", "a.md", "hello"]).unwrap();
-        assert!(matches!(c.command, Command::Append(a) if a.text.as_deref() == Some("hello")));
+        assert!(matches!(c.command(), Command::Append(a) if a.text.as_deref() == Some("hello")));
         let c = Cli::try_parse_from(["lapis", "capture", "two", "words"]).unwrap();
-        assert!(matches!(c.command, Command::Capture(a) if a.text == ["two", "words"]));
+        assert!(matches!(c.command(), Command::Capture(a) if a.text == ["two", "words"]));
     }
 
     #[test]
     fn parses_task_and_mcp() {
         let c = Cli::try_parse_from(["lapis", "task", "list", "--status", "open", "--due", "today"]).unwrap();
         assert!(
-            matches!(c.command, Command::Task { command: TaskCommand::List(a) } if a.status.as_deref() == Some("open"))
+            matches!(c.command(), Command::Task { command: TaskCommand::List(a) } if a.status.as_deref() == Some("open"))
         );
         let c = Cli::try_parse_from(["lapis", "task", "toggle", "a.md#3"]).unwrap();
-        assert!(matches!(c.command, Command::Task { command: TaskCommand::Toggle(a) } if a.id == "a.md#3"));
-        assert!(matches!(Cli::try_parse_from(["lapis", "mcp"]).unwrap().command, Command::Mcp));
-        assert!(matches!(Cli::try_parse_from(["lapis", "tui"]).unwrap().command, Command::Tui));
+        assert!(matches!(c.command(), Command::Task { command: TaskCommand::Toggle(a) } if a.id == "a.md#3"));
+        assert!(matches!(Cli::try_parse_from(["lapis", "mcp"]).unwrap().command(), Command::Mcp));
+        assert!(matches!(Cli::try_parse_from(["lapis", "tui"]).unwrap().command(), Command::Tui));
+        // bare `lapis` (and bare `lapis --vault …`) default to the TUI
+        let c = Cli::try_parse_from(["lapis"]).unwrap();
+        assert!(c.subcommand.is_none());
+        assert!(matches!(c.command(), Command::Tui));
+        let c = Cli::try_parse_from(["lapis", "--vault", "/v"]).unwrap();
+        assert_eq!(c.global.vault.as_deref(), Some("/v"));
+        assert!(matches!(c.command(), Command::Tui));
         assert!(
-            matches!(Cli::try_parse_from(["lapis", "daily", "--date", "2026-09-09"]).unwrap().command, Command::Daily(d) if d.date.as_deref() == Some("2026-09-09"))
+            matches!(Cli::try_parse_from(["lapis", "daily", "--date", "2026-09-09"]).unwrap().command(), Command::Daily(d) if d.date.as_deref() == Some("2026-09-09"))
         );
         assert!(
-            matches!(Cli::try_parse_from(["lapis", "trash", "a/b.md"]).unwrap().command, Command::Trash(t) if t.path == "a/b.md")
+            matches!(Cli::try_parse_from(["lapis", "trash", "a/b.md"]).unwrap().command(), Command::Trash(t) if t.path == "a/b.md")
         );
     }
 
