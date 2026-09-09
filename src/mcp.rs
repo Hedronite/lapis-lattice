@@ -236,6 +236,7 @@ impl LapisServer {
             body: a.body,
             operator: self.ctx.cfg.operator.name.clone(),
             inbox: self.ctx.inbox().map_err(fail)?,
+            director: None,
         };
         let w = write::create(&self.ctx.vault.root, &opts).map_err(fail)?;
         ok(&ops::kick(&self.ctx, w, false).await.map_err(fail)?)

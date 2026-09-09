@@ -87,6 +87,21 @@ pub enum Command {
     /// Open or create today's `Daily/YYYY-MM-DD.md` (HAL create-set, doc_type daily-note).
     Daily(DailyArgs),
 
+    /// Open or create this week's `Weekly/YYYY-Www.md`.
+    Weekly(DailyArgs),
+
+    /// Open or create this month's `Monthly/YYYY-MM.md`.
+    Monthly(DailyArgs),
+
+    /// Restore a trashed note (path under `.lapis/trash/`) to where it came from.
+    Restore(TrashArgs),
+
+    /// Templates: built-ins (`builtin.daily`, `builtin.mail_drop`, …) and `.lapis/templates/`.
+    Template {
+        #[command(subcommand)]
+        command: TemplateCommand,
+    },
+
     /// Move a note to the trash bucket (`.lapis/trash/`), keeping its path for restore.
     Trash(TrashArgs),
 
@@ -113,6 +128,17 @@ pub struct TrashArgs {
     /// Vault-relative note path.
     #[arg(value_name = "PATH")]
     pub path: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TemplateCommand {
+    /// List available templates.
+    List,
+    /// Print a template's raw text.
+    Show {
+        #[arg(value_name = "ID")]
+        id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -182,6 +208,10 @@ pub struct CreateArgs {
     /// Body text (default: `# <title>`). Use `--stdin` to read it from stdin.
     #[arg(long, value_name = "TEXT", conflicts_with = "stdin")]
     pub body: Option<String>,
+
+    /// `{{director}}` for mail-room templates (default: config operator).
+    #[arg(long, value_name = "NAME")]
+    pub director: Option<String>,
 
     /// Read the body from stdin.
     #[arg(long)]

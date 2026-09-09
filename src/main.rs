@@ -15,6 +15,7 @@ mod ops;
 mod overlay;
 mod tasks;
 mod taxonomy;
+mod templates;
 mod tui;
 mod vault;
 mod write;
@@ -28,7 +29,8 @@ use serde_json::json;
 
 use cli::{
     AppendArgs, CaptureArgs, Cli, Command, CreateArgs, DailyArgs, ListArgs, NeighborsArgs, ReadArgs,
-    ReindexArgs, SearchArgs, TaskCommand, TaskListArgs, TaskToggleArgs, TrashArgs, VaultCommand,
+    ReindexArgs, SearchArgs, TaskCommand, TaskListArgs, TaskToggleArgs, TemplateCommand, TrashArgs,
+    VaultCommand,
 };
 use error::{LapisError, Result};
 use lattice::{ListParams, SearchParams};
@@ -92,8 +94,12 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Task { command: TaskCommand::List(args) } => task_list(&ctx, args),
         Command::Task { command: TaskCommand::Toggle(args) } => task_toggle(&ctx, args).await,
         Command::Mcp => mcp::serve(ctx).await,
-        Command::Daily(args) => daily(&ctx, args).await,
+        Command::Daily(args) => periodic(&ctx, write::Period::Daily, args).await,
+        Command::Weekly(args) => periodic(&ctx, write::Period::Weekly, args).await,
+        Command::Monthly(args) => periodic(&ctx, write::Period::Monthly, args).await,
         Command::Trash(args) => trash(&ctx, args),
+        Command::Restore(args) => restore(&ctx, args).await,
+        Command::Template { command } => template(&ctx, command),
         Command::Tui => tui::run(ctx).await,
     }
 }
@@ -309,6 +315,7 @@ async fn create(ctx: &Ctx, args: CreateArgs) -> Result<()> {
         body,
         operator: ctx.cfg.operator.name.clone(),
         inbox: ctx.inbox()?,
+        director: args.director.clone(),
     };
     let w = write::create(&ctx.vault.root, &opts)?;
     print_write(ctx, &ops::kick(ctx, w, args.no_reindex).await?)
@@ -335,8 +342,8 @@ async fn capture(ctx: &Ctx, args: CaptureArgs) -> Result<()> {
 
 // ------------------------------------------------------------ daily / trash
 
-async fn daily(ctx: &Ctx, args: DailyArgs) -> Result<()> {
-    let r = ops::daily(ctx, args.date.as_deref(), args.no_reindex).await?;
+async fn periodic(ctx: &Ctx, period: write::Period, args: DailyArgs) -> Result<()> {
+    let r = ops::periodic(ctx, period, args.date.as_deref(), args.no_reindex).await?;
     if ctx.json {
         emit_json(&r)?;
     } else {
@@ -346,6 +353,51 @@ async fn daily(ctx: &Ctx, args: DailyArgs) -> Result<()> {
         eprintln!("lapis: created, but reindex failed: {e}");
     }
     Ok(())
+}
+
+async fn restore(ctx: &Ctx, args: TrashArgs) -> Result<()> {
+    let (t, reindex, err) = ops::restore(ctx, &args.path, false).await?;
+    if ctx.json {
+        emit_json(
+            &json!({ "path": t.path, "restoredFrom": t.trashed_to, "reindex": reindex, "reindexError": err }),
+        )?;
+    } else {
+        println!("{}  <-  {}", t.path, t.trashed_to);
+    }
+    if let Some(e) = err {
+        eprintln!("lapis: restored, but reindex failed: {e}");
+    }
+    Ok(())
+}
+
+fn template(ctx: &Ctx, cmd: TemplateCommand) -> Result<()> {
+    match cmd {
+        TemplateCommand::List => {
+            let all = templates::list(&ctx.vault.root);
+            if ctx.json {
+                return emit_json(&all);
+            }
+            for t in all {
+                println!(
+                    "{:<24} {}{}",
+                    t.id,
+                    t.name,
+                    if t.target.is_empty() { String::new() } else { format!("  ->  {}", t.target) }
+                );
+            }
+            Ok(())
+        }
+        TemplateCommand::Show { id } => {
+            let t = templates::find(&ctx.vault.root, &id)?;
+            if ctx.json {
+                return emit_json(
+                    &json!({ "id": t.id, "name": t.name, "target": t.target, "builtin": t.builtin, "text": t.text }),
+                );
+            }
+            print!("{}", t.text);
+            Ok(())
+        }
+    }
 }
 
 fn trash(ctx: &Ctx, args: TrashArgs) -> Result<()> {
