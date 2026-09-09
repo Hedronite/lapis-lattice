@@ -17,6 +17,7 @@ crossterm = "0.29"
 gray_matter = "0.3"
 jiff = "0.2"
 notify = "8"
+pdf-extract = "0.12"
 pulldown-cmark = { version = "0.13", default-features = false }
 ratatui = "0.30"
 ratatui-textarea = "0.9"

@@ -108,6 +108,9 @@ pub struct Note {
     pub size: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<u64>,
+    /// PDF only: page count of the extracted text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pages: Option<usize>,
 }
 
 pub fn read(root: &Path, rel: &str) -> Result<Note> {
@@ -118,14 +121,24 @@ pub fn read(root: &Path, rel: &str) -> Result<Note> {
     let updated_at =
         meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64);
 
-    match kind {
-        Kind::Pdf => {
-            // L7 wires pdf-extract / lattice chunks. Until then be explicit.
-            return Err(LapisError::Usage(format!(
-                "{path}: PDF read-through lands in a later slice; search already covers kind=pdf"
-            )));
-        }
-        Kind::Markdown | Kind::Html | Kind::Source => {}
+    if kind == Kind::Pdf {
+        // Read-through with pdf-extract (pure Rust, MIT). The lattice's
+        // tome_indexer.py owns PDF *indexing*; this is the on-demand text
+        // for `read` / MCP read_note, never a second crawler.
+        let (body, pages) = pdf_text(&abs).map_err(|e| LapisError::Usage(format!("{path}: pdf: {e}")))?;
+        return Ok(Note {
+            title: stem_of(&path),
+            path,
+            kind,
+            hal: Map::new(),
+            hal_valid: true,
+            hal_error: None,
+            tags: Vec::new(),
+            body,
+            size,
+            updated_at,
+            pages: Some(pages),
+        });
     }
 
     let bytes = std::fs::read(&abs)?;
@@ -143,7 +156,16 @@ pub fn read(root: &Path, rel: &str) -> Result<Note> {
         .unwrap_or_else(|| stem_of(&path));
     let tags = hal::tags_from_hal(&hal);
 
-    Ok(Note { path, kind, title, hal, hal_valid, hal_error, tags, body, size, updated_at })
+    Ok(Note { path, kind, title, hal, hal_valid, hal_error, tags, body, size, updated_at, pages: None })
+}
+
+/// Extracted text and page count. Pages are joined with a blank line; runs
+/// of whitespace inside a page are left alone so layout stays greppable.
+pub fn pdf_text(abs: &Path) -> std::result::Result<(String, usize), pdf_extract::OutputError> {
+    let pages = pdf_extract::extract_text_by_pages(abs)?;
+    let n = pages.len();
+    let body = pages.iter().map(|p| p.trim_end()).collect::<Vec<_>>().join("\n\n");
+    Ok((body.trim().to_string(), n))
 }
 
 /// First H1 text in a Markdown body, via pulldown-cmark's event stream.
@@ -258,11 +280,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(&v);
     }
 
+    /// A minimal single-page PDF with a Helvetica text object and a correct xref.
+    fn tiny_pdf(text: &str) -> Vec<u8> {
+        let content = format!("BT /F1 24 Tf 72 700 Td ({text}) Tj ET");
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_string(),
+            format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        ];
+        let mut out = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (i, o) in objs.iter().enumerate() {
+            offsets.push(out.len());
+            out.push_str(&format!("{} 0 obj\n{o}\nendobj\n", i + 1));
+        }
+        let xref = out.len();
+        out.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1));
+        for off in offsets {
+            out.push_str(&format!("{off:010} 00000 n \n"));
+        }
+        out.push_str(&format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objs.len() + 1
+        ));
+        out.into_bytes()
+    }
+
     #[test]
-    fn read_pdf_is_deferred_not_crash() {
+    fn read_pdf_extracts_text() {
+        let v = tmp_vault();
+        std::fs::write(v.join("foundry/lapis/real.pdf"), tiny_pdf("Hello Lapis")).unwrap();
+        let n = read(&v, "foundry/lapis/real.pdf").unwrap();
+        assert_eq!(n.kind, Kind::Pdf);
+        assert_eq!(n.title, "real");
+        assert_eq!(n.pages, Some(1));
+        assert!(n.hal_valid && n.hal.is_empty());
+        assert!(n.body.contains("Hello Lapis"), "body was: {:?}", n.body);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn read_garbage_pdf_is_a_clean_error() {
         let v = tmp_vault();
         let e = read(&v, "foundry/lapis/tome.pdf").unwrap_err();
         assert_eq!(e.exit_code(), 1);
+        assert!(e.to_string().contains("pdf"));
         let _ = std::fs::remove_dir_all(&v);
     }
 

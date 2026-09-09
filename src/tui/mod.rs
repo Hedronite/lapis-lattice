@@ -286,6 +286,10 @@ impl App {
 
     /// Frontmatter + marker are kept verbatim; only the body is edited.
     fn save(&mut self) {
+        if self.open.as_ref().is_some_and(|o| notes::kind_of(&o.rel) == notes::Kind::Pdf) {
+            self.status = "PDF text is read-only".into();
+            return;
+        }
         let Some(o) = self.open.as_mut() else { return };
         let abs = self.ctx.vault.root.join(&o.rel);
         let current = std::fs::read_to_string(&abs).unwrap_or_default();
