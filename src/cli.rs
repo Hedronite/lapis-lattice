@@ -84,8 +84,35 @@ pub enum Command {
         command: TaskCommand,
     },
 
+    /// Open or create today's `Daily/YYYY-MM-DD.md` (HAL create-set, doc_type daily-note).
+    Daily(DailyArgs),
+
+    /// Move a note to the trash bucket (`.lapis/trash/`), keeping its path for restore.
+    Trash(TrashArgs),
+
+    /// Terminal UI: sidebar tree, editor, lattice search palette (Ctrl+P), HAL inspector.
+    Tui,
+
     /// MCP server over stdio (tools: vault_info, search, read_note, list_notes, neighbors, create_note, append_to_note, list_tasks, toggle_task).
     Mcp,
+}
+
+#[derive(Debug, Args)]
+pub struct DailyArgs {
+    /// Date `YYYY-MM-DD` (default today).
+    #[arg(long, value_name = "DATE")]
+    pub date: Option<String>,
+
+    /// Skip the lattice reindex kick after creating.
+    #[arg(long)]
+    pub no_reindex: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TrashArgs {
+    /// Vault-relative note path.
+    #[arg(value_name = "PATH")]
+    pub path: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -408,6 +435,13 @@ mod tests {
         let c = Cli::try_parse_from(["lapis", "task", "toggle", "a.md#3"]).unwrap();
         assert!(matches!(c.command, Command::Task { command: TaskCommand::Toggle(a) } if a.id == "a.md#3"));
         assert!(matches!(Cli::try_parse_from(["lapis", "mcp"]).unwrap().command, Command::Mcp));
+        assert!(matches!(Cli::try_parse_from(["lapis", "tui"]).unwrap().command, Command::Tui));
+        assert!(
+            matches!(Cli::try_parse_from(["lapis", "daily", "--date", "2026-09-09"]).unwrap().command, Command::Daily(d) if d.date.as_deref() == Some("2026-09-09"))
+        );
+        assert!(
+            matches!(Cli::try_parse_from(["lapis", "trash", "a/b.md"]).unwrap().command, Command::Trash(t) if t.path == "a/b.md")
+        );
     }
 
     #[test]

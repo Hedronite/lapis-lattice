@@ -274,10 +274,112 @@ pub fn capture(root: &Path, text: &str, inbox: &str, operator: Option<String>) -
     create(root, &opts)
 }
 
+/// Result of `daily`: the note path and whether this call created it.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Periodic {
+    pub path: String,
+    pub created: bool,
+    pub date: String,
+}
+
+/// Open-or-create `Daily/YYYY-MM-DD.md` with a HAL create-set
+/// (`doc_type: daily-note`, `domain: vault-operation`, no authoritative marker).
+pub fn daily(root: &Path, date: Option<&str>, operator: Option<String>) -> Result<Periodic> {
+    let date = match date {
+        Some(d) => {
+            jiff::civil::Date::strptime("%Y-%m-%d", d)
+                .map_err(|_| LapisError::Usage(format!("date must be YYYY-MM-DD: {d}")))?;
+            d.to_string()
+        }
+        None => today(),
+    };
+    let rel = format!("Daily/{date}.md");
+    if root.join(&rel).is_file() {
+        return Ok(Periodic { path: rel, created: false, date });
+    }
+    let opts = CreateOpts {
+        title: date.clone(),
+        path: Some(rel.clone()),
+        template: None,
+        doc_type: Some("daily-note".into()),
+        domain: Some("vault-operation".into()),
+        tags: vec![],
+        body: Some(format!("# {date}\n\n## Tasks\n\n- [ ] \n\n## Notes\n")),
+        operator,
+        inbox: "inbox".into(),
+    };
+    let w = create(root, &opts)?;
+    Ok(Periodic { path: w.path, created: true, date })
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Trashed {
+    pub path: String,
+    pub trashed_to: String,
+}
+
+/// Move a note into the trash bucket (default `.lapis/trash/`), keeping its
+/// vault-relative path underneath so it can be restored. Never deletes.
+pub fn trash(root: &Path, rel: &str, trash_bucket: &str) -> Result<Trashed> {
+    let (rel, abs) = notes::resolve(root, rel)?;
+    let bucket = trash_bucket.trim_matches('/');
+    if rel.starts_with(&format!("{bucket}/")) {
+        return Err(LapisError::Usage(format!("already in trash: {rel}")));
+    }
+    let mut dest_rel = format!("{bucket}/{rel}");
+    if root.join(&dest_rel).exists() {
+        let stamp = jiff::Zoned::now().strftime("%Y%m%d-%H%M%S").to_string();
+        dest_rel = format!("{bucket}/{}.{stamp}.md", rel.trim_end_matches(".md"));
+    }
+    let dest = root.join(&dest_rel);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(&abs, &dest)?;
+    Ok(Trashed { path: rel, trashed_to: dest_rel })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn daily_creates_once_then_opens() {
+        let v = vault();
+        let d = daily(&v, Some("2026-09-09"), Some("Halo".into())).unwrap();
+        assert_eq!(d.path, "Daily/2026-09-09.md");
+        assert!(d.created);
+        let n = notes::read(&v, &d.path).unwrap();
+        assert_eq!(n.hal["doc_type"], "daily-note");
+        assert_eq!(n.hal["domain"], "vault-operation");
+        assert_eq!(n.hal["name"], "2026-09-09");
+        assert!(!std::fs::read_to_string(v.join(&d.path)).unwrap().contains(AUTHORITATIVE_MARKER));
+        let again = daily(&v, Some("2026-09-09"), None).unwrap();
+        assert!(!again.created);
+        assert!(matches!(daily(&v, Some("nope"), None), Err(LapisError::Usage(_))));
+        assert_eq!(daily(&v, None, None).unwrap().date, today());
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn trash_moves_under_bucket_and_never_overwrites() {
+        let v = vault();
+        std::fs::write(v.join("foundry/lapis/x.md"), "one").unwrap();
+        let t = trash(&v, "foundry/lapis/x.md", ".lapis/trash").unwrap();
+        assert_eq!(t.trashed_to, ".lapis/trash/foundry/lapis/x.md");
+        assert!(!v.join("foundry/lapis/x.md").exists());
+        assert_eq!(std::fs::read_to_string(v.join(&t.trashed_to)).unwrap(), "one");
+        std::fs::write(v.join("foundry/lapis/x.md"), "two").unwrap();
+        let t2 = trash(&v, "foundry/lapis/x.md", ".lapis/trash").unwrap();
+        assert_ne!(t2.trashed_to, t.trashed_to);
+        assert!(t2.trashed_to.starts_with(".lapis/trash/foundry/lapis/x."));
+        assert_eq!(trash(&v, "foundry/lapis/missing.md", ".lapis/trash").unwrap_err().exit_code(), 3);
+        assert!(matches!(trash(&v, &t.trashed_to, ".lapis/trash"), Err(LapisError::Usage(_))));
+        let _ = std::fs::remove_dir_all(&v);
+    }
 
     fn vault() -> PathBuf {
         let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();

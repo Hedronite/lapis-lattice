@@ -360,7 +360,8 @@ impl Filter {
     }
 }
 
-fn excluded(rel: &str, is_dir: bool, name: &str) -> bool {
+/// True when the scan set skips this entry (also used by the TUI sidebar and watcher).
+pub fn excluded(rel: &str, is_dir: bool, name: &str) -> bool {
     if name.starts_with('.') || EXCLUDE_DIRS.contains(&name) {
         return true;
     }

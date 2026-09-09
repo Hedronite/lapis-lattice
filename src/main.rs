@@ -15,6 +15,7 @@ mod ops;
 mod overlay;
 mod tasks;
 mod taxonomy;
+mod tui;
 mod vault;
 mod write;
 
@@ -26,14 +27,15 @@ use serde::Serialize;
 use serde_json::json;
 
 use cli::{
-    AppendArgs, CaptureArgs, Cli, Command, CreateArgs, ListArgs, NeighborsArgs, ReadArgs, ReindexArgs,
-    SearchArgs, TaskCommand, TaskListArgs, TaskToggleArgs, VaultCommand,
+    AppendArgs, CaptureArgs, Cli, Command, CreateArgs, DailyArgs, ListArgs, NeighborsArgs, ReadArgs,
+    ReindexArgs, SearchArgs, TaskCommand, TaskListArgs, TaskToggleArgs, TrashArgs, VaultCommand,
 };
 use error::{LapisError, Result};
 use lattice::{ListParams, SearchParams};
 use ops::Ctx;
 
-#[tokio::main(flavor = "current_thread")]
+// Multi-thread so the TUI can block its thread while lattice requests run.
+#[tokio::main]
 async fn main() -> ExitCode {
     // clap exits 2 on usage errors by default; SPEC reserves 2 for "lattice
     // down", so route usage errors through our own code (1).
@@ -90,6 +92,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Task { command: TaskCommand::List(args) } => task_list(&ctx, args),
         Command::Task { command: TaskCommand::Toggle(args) } => task_toggle(&ctx, args).await,
         Command::Mcp => mcp::serve(ctx).await,
+        Command::Daily(args) => daily(&ctx, args).await,
+        Command::Trash(args) => trash(&ctx, args),
+        Command::Tui => tui::run(ctx).await,
     }
 }
 
@@ -326,6 +331,30 @@ async fn capture(ctx: &Ctx, args: CaptureArgs) -> Result<()> {
     let inbox = ctx.inbox()?;
     let w = write::capture(&ctx.vault.root, &text, &inbox, ctx.cfg.operator.name.clone())?;
     print_write(ctx, &ops::kick(ctx, w, args.no_reindex).await?)
+}
+
+// ------------------------------------------------------------ daily / trash
+
+async fn daily(ctx: &Ctx, args: DailyArgs) -> Result<()> {
+    let r = ops::daily(ctx, args.date.as_deref(), args.no_reindex).await?;
+    if ctx.json {
+        emit_json(&r)?;
+    } else {
+        println!("{}{}", r.daily.path, if r.daily.created { "  (created)" } else { "" });
+    }
+    if let Some(e) = &r.reindex_error {
+        eprintln!("lapis: created, but reindex failed: {e}");
+    }
+    Ok(())
+}
+
+fn trash(ctx: &Ctx, args: TrashArgs) -> Result<()> {
+    let t = ops::trash(ctx, &args.path)?;
+    if ctx.json {
+        return emit_json(&t);
+    }
+    println!("{}  ->  {}", t.path, t.trashed_to);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------- tasks

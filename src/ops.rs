@@ -184,3 +184,33 @@ pub async fn toggle_task(ctx: &Ctx, id: &str, no_reindex: bool) -> Result<Toggle
     };
     Ok(ToggleReport { task, reindex, reindex_error })
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyReport {
+    #[serde(flatten)]
+    pub daily: write::Periodic,
+    pub reindex: Option<Reindex>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reindex_error: Option<String>,
+}
+
+pub async fn daily(ctx: &Ctx, date: Option<&str>, no_reindex: bool) -> Result<DailyReport> {
+    let d = write::daily(&ctx.vault.root, date, ctx.cfg.operator.name.clone())?;
+    let (reindex, reindex_error) = if no_reindex || !d.created {
+        (None, None)
+    } else {
+        match ctx.client()?.reindex(&d.path).await {
+            Ok(r) => (Some(r), None),
+            Err(e) => (None, Some(e.to_string())),
+        }
+    };
+    Ok(DailyReport { daily: d, reindex, reindex_error })
+}
+
+/// Trash keeps the file; the lattice row goes stale until reconcile (the
+/// kick route only indexes existing walked paths, and trash is unwalked).
+pub fn trash(ctx: &Ctx, rel: &str) -> Result<write::Trashed> {
+    let bucket = overlay::load(&ctx.vault.root)?.0.buckets.trash;
+    write::trash(&ctx.vault.root, rel, &bucket)
+}
