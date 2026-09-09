@@ -81,7 +81,7 @@ async fn run(cli: Cli) -> Result<()> {
         .unwrap_or_else(|| cfg.lattice.url.clone());
     let ctx = Ctx { json: cli.global.json, vault, cfg, lattice_url };
 
-    match cli.command {
+    match cli.command() {
         Command::Vault { command: VaultCommand::Info } => vault_info(&ctx).await,
         Command::Search(args) => search(&ctx, args).await,
         Command::Read(args) => read(&ctx, args),
