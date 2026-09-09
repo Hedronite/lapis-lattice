@@ -125,6 +125,9 @@ pub enum Command {
     /// Terminal UI: sidebar tree, editor, lattice search palette (Ctrl+P), HAL inspector.
     Tui,
 
+    /// Desktop shell (GPUI). Needs a build with `--features desktop`; `--check` reports what is available.
+    Desktop(DesktopArgs),
+
     /// MCP server over stdio (tools: vault_info, search, read_note, list_notes, neighbors, create_note, append_to_note, list_tasks, toggle_task).
     Mcp,
 }
@@ -449,6 +452,17 @@ pub struct ReadArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct DesktopArgs {
+    /// Note to open / seed the graph canvas with.
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<String>,
+
+    /// Report whether the GPUI shell and the GitNexus sidecar are available, then exit.
+    #[arg(long)]
+    pub check: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct ResolveArgs {
     /// `[[Name]]`, `[[Name|alias#anchor]]`, or a raw link target such as a lattice `dst_raw`.
     #[arg(value_name = "LINK")]
@@ -637,6 +651,21 @@ mod tests {
         let Command::Neighbors(n) = c.command() else { panic!("neighbors") };
         assert_eq!(n.direction.as_deref(), Some("in"));
         assert!(n.dangling);
+    }
+
+    /// N23: `lapis desktop` parses with and without a build that has GPUI.
+    #[test]
+    fn desktop_subcommand() {
+        let Command::Desktop(d) = Cli::try_parse_from(["lapis", "desktop"]).unwrap().command() else {
+            panic!()
+        };
+        assert!(d.path.is_none() && !d.check);
+        let Command::Desktop(d) =
+            Cli::try_parse_from(["lapis", "desktop", "--check", "--path", "a.md"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert!(d.check && d.path.as_deref() == Some("a.md"));
     }
 
     /// N17–N19: hop, analytics and tree-retrieve surfaces.

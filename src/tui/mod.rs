@@ -308,11 +308,16 @@ impl App {
     fn scan_tasks(&mut self) {
         let root = self.root();
         let tx = self.tx.clone();
+        let filter = tasks::Filter {
+            prefix: self.tasks.as_ref().and_then(|t| t.scope.clone()),
+            exclude: self.ctx.cfg.agent.task_exclude.clone(),
+            ..Default::default()
+        };
         if let Some(t) = self.tasks.as_mut() {
             t.loading = true;
         }
         tokio::task::spawn_blocking(move || {
-            let list = tasks::list(&root, &tasks::Filter::default()).unwrap_or_default();
+            let list = tasks::list(&root, &filter).unwrap_or_default();
             let _ = tx.send(Msg::Tasks(list));
         });
     }
@@ -386,7 +391,7 @@ impl App {
                 ta.set_cursor_line_style(Style::default());
                 ta.set_line_number_style(theme::dim());
                 ta.set_selection_style(theme::selected());
-                ta.set_search_style(Style::default().bg(theme::GOLD).fg(theme::BLUE_DEEP));
+                ta.set_search_style(Style::default().bg(theme::gold()).fg(theme::BLUE_DEEP));
                 let readonly = n.kind != notes::Kind::Markdown;
                 let mut tab = Tab {
                     rel: n.path.clone(),
@@ -602,6 +607,11 @@ impl App {
             }
             Cmd::Hal => self.show_hal = !self.show_hal,
             Cmd::Tags => self.open_tags(),
+            Cmd::Theme => {
+                let next = theme::current().next();
+                theme::install(next);
+                self.set_status(format!("theme: {}", next.name));
+            }
             Cmd::Buffers => {
                 if !self.tabs.is_empty() {
                     self.overlay = Some(Overlay::Buffers(self.active));
@@ -642,7 +652,9 @@ impl App {
         match self.tasks.as_mut() {
             Some(t) => t.view = view,
             None => {
-                self.tasks = Some(TasksView::new(view));
+                let mut tv = TasksView::new(view);
+                tv.full = self.ctx.cfg.agent.task_unscoped_full();
+                self.tasks = Some(tv);
                 self.scan_tasks();
             }
         }
@@ -1404,6 +1416,20 @@ impl App {
             KeyCode::Char('2') => tv.view = View::Kanban,
             KeyCode::Char('3') => tv.view = View::Calendar,
             KeyCode::Char('r') => self.scan_tasks(),
+            KeyCode::Char('f') => {
+                tv.full = !tv.full;
+                tv.sel = 0;
+            }
+            KeyCode::Char('u') => {
+                tv.unscope();
+                self.scan_tasks();
+            }
+            KeyCode::Enter if tv.is_summary() => {
+                let scoped = tv.scope_to_selected();
+                if scoped {
+                    self.scan_tasks();
+                }
+            }
             KeyCode::Char('x') => {
                 if let Some(id) = tv.current().map(|t| t.id.clone()) {
                     self.toggle_task(&id);
@@ -1602,9 +1628,9 @@ impl App {
                 let style = if e.is_dir {
                     Style::default().fg(theme::REGENT)
                 } else if open.contains(e.rel.as_str()) {
-                    Style::default().fg(theme::GOLD)
+                    Style::default().fg(theme::gold())
                 } else {
-                    Style::default().fg(theme::CREAM)
+                    Style::default().fg(theme::cream())
                 };
                 ListItem::new(Line::from(Span::styled(format!("{pad}{glyph}{}", e.name), style)))
             })
@@ -1733,12 +1759,12 @@ impl App {
         };
         spans.push(Span::styled(format!(" {mode} "), theme::mode(&mode)));
         if let Some(p) = prompt {
-            spans.push(Span::styled(format!(" {}{}▏", p.kind, p.text), Style::default().fg(theme::GOLD)));
+            spans.push(Span::styled(format!(" {}{}▏", p.kind, p.text), Style::default().fg(theme::gold())));
         } else {
             if let Some(t) = self.tab() {
-                spans.push(Span::styled(format!(" {}", t.rel), Style::default().fg(theme::CREAM)));
+                spans.push(Span::styled(format!(" {}", t.rel), Style::default().fg(theme::cream())));
                 if t.dirty {
-                    spans.push(Span::styled(" ●", Style::default().fg(theme::GOLD)));
+                    spans.push(Span::styled(" ●", Style::default().fg(theme::gold())));
                 }
                 if t.readonly {
                     spans.push(Span::styled(" [ro]", theme::dim()));
@@ -1752,7 +1778,7 @@ impl App {
         }
         let lattice = match self.lattice_ok {
             Some(true) => Span::styled(" lattice ✓ ", Style::default().fg(theme::OK)),
-            Some(false) => Span::styled(" lattice ✗ ", Style::default().fg(theme::WARN)),
+            Some(false) => Span::styled(" lattice ✗ ", Style::default().fg(theme::warn())),
             None => Span::styled(" lattice … ", theme::dim()),
         };
         let tabs = if self.tabs.is_empty() {
@@ -1788,7 +1814,7 @@ impl App {
                             spans.push(Span::styled(format!(" {} ", n.key()), theme::accent()));
                             spans.push(Span::styled(
                                 format!("{:<26}", n.label()),
-                                Style::default().fg(theme::CREAM),
+                                Style::default().fg(theme::cream()),
                             ));
                         }
                     }
@@ -1858,7 +1884,7 @@ impl App {
                             Line::from(vec![
                                 Span::styled(
                                     title.clone(),
-                                    Style::default().fg(theme::CREAM).add_modifier(Modifier::BOLD),
+                                    Style::default().fg(theme::cream()).add_modifier(Modifier::BOLD),
                                 ),
                                 Span::styled(format!("  {path}"), theme::dim()),
                             ]),
@@ -1896,7 +1922,7 @@ impl App {
                     lines.push(Line::from(Span::styled(s.title, theme::accent())));
                     for (k, v) in s.rows {
                         lines.push(Line::from(vec![
-                            Span::styled(format!("  {k:<34}"), Style::default().fg(theme::GOLD)),
+                            Span::styled(format!("  {k:<34}"), Style::default().fg(theme::gold())),
                             Span::raw(v),
                         ]));
                     }
@@ -1987,6 +2013,12 @@ impl App {
     }
 }
 
+/// `[theme]` → palette: named (default lapis) plus `custom` overrides.
+pub fn palette_from_config(t: &crate::config::ThemeConfig) -> theme::Palette {
+    let base = t.name.as_deref().and_then(theme::named).unwrap_or(theme::LAPIS);
+    base.with_overrides(t.custom.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+}
+
 fn tab_label(t: &Tab) -> String {
     let name = Path::new(&t.rel)
         .file_name()
@@ -2013,6 +2045,7 @@ pub async fn run(ctx: Ctx) -> Result<()> {
         }));
         let mut term = ratatui::init();
         let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+        theme::install(palette_from_config(&ctx.cfg.theme));
         let mut app = App::new(ctx);
         let result = ui_loop(&mut app, &mut term);
         let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);

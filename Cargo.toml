@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "crates/lapis-desktop"]
+
 [package]
 name = "lapis"
 version = "0.1.0"
@@ -11,7 +14,13 @@ default-run = "lapis"
 name = "lapis"
 path = "src/main.rs"
 
+[features]
+default = []
+# GPUI desktop shell. Off by default: `lapis desktop` then reports it is not built in.
+desktop = ["lapis-desktop/gpui"]
+
 [dependencies]
+lapis-desktop = { path = "crates/lapis-desktop" }
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 gray_matter = "0.3"

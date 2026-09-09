@@ -116,6 +116,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Restore(args) => restore(&ctx, args).await,
         Command::Template { command } => template(&ctx, command),
         Command::Tui => tui::run(ctx).await,
+        Command::Desktop(args) => desktop(&ctx, args),
     }
 }
 
@@ -471,7 +472,13 @@ fn task_mark(t: &tasks::Task) -> &'static str {
 fn task_list(ctx: &Ctx, args: TaskListArgs) -> Result<()> {
     let scope = args.scope();
     let summary = tasks::wants_summary(scope.as_deref(), args.full || ctx.cfg.agent.task_unscoped_full());
-    let f = tasks::Filter { status: args.status, due: args.due, tag: args.tag, prefix: scope };
+    let f = tasks::Filter {
+        status: args.status,
+        due: args.due,
+        tag: args.tag,
+        prefix: scope,
+        exclude: ctx.cfg.agent.task_exclude.clone(),
+    };
     let list = tasks::list(&ctx.vault.root, &f)?;
     if summary {
         // Unscoped: the whole vault is hundreds of rows. Counts first; a PATH
@@ -585,6 +592,35 @@ async fn tree_retrieve(ctx: &Ctx, args: TreeArgs) -> Result<()> {
         eprintln!("lapis: tree truncated at {} nodes (--max-nodes)", t.count);
     }
     Ok(())
+}
+
+// -------------------------------------------------------------------- desktop
+
+/// `lapis desktop`: the GPUI shell (N23). Built without the `desktop` feature
+/// this reports exactly that instead of pretending.
+fn desktop(ctx: &Ctx, args: cli::DesktopArgs) -> Result<()> {
+    let opts = lapis_desktop::Options {
+        vault_root: ctx.vault.root.clone(),
+        lattice_url: ctx.lattice_url.clone(),
+        seed: args.path,
+        title: "Lapis".into(),
+    };
+    if args.check {
+        let report = lapis_desktop::preflight(&opts);
+        if ctx.json {
+            return emit_json(&report);
+        }
+        println!(
+            "desktop: gpui={} sidecar={}",
+            report.gpui_available,
+            report.gitnexus.as_deref().unwrap_or("none")
+        );
+        return Ok(());
+    }
+    lapis_desktop::run(opts).map_err(|e| match e {
+        lapis_desktop::DesktopError::NotBuilt(m) => LapisError::Usage(m),
+        lapis_desktop::DesktopError::Runtime(m) => LapisError::Internal(m),
+    })
 }
 
 // -------------------------------------------------------------------- resolve

@@ -650,7 +650,13 @@ impl LapisServer {
         let t0 = Instant::now();
         let full = a.full.unwrap_or(self.ctx.cfg.agent.task_unscoped_full());
         let summary = tasks::wants_summary(a.path.as_deref(), full);
-        let f = tasks::Filter { status: a.status, due: a.due, tag: a.tag, prefix: a.path };
+        let f = tasks::Filter {
+            status: a.status,
+            due: a.due,
+            tag: a.tag,
+            prefix: a.path,
+            exclude: self.ctx.cfg.agent.task_exclude.clone(),
+        };
         let list = tasks::list(&self.ctx.vault.root, &f).map_err(fail)?;
         if summary {
             return ok_at(t0, &tasks::summarize(&list));

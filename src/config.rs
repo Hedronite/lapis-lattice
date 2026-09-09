@@ -27,6 +27,19 @@ pub struct Config {
     /// Defaults for agent surfaces (`--agent`, MCP).
     #[serde(default)]
     pub agent: AgentConfig,
+    /// TUI palette: `name` picks a built-in, `custom` overrides roles with `#RRGGBB`.
+    #[serde(default)]
+    pub theme: ThemeConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct ThemeConfig {
+    /// `lapis` (default), `parchment`, `obsidian`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Role → `#RRGGBB`: blue, blue_deep, blue_soft, regent, cream, gold, copper, muted, ok, warn.
+    #[serde(default)]
+    pub custom: std::collections::BTreeMap<String, String>,
 }
 
 /// `[agent]`: how the MCP server and `--agent` behave by default.
@@ -44,6 +57,9 @@ pub struct AgentConfig {
     /// Clip note bodies to this many chars (`meta.truncated`); unset = whole body.
     #[serde(default)]
     pub read_max_chars: Option<usize>,
+    /// Extra vault-relative prefixes the task scan skips (on top of the built-in scan set).
+    #[serde(default)]
+    pub task_exclude: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -63,6 +79,7 @@ impl Default for AgentConfig {
             neighbors_direction: default_direction(),
             task_unscoped: default_task_unscoped(),
             read_max_chars: None,
+            task_exclude: Vec::new(),
         }
     }
 }
@@ -182,6 +199,21 @@ mod tests {
         let c: Config = toml::from_str("[agent]\nneighbors_direction = \"sideways\"\n").unwrap();
         assert!(c.agent.per_doc);
         assert_eq!(c.agent.direction(), "both");
+    }
+
+    /// N21 / N22: `[theme]` and `task_exclude` parse; both default to empty.
+    #[test]
+    fn theme_and_task_exclude() {
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.theme, ThemeConfig::default());
+        assert!(c.agent.task_exclude.is_empty());
+        let c: Config = toml::from_str(
+            "[agent]\ntask_exclude = [\"assets/\", \"Archmagus-Stack/Sovereign-Bootcamp/\"]\n[theme]\nname = \"parchment\"\n[theme.custom]\ngold = \"#FFD700\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.theme.name.as_deref(), Some("parchment"));
+        assert_eq!(c.theme.custom.get("gold").map(String::as_str), Some("#FFD700"));
+        assert_eq!(c.agent.task_exclude, ["assets/", "Archmagus-Stack/Sovereign-Bootcamp/"]);
     }
 
     #[test]

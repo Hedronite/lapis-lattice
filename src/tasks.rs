@@ -340,9 +340,20 @@ pub struct Filter {
     pub due: Option<String>,
     pub tag: Option<String>,
     pub prefix: Option<String>,
+    /// Vault-relative prefixes to skip (from `[agent].task_exclude`), e.g. `assets/`.
+    pub exclude: Vec<String>,
 }
 
 impl Filter {
+    /// True when `rel` sits under one of the configured exclude prefixes
+    /// (`assets/` and `assets` both mean the folder).
+    pub fn excluded(&self, rel: &str) -> bool {
+        self.exclude.iter().any(|p| {
+            let p = p.trim_start_matches("./").trim_end_matches('/');
+            !p.is_empty() && rel.strip_prefix(p).is_some_and(|rest| rest.starts_with('/'))
+        })
+    }
+
     pub fn matches(&self, t: &Task, today: &str) -> bool {
         if let Some(s) = &self.status
             && t.status != *s
@@ -451,6 +462,9 @@ pub fn list(root: &Path, filter: &Filter) -> Result<Vec<Task>> {
     let today = crate::write::today();
     let mut out = Vec::new();
     for rel in scan_files(root, filter.prefix.as_deref())? {
+        if filter.excluded(&rel) {
+            continue;
+        }
         let Ok(text) = std::fs::read_to_string(root.join(&rel)) else { continue };
         out.extend(parse(&rel, &text).into_iter().filter(|t| filter.matches(t, &today)));
     }
@@ -578,6 +592,13 @@ mod tests {
             list(&v, &Filter { prefix: Some("foundry/lapis".into()), ..Default::default() }).unwrap();
         assert_eq!(scoped.len(), 6);
         assert!(scoped.iter().all(|t| t.source_path.starts_with("foundry/lapis/")));
+        // N22: configured exclude prefixes are honoured (with or without a trailing slash)
+        let ex = list(&v, &Filter { exclude: vec!["foundry/".into()], ..Default::default() }).unwrap();
+        assert_eq!(ex.len(), 1);
+        assert_eq!(ex[0].source_path, "inbox/q.md");
+        let f = Filter { exclude: vec!["inbox".into()], ..Default::default() };
+        assert!(f.excluded("inbox/q.md") && !f.excluded("inboxes/q.md") && !f.excluded("foundry/x.md"));
+        assert_eq!(list(&v, &f).unwrap().len(), 6);
         let open = list(&v, &Filter { status: Some("open".into()), ..Default::default() }).unwrap();
         assert_eq!(open.len(), 3);
         let overdue = list(&v, &Filter { due: Some("overdue".into()), ..Default::default() }).unwrap();

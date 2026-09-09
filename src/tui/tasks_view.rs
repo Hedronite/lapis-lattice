@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use super::theme;
-use crate::tasks::Task;
+use crate::tasks::{self, Summary, Task};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -25,6 +25,12 @@ pub struct TasksView {
     pub view: View,
     pub tasks: Vec<Task>,
     pub loading: bool,
+    /// Folder the scan is limited to; `None` = whole vault (→ summary unless `full`).
+    pub scope: Option<String>,
+    /// Show rows even when unscoped.
+    pub full: bool,
+    /// Counts for the summary screen (unscoped).
+    pub summary: Summary,
     /// list: row; kanban: card within column; calendar: task within day
     pub sel: usize,
     pub col: usize,
@@ -40,6 +46,9 @@ impl TasksView {
             view,
             tasks: vec![],
             loading: true,
+            scope: None,
+            full: false,
+            summary: Summary::default(),
             sel: 0,
             col: 0,
             month: today.first_of_month(),
@@ -48,8 +57,46 @@ impl TasksView {
     }
 
     pub fn set_tasks(&mut self, tasks: Vec<Task>) {
+        self.summary = tasks::summarize(&tasks);
         self.tasks = tasks;
         self.loading = false;
+        self.sel = 0;
+    }
+
+    /// Same rule as `lapis task list` (N4): unscoped and not `full` → summary.
+    pub fn is_summary(&self) -> bool {
+        tasks::wants_summary(self.scope.as_deref(), self.full)
+    }
+
+    /// Summary rows: folders by count (the cursor picks one to scope into).
+    pub fn summary_folders(&self) -> Vec<(String, usize)> {
+        let mut v: Vec<(String, usize)> =
+            self.summary.by_folder.iter().map(|(k, n)| (k.clone(), *n)).collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        v
+    }
+
+    /// Folder under the cursor on the summary screen.
+    pub fn selected_folder(&self) -> Option<String> {
+        self.summary_folders().get(self.sel).map(|(f, _)| f.clone())
+    }
+
+    /// Enter on the summary: scope to that folder (`.` = vault-root files → full rows).
+    pub fn scope_to_selected(&mut self) -> bool {
+        let Some(f) = self.selected_folder() else { return false };
+        if f == "." {
+            self.full = true;
+        } else {
+            self.scope = Some(f);
+        }
+        self.sel = 0;
+        true
+    }
+
+    /// `u`: back to the whole-vault summary.
+    pub fn unscope(&mut self) {
+        self.scope = None;
+        self.full = false;
         self.sel = 0;
     }
 
@@ -73,8 +120,12 @@ impl TasksView {
         m
     }
 
-    /// The task under the cursor, whichever view is active.
+    /// The task under the cursor, whichever view is active. `None` on the
+    /// summary screen, so `x` / Enter never act on a hidden row.
     pub fn current(&self) -> Option<&Task> {
+        if self.is_summary() {
+            return None;
+        }
         match self.view {
             View::List => self.tasks.get(self.sel),
             View::Kanban => self.column_tasks(self.col).get(self.sel).copied(),
@@ -83,6 +134,9 @@ impl TasksView {
     }
 
     pub fn current_len(&self) -> usize {
+        if self.is_summary() {
+            return self.summary_folders().len();
+        }
         match self.view {
             View::List => self.tasks.len(),
             View::Kanban => self.column_tasks(self.col).len(),
@@ -161,7 +215,7 @@ impl TasksView {
         }
         let content: String = t.content.chars().take(width.saturating_sub(4)).collect();
         Line::from(vec![
-            Span::styled(format!("{mark} "), Style::default().fg(theme::GOLD)),
+            Span::styled(format!("{mark} "), Style::default().fg(theme::gold())),
             Span::raw(content),
             Span::styled(
                 if meta.is_empty() { String::new() } else { format!("  {}", meta.join(" ")) },
@@ -172,10 +226,15 @@ impl TasksView {
 
     pub fn draw(&self, f: &mut Frame, area: Rect, focused: bool) {
         let border = if focused { theme::focused() } else { theme::chrome() };
-        let title = match self.view {
-            View::List => " tasks ",
-            View::Kanban => " kanban ",
-            View::Calendar => " calendar ",
+        let base = match self.view {
+            View::List => "tasks",
+            View::Kanban => "kanban",
+            View::Calendar => "calendar",
+        };
+        let title = match &self.scope {
+            Some(s) => format!(" {base} · {s} "),
+            None if self.full => format!(" {base} · whole vault "),
+            None => format!(" {base} · summary "),
         };
         let outer = Block::default().borders(Borders::ALL).title(title).border_style(border);
         let inner = outer.inner(area);
@@ -184,11 +243,53 @@ impl TasksView {
             f.render_widget(Paragraph::new("scanning vault…").style(theme::dim()), inner);
             return;
         }
+        if self.is_summary() {
+            self.draw_summary(f, inner);
+            return;
+        }
         match self.view {
             View::List => self.draw_list(f, inner),
             View::Kanban => self.draw_kanban(f, inner),
             View::Calendar => self.draw_calendar(f, inner),
         }
+    }
+
+    fn draw_summary(&self, f: &mut Frame, area: Rect) {
+        let [head, list] = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(area);
+        let mut by_status: Vec<String> =
+            self.summary.by_status.iter().map(|(k, v)| format!("{k} {v}")).collect();
+        by_status.sort();
+        let lines = vec![
+            Line::from(vec![
+                Span::styled(format!("{} tasks", self.summary.n), theme::accent()),
+                Span::styled(format!("   {}", by_status.join("  ·  ")), theme::dim()),
+            ]),
+            Line::from(Span::styled(
+                "Enter scope to folder · f all rows · u summary · r rescan · 1/2/3 list/kanban/calendar",
+                theme::dim(),
+            )),
+        ];
+        f.render_widget(Paragraph::new(lines), head);
+        let items: Vec<ListItem> = self
+            .summary_folders()
+            .into_iter()
+            .map(|(folder, n)| {
+                ListItem::new(Line::from(vec![
+                    Span::raw(format!("{folder:<32}")),
+                    Span::styled(format!("{n:>5}"), theme::accent()),
+                ]))
+            })
+            .collect();
+        let mut st = ListState::default().with_selected(Some(self.sel));
+        f.render_stateful_widget(
+            List::new(items)
+                .block(
+                    Block::default().borders(Borders::TOP).title(" by folder ").border_style(theme::chrome()),
+                )
+                .highlight_style(theme::selected()),
+            list,
+            &mut st,
+        );
     }
 
     fn draw_list(&self, f: &mut Frame, area: Rect) {
@@ -241,7 +342,7 @@ impl TasksView {
             let cell =
                 if n > 0 { format!("{d:>2}{}", if n > 9 { "+" } else { "·" }) } else { format!("{d:>2} ") };
             let mut style =
-                if n > 0 { Style::default().fg(theme::GOLD) } else { Style::default().fg(theme::CREAM) };
+                if n > 0 { Style::default().fg(theme::gold()) } else { Style::default().fg(theme::cream()) };
             if d as u8 == self.day {
                 style = theme::selected();
             }
@@ -295,6 +396,7 @@ mod tests {
     fn kanban_columns_and_navigation() {
         let mut v = TasksView::new(View::Kanban);
         v.set_tasks(sample());
+        v.full = true; // rows, not the unscoped summary
         assert_eq!(v.column_tasks(0).len(), 2);
         assert_eq!(v.column_tasks(1).len(), 1);
         assert_eq!(v.column_tasks(2).len(), 1);
@@ -310,10 +412,41 @@ mod tests {
         assert_eq!(v.col, 3);
     }
 
+    /// N22: unscoped view is a summary; Enter scopes to a folder; `u` returns.
+    #[test]
+    fn unscoped_is_summary_then_scopes() {
+        let mut v = TasksView::new(View::List);
+        let mut all = sample();
+        all.extend(tasks::parse("foundry/lapis/plan.md", "- [ ] f1\n- [x] f2\n"));
+        all.extend(tasks::parse("agents/a.md", "- [ ] g1\n"));
+        v.set_tasks(all);
+        assert!(v.is_summary());
+        assert_eq!(v.summary.n, 8);
+        assert_eq!(
+            v.summary_folders(),
+            [(".".to_string(), 5), ("foundry".to_string(), 2), ("agents".to_string(), 1)]
+        );
+        assert_eq!(v.current_len(), 3);
+        v.down();
+        assert_eq!(v.selected_folder().as_deref(), Some("foundry"));
+        assert!(v.scope_to_selected());
+        assert_eq!(v.scope.as_deref(), Some("foundry"));
+        assert!(!v.is_summary(), "a scope means rows");
+        v.unscope();
+        assert!(v.is_summary() && v.scope.is_none());
+        v.full = true;
+        assert!(!v.is_summary(), "--full equivalent shows rows");
+        v.full = false;
+        v.sel = 0;
+        assert!(v.scope_to_selected(), "root files (.) → full rows");
+        assert!(v.full && v.scope.is_none());
+    }
+
     #[test]
     fn calendar_groups_by_due_in_month() {
         let mut v = TasksView::new(View::Calendar);
         v.set_tasks(sample());
+        v.full = true; // rows, not the unscoped summary
         v.month = jiff::civil::date(2026, 9, 1);
         v.day = 10;
         let by = v.by_day();
