@@ -62,6 +62,206 @@ pub enum Command {
 
     /// Hop-1 wikilink neighbors of a note from the lattice `edges` table.
     Neighbors(NeighborsArgs),
+
+    /// List notes from the lattice `documents` table (metadata only). Never walks the vault.
+    List(ListArgs),
+
+    /// Ask the lattice to re-index one note (runs its own indexer; Lapis never writes lattice.db).
+    Reindex(ReindexArgs),
+
+    /// Create a note with a HAL create-set (name, type, domain, status=draft, dates, hal_version).
+    Create(CreateArgs),
+
+    /// Append text to a note; bumps `updated:` and keeps every other frontmatter line.
+    Append(AppendArgs),
+
+    /// Quick capture: timestamped note under the inbox bucket with doc_type=capture.
+    Capture(CaptureArgs),
+
+    /// Checkbox tasks: list and toggle by id (`path#index` or `path#task`).
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
+    },
+
+    /// Open or create today's `Daily/YYYY-MM-DD.md` (HAL create-set, doc_type daily-note).
+    Daily(DailyArgs),
+
+    /// Move a note to the trash bucket (`.lapis/trash/`), keeping its path for restore.
+    Trash(TrashArgs),
+
+    /// Terminal UI: sidebar tree, editor, lattice search palette (Ctrl+P), HAL inspector.
+    Tui,
+
+    /// MCP server over stdio (tools: vault_info, search, read_note, list_notes, neighbors, create_note, append_to_note, list_tasks, toggle_task).
+    Mcp,
+}
+
+#[derive(Debug, Args)]
+pub struct DailyArgs {
+    /// Date `YYYY-MM-DD` (default today).
+    #[arg(long, value_name = "DATE")]
+    pub date: Option<String>,
+
+    /// Skip the lattice reindex kick after creating.
+    #[arg(long)]
+    pub no_reindex: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TrashArgs {
+    /// Vault-relative note path.
+    #[arg(value_name = "PATH")]
+    pub path: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TaskCommand {
+    /// Scan .md notes (skipping media, archives, trash) and list tasks.
+    List(TaskListArgs),
+    /// Flip one task between open and done.
+    Toggle(TaskToggleArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct TaskListArgs {
+    /// Restrict the scan to this vault-relative folder or file.
+    #[arg(value_name = "PATH")]
+    pub path: Option<String>,
+
+    /// open | done | in-progress | cancelled | forwarded | waiting
+    #[arg(long, value_name = "STATUS")]
+    pub status: Option<String>,
+
+    /// today | overdue | YYYY-MM-DD
+    #[arg(long, value_name = "WHEN")]
+    pub due: Option<String>,
+
+    /// Require this inline #tag.
+    #[arg(long, value_name = "TAG")]
+    pub tag: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct TaskToggleArgs {
+    /// Task id from `task list`, e.g. `foundry/lapis/plan.md#0`.
+    #[arg(value_name = "ID")]
+    pub id: String,
+
+    /// Skip the lattice reindex kick after writing.
+    #[arg(long)]
+    pub no_reindex: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct CreateArgs {
+    /// Note title; becomes HAL `name` and the slugged filename.
+    #[arg(long, value_name = "TITLE")]
+    pub title: String,
+
+    /// Vault-relative target: a folder (`foundry/lapis/`) or a file (`foundry/lapis/x.md`). Default: inbox bucket.
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<String>,
+
+    /// Template name from `.lapis/templates/<name>.md` ({{title}}, {{date}}, {{cursor}}).
+    #[arg(long, value_name = "NAME")]
+    pub template: Option<String>,
+
+    /// HAL `type`/`doc_type` (default: taxonomy for the path, else `note`).
+    #[arg(long = "type", value_name = "TYPE")]
+    pub doc_type: Option<String>,
+
+    /// HAL `domain` (default: taxonomy for the path, else first folder).
+    #[arg(long, value_name = "DOMAIN")]
+    pub domain: Option<String>,
+
+    /// Tag (repeatable).
+    #[arg(long = "tag", value_name = "TAG")]
+    pub tags: Vec<String>,
+
+    /// Body text (default: `# <title>`). Use `--stdin` to read it from stdin.
+    #[arg(long, value_name = "TEXT", conflicts_with = "stdin")]
+    pub body: Option<String>,
+
+    /// Read the body from stdin.
+    #[arg(long)]
+    pub stdin: bool,
+
+    /// Skip the lattice reindex kick after writing.
+    #[arg(long)]
+    pub no_reindex: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct AppendArgs {
+    /// Vault-relative note path.
+    #[arg(value_name = "PATH")]
+    pub path: String,
+
+    /// Text to append. Omit (or pass `--stdin`) to read from stdin.
+    #[arg(value_name = "TEXT", conflicts_with = "stdin")]
+    pub text: Option<String>,
+
+    /// Read the text from stdin.
+    #[arg(long)]
+    pub stdin: bool,
+
+    /// Skip the lattice reindex kick after writing.
+    #[arg(long)]
+    pub no_reindex: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct CaptureArgs {
+    /// Captured text. Multiple words are joined; omit to read from stdin.
+    #[arg(value_name = "TEXT", num_args = 0..)]
+    pub text: Vec<String>,
+
+    /// Skip the lattice reindex kick after writing.
+    #[arg(long)]
+    pub no_reindex: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ReindexArgs {
+    /// Vault-relative markdown path, e.g. `foundry/lapis/STATUS.md`.
+    #[arg(value_name = "PATH")]
+    pub path: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ListArgs {
+    /// Only paths under this vault-relative prefix, e.g. `foundry/lapis/`.
+    #[arg(value_name = "PREFIX")]
+    pub prefix: Option<String>,
+
+    /// Filter by HAL `domain` (exact).
+    #[arg(long, value_name = "DOMAIN")]
+    pub domain: Option<String>,
+
+    /// Filter by canonical `doc_type` (exact).
+    #[arg(long, value_name = "TYPE")]
+    pub doc_type: Option<String>,
+
+    /// Filter by HAL `status` (exact).
+    #[arg(long, value_name = "STATUS")]
+    pub status: Option<String>,
+
+    /// Require this tag.
+    #[arg(long, value_name = "TAG")]
+    pub tag: Option<String>,
+
+    /// Max rows (lattice caps at 1000).
+    #[arg(long, short = 'n', default_value_t = 50, value_name = "N")]
+    pub limit: u32,
+
+    /// Row offset for paging.
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    pub offset: u32,
+
+    /// Include `_archives/` and `*.DRAFT-*` documents.
+    #[arg(long)]
+    pub include_archives: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -177,6 +377,71 @@ mod tests {
             Command::Read(r) => assert_eq!(r.path, "foundry/lapis/SPEC.md"),
             _ => panic!("expected read"),
         }
+    }
+
+    #[test]
+    fn parses_list() {
+        let c =
+            Cli::try_parse_from(["lapis", "list", "--json", "foundry/lapis/", "--status", "live", "-n", "5"])
+                .unwrap();
+        match c.command {
+            Command::List(l) => {
+                assert_eq!(l.prefix.as_deref(), Some("foundry/lapis/"));
+                assert_eq!(l.status.as_deref(), Some("live"));
+                assert_eq!(l.limit, 5);
+                assert_eq!(l.offset, 0);
+            }
+            _ => panic!("expected list"),
+        }
+    }
+
+    #[test]
+    fn parses_write_verbs() {
+        let c = Cli::try_parse_from([
+            "lapis",
+            "create",
+            "--title",
+            "ship-smoke",
+            "--json",
+            "--path",
+            "inbox/x/",
+            "--tag",
+            "a",
+            "--tag",
+            "b",
+        ])
+        .unwrap();
+        match c.command {
+            Command::Create(a) => {
+                assert_eq!(a.title, "ship-smoke");
+                assert_eq!(a.tags, ["a", "b"]);
+                assert!(!a.no_reindex);
+            }
+            _ => panic!("expected create"),
+        }
+        assert!(Cli::try_parse_from(["lapis", "create"]).is_err());
+        let c = Cli::try_parse_from(["lapis", "append", "a.md", "hello"]).unwrap();
+        assert!(matches!(c.command, Command::Append(a) if a.text.as_deref() == Some("hello")));
+        let c = Cli::try_parse_from(["lapis", "capture", "two", "words"]).unwrap();
+        assert!(matches!(c.command, Command::Capture(a) if a.text == ["two", "words"]));
+    }
+
+    #[test]
+    fn parses_task_and_mcp() {
+        let c = Cli::try_parse_from(["lapis", "task", "list", "--status", "open", "--due", "today"]).unwrap();
+        assert!(
+            matches!(c.command, Command::Task { command: TaskCommand::List(a) } if a.status.as_deref() == Some("open"))
+        );
+        let c = Cli::try_parse_from(["lapis", "task", "toggle", "a.md#3"]).unwrap();
+        assert!(matches!(c.command, Command::Task { command: TaskCommand::Toggle(a) } if a.id == "a.md#3"));
+        assert!(matches!(Cli::try_parse_from(["lapis", "mcp"]).unwrap().command, Command::Mcp));
+        assert!(matches!(Cli::try_parse_from(["lapis", "tui"]).unwrap().command, Command::Tui));
+        assert!(
+            matches!(Cli::try_parse_from(["lapis", "daily", "--date", "2026-09-09"]).unwrap().command, Command::Daily(d) if d.date.as_deref() == Some("2026-09-09"))
+        );
+        assert!(
+            matches!(Cli::try_parse_from(["lapis", "trash", "a/b.md"]).unwrap().command, Command::Trash(t) if t.path == "a/b.md")
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! `lapis` — one Rust binary: CLI now, MCP (L3) and Ratatui TUI (L5) later.
+//! `lapis` — one Rust binary: CLI, MCP (`lapis mcp`), Ratatui TUI (L5).
 //!
 //! Read law: `foundry/lapis/SPEC.md`, `SHIP.md`, `CRATES.md`. Files are the
 //! write source of truth, the lattice is the read source of truth, and this
@@ -9,9 +9,15 @@ mod config;
 mod error;
 mod hal;
 mod lattice;
+mod mcp;
 mod notes;
+mod ops;
 mod overlay;
+mod tasks;
+mod taxonomy;
+mod tui;
 mod vault;
+mod write;
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -20,11 +26,16 @@ use clap::Parser;
 use serde::Serialize;
 use serde_json::json;
 
-use cli::{Cli, Command, NeighborsArgs, ReadArgs, SearchArgs, VaultCommand};
+use cli::{
+    AppendArgs, CaptureArgs, Cli, Command, CreateArgs, DailyArgs, ListArgs, NeighborsArgs, ReadArgs,
+    ReindexArgs, SearchArgs, TaskCommand, TaskListArgs, TaskToggleArgs, TrashArgs, VaultCommand,
+};
 use error::{LapisError, Result};
-use lattice::{Client, SearchParams};
+use lattice::{ListParams, SearchParams};
+use ops::Ctx;
 
-#[tokio::main(flavor = "current_thread")]
+// Multi-thread so the TUI can block its thread while lattice requests run.
+#[tokio::main]
 async fn main() -> ExitCode {
     // clap exits 2 on usage errors by default; SPEC reserves 2 for "lattice
     // down", so route usage errors through our own code (1).
@@ -57,19 +68,6 @@ fn report_error(e: &LapisError, json: bool) {
     eprintln!("lapis: {e}");
 }
 
-struct Ctx {
-    json: bool,
-    vault: vault::Vault,
-    cfg: config::Config,
-    lattice_url: String,
-}
-
-impl Ctx {
-    fn client(&self) -> Result<Client> {
-        Client::new(&self.lattice_url, self.cfg.lattice.timeout())
-    }
-}
-
 async fn run(cli: Cli) -> Result<()> {
     let cfg = config::load()?;
     let vault = vault::resolve(cli.global.vault.as_deref(), &cfg)?;
@@ -86,6 +84,17 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Search(args) => search(&ctx, args).await,
         Command::Read(args) => read(&ctx, args),
         Command::Neighbors(args) => neighbors(&ctx, args).await,
+        Command::List(args) => list(&ctx, args).await,
+        Command::Reindex(args) => reindex(&ctx, args).await,
+        Command::Create(args) => create(&ctx, args).await,
+        Command::Append(args) => append(&ctx, args).await,
+        Command::Capture(args) => capture(&ctx, args).await,
+        Command::Task { command: TaskCommand::List(args) } => task_list(&ctx, args),
+        Command::Task { command: TaskCommand::Toggle(args) } => task_toggle(&ctx, args).await,
+        Command::Mcp => mcp::serve(ctx).await,
+        Command::Daily(args) => daily(&ctx, args).await,
+        Command::Trash(args) => trash(&ctx, args),
+        Command::Tui => tui::run(ctx).await,
     }
 }
 
@@ -96,64 +105,19 @@ fn emit_json<T: Serialize>(v: &T) -> Result<()> {
     Ok(())
 }
 
+fn meta_line(parts: &[Option<String>]) -> String {
+    let m: Vec<&str> = parts.iter().flatten().map(String::as_str).collect();
+    if m.is_empty() { String::new() } else { format!("  ·  {}", m.join("  ")) }
+}
+
 // ---------------------------------------------------------------- vault info
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct VaultInfo<'a> {
-    vault_root: String,
-    vault_source: &'static str,
-    overlay: OverlayInfo<'a>,
-    lattice: LatticeInfo,
-}
-
-#[derive(Serialize)]
-struct OverlayInfo<'a> {
-    source: overlay::OverlaySource,
-    path: String,
-    #[serde(flatten)]
-    overlay: &'a overlay::Overlay,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LatticeInfo {
-    url: String,
-    reachable: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    health: Option<lattice::Health>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
 async fn vault_info(ctx: &Ctx) -> Result<()> {
-    let (ov, ov_src) = overlay::load(&ctx.vault.root)?;
-    let client = ctx.client()?;
-    let health = client.health().await;
-    let lattice = match &health {
-        Ok(h) => LatticeInfo {
-            url: client.base().to_string(),
-            reachable: true,
-            health: Some(h.clone()),
-            error: None,
-        },
-        Err(e) => LatticeInfo {
-            url: client.base().to_string(),
-            reachable: false,
-            health: None,
-            error: Some(e.to_string()),
-        },
-    };
-    let info = VaultInfo {
-        vault_root: ctx.vault.root.display().to_string(),
-        vault_source: ctx.vault.source,
-        overlay: OverlayInfo { source: ov_src, path: overlay::OVERLAY_REL.to_string(), overlay: &ov },
-        lattice,
-    };
-
+    let (info, err) = ops::vault_info(ctx).await?;
     if ctx.json {
         emit_json(&info)?;
     } else {
+        let ov = &info.overlay.overlay;
         println!("Vault    {}  ({})", info.vault_root, info.vault_source);
         println!(
             "Overlay  {}  inbox={} quick={} archive={} trash={}",
@@ -174,11 +138,10 @@ async fn vault_info(ctx: &Ctx) -> Result<()> {
             None => println!("Lattice  {}  DOWN", info.lattice.url),
         }
     }
-
     // Always print the report, then fail with exit 2 if the lattice is down.
-    match health {
-        Ok(_) => Ok(()),
-        Err(e) => Err(e),
+    match err {
+        Some(e) => Err(e),
+        None => Ok(()),
     }
 }
 
@@ -194,9 +157,7 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
         mmr: args.mmr,
         include_archives: args.include_archives,
     };
-    let client = ctx.client()?;
-    let result = client.search(&params).await?;
-
+    let result = ctx.client()?.search(&params).await?;
     if ctx.json {
         return emit_json(&result);
     }
@@ -207,23 +168,13 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
     for h in &result.hits {
         let rank = h.rank.map(|r| format!("{r:>2}.")).unwrap_or_else(|| "  ".into());
         println!("{rank} {}", h.path);
-        let mut meta = Vec::new();
-        if let Some(hd) = &h.heading
-            && hd != &h.title
-        {
-            meta.push(hd.clone());
-        }
-        if let Some(d) = &h.domain {
-            meta.push(format!("domain={d}"));
-        }
-        if let Some(s) = h.score {
-            meta.push(format!("score={s:.4}"));
-        }
-        println!(
-            "    {}{}",
-            h.title,
-            if meta.is_empty() { String::new() } else { format!("  ·  {}", meta.join("  ")) }
-        );
+        let heading = h.heading.clone().filter(|hd| hd != &h.title);
+        let meta = meta_line(&[
+            heading,
+            h.domain.as_ref().map(|d| format!("domain={d}")),
+            h.score.map(|s| format!("score={s:.4}")),
+        ]);
+        println!("    {}{meta}", h.title);
     }
     if let Some(ms) = result.latency_ms {
         eprintln!("{} hits · lattice {:.0} ms · {}", result.count, ms, result.modalities.join("+"));
@@ -266,14 +217,199 @@ fn read(ctx: &Ctx, args: ReadArgs) -> Result<()> {
     Ok(())
 }
 
+// ----------------------------------------------------------------------- list
+
+async fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
+    let params = ListParams {
+        domain: args.domain,
+        doc_type: args.doc_type,
+        status: args.status,
+        tag: args.tag,
+        prefix: args.prefix,
+        limit: args.limit,
+        offset: args.offset,
+        include_archives: args.include_archives,
+    };
+    let rows = ops::list(ctx, params).await?;
+    if ctx.json {
+        return emit_json(&rows);
+    }
+    if rows.is_empty() {
+        println!("No documents match.");
+        return Ok(());
+    }
+    for r in &rows {
+        println!("{}", r.path);
+        println!("    {}{}", r.title, meta_line(&[r.doc_type.clone(), r.status.clone()]));
+    }
+    Ok(())
+}
+
+// -------------------------------------------------------------------- reindex
+
+async fn reindex(ctx: &Ctx, args: ReindexArgs) -> Result<()> {
+    // Validate locally first so an escape is exit 3 before any HTTP.
+    let (rel, _abs) = notes::resolve(&ctx.vault.root, &args.path)?;
+    let r = ctx.client()?.reindex(&rel).await?;
+    if ctx.json {
+        return emit_json(&r);
+    }
+    let what = match (r.changed, r.chunks) {
+        (Some(true), Some(n)) => format!("re-indexed, {n} chunks"),
+        (Some(false), _) => "unchanged".to_string(),
+        _ => "done".to_string(),
+    };
+    println!("{}  {}{}", r.path, what, r.elapsed_ms.map(|ms| format!("  ({ms:.0} ms)")).unwrap_or_default());
+    if !r.ok {
+        for l in &r.stderr_tail {
+            eprintln!("  {l}");
+        }
+        return Err(LapisError::LatticeDown(format!("indexer exit {}", r.indexer_exit.unwrap_or(-1))));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------- write
+
+fn read_stdin() -> Result<String> {
+    let mut s = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+    Ok(s)
+}
+
+fn print_write(ctx: &Ctx, report: &ops::WriteReport) -> Result<()> {
+    if ctx.json {
+        emit_json(report)?;
+    } else {
+        let idx = match (&report.reindex, &report.reindex_error) {
+            (Some(r), _) if r.changed == Some(true) => {
+                format!("  indexed ({} chunks)", r.chunks.unwrap_or(0))
+            }
+            (Some(_), _) => "  index unchanged".into(),
+            (None, Some(_)) => "  (index kick failed)".into(),
+            (None, None) => String::new(),
+        };
+        println!("{}{idx}", report.written.path);
+    }
+    if let Some(e) = &report.reindex_error {
+        eprintln!("lapis: written, but reindex failed: {e}");
+    }
+    Ok(())
+}
+
+async fn create(ctx: &Ctx, args: CreateArgs) -> Result<()> {
+    let body = if args.stdin { Some(read_stdin()?) } else { args.body.clone() };
+    let opts = write::CreateOpts {
+        title: args.title.clone(),
+        path: args.path.clone(),
+        template: args.template.clone(),
+        doc_type: args.doc_type.clone(),
+        domain: args.domain.clone(),
+        tags: args.tags.clone(),
+        body,
+        operator: ctx.cfg.operator.name.clone(),
+        inbox: ctx.inbox()?,
+    };
+    let w = write::create(&ctx.vault.root, &opts)?;
+    print_write(ctx, &ops::kick(ctx, w, args.no_reindex).await?)
+}
+
+async fn append(ctx: &Ctx, args: AppendArgs) -> Result<()> {
+    let text = match &args.text {
+        Some(t) => t.clone(),
+        None => read_stdin()?,
+    };
+    if text.trim().is_empty() {
+        return Err(LapisError::Usage("nothing to append".into()));
+    }
+    let w = write::append(&ctx.vault.root, &args.path, &text)?;
+    print_write(ctx, &ops::kick(ctx, w, args.no_reindex).await?)
+}
+
+async fn capture(ctx: &Ctx, args: CaptureArgs) -> Result<()> {
+    let text = if args.text.is_empty() { read_stdin()? } else { args.text.join(" ") };
+    let inbox = ctx.inbox()?;
+    let w = write::capture(&ctx.vault.root, &text, &inbox, ctx.cfg.operator.name.clone())?;
+    print_write(ctx, &ops::kick(ctx, w, args.no_reindex).await?)
+}
+
+// ------------------------------------------------------------ daily / trash
+
+async fn daily(ctx: &Ctx, args: DailyArgs) -> Result<()> {
+    let r = ops::daily(ctx, args.date.as_deref(), args.no_reindex).await?;
+    if ctx.json {
+        emit_json(&r)?;
+    } else {
+        println!("{}{}", r.daily.path, if r.daily.created { "  (created)" } else { "" });
+    }
+    if let Some(e) = &r.reindex_error {
+        eprintln!("lapis: created, but reindex failed: {e}");
+    }
+    Ok(())
+}
+
+fn trash(ctx: &Ctx, args: TrashArgs) -> Result<()> {
+    let t = ops::trash(ctx, &args.path)?;
+    if ctx.json {
+        return emit_json(&t);
+    }
+    println!("{}  ->  {}", t.path, t.trashed_to);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------- tasks
+
+fn task_mark(t: &tasks::Task) -> &'static str {
+    match t.status.as_str() {
+        "done" => "x",
+        "in-progress" => "/",
+        "cancelled" => "-",
+        "forwarded" => ">",
+        _ => " ",
+    }
+}
+
+fn task_list(ctx: &Ctx, args: TaskListArgs) -> Result<()> {
+    let f = tasks::Filter { status: args.status, due: args.due, tag: args.tag, prefix: args.path };
+    let list = tasks::list(&ctx.vault.root, &f)?;
+    if ctx.json {
+        return emit_json(&list);
+    }
+    if list.is_empty() {
+        println!("No tasks match.");
+        return Ok(());
+    }
+    for t in &list {
+        let meta = meta_line(&[
+            t.due.as_ref().map(|d| format!("due:{d}")),
+            t.priority.as_ref().map(|p| format!("!{p}")),
+            if t.waiting { Some("@waiting".into()) } else { None },
+        ]);
+        println!("[{}] {}  {}{meta}", task_mark(t), t.id, t.content);
+    }
+    Ok(())
+}
+
+async fn task_toggle(ctx: &Ctx, args: TaskToggleArgs) -> Result<()> {
+    let r = ops::toggle_task(ctx, &args.id, args.no_reindex).await?;
+    if ctx.json {
+        emit_json(&r)?;
+    } else {
+        println!("[{}] {}  {}", task_mark(&r.task), r.task.id, r.task.content);
+    }
+    if let Some(e) = &r.reindex_error {
+        eprintln!("lapis: toggled, but reindex failed: {e}");
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------------ neighbors
 
 async fn neighbors(ctx: &Ctx, args: NeighborsArgs) -> Result<()> {
     // Path escape rules apply even though the lattice, not the disk, answers.
     let rel = notes::clean_rel(&args.path)?;
     let rel = if std::path::Path::new(&rel).extension().is_none() { format!("{rel}.md") } else { rel };
-    let client = ctx.client()?;
-    let n = client.neighbors(&rel, &args.direction, !args.dangling).await?;
+    let n = ctx.client()?.neighbors(&rel, &args.direction, !args.dangling).await?;
     if ctx.json {
         return emit_json(&n);
     }
@@ -282,10 +418,7 @@ async fn neighbors(ctx: &Ctx, args: NeighborsArgs) -> Result<()> {
         return Ok(());
     }
     for e in &n.neighbors {
-        let arrow = match e.direction.as_str() {
-            "in" => "<-",
-            _ => "->",
-        };
+        let arrow = if e.direction == "in" { "<-" } else { "->" };
         let flag = if e.resolved { "" } else { "  (dangling)" };
         println!("{arrow} {}{flag}", e.path);
     }

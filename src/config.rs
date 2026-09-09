@@ -22,6 +22,14 @@ pub struct Config {
     pub lattice: LatticeConfig,
     #[serde(default)]
     pub vault: Option<String>,
+    #[serde(default)]
+    pub operator: OperatorConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct OperatorConfig {
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
