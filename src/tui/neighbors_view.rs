@@ -28,7 +28,7 @@ pub fn row(n: &Neighbor) -> Row {
     if !n.resolved {
         parts.push("unresolved".into());
     }
-    Row { arrow, path: n.path.clone(), detail: parts.join(" · "), resolved: n.resolved }
+    Row { arrow, path: n.label().to_string(), detail: parts.join(" · "), resolved: n.resolved }
 }
 
 pub fn rows(ns: &[Neighbor]) -> Vec<Row> {
@@ -54,7 +54,7 @@ mod tests {
 
     fn n(path: &str, dir: &str) -> Neighbor {
         Neighbor {
-            path: path.into(),
+            path: Some(path.into()),
             dst_raw: None,
             alias: None,
             anchor: None,
@@ -78,6 +78,18 @@ mod tests {
         assert_eq!(rows[1].detail, "unresolved");
         assert!(!rows[1].resolved);
         assert_eq!(line(&rows[0]).to_string(), "▶ foundry/lapis/SPEC.md  as the spec · #goals");
+    }
+
+    #[test]
+    fn dangling_row_shows_raw_target() {
+        let n: Neighbor = serde_json::from_str(
+            r#"{"path":null,"dst_raw":"aes_schema_genesis_canon","resolved":0,"dir":"out"}"#,
+        )
+        .unwrap();
+        let r = row(&n);
+        assert_eq!(r.path, "aes_schema_genesis_canon");
+        assert_eq!(r.detail, "unresolved");
+        assert!(!r.resolved);
     }
 
     #[test]

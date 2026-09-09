@@ -295,9 +295,16 @@ pub fn split_id(id: &str) -> Result<(String, Option<usize>)> {
 /// Toggle a task by id on disk. File tasks (`#task`) flip HAL `status`
 /// between `done` and `open` (an allowlisted key), line-wise.
 pub fn toggle(root: &Path, id: &str) -> Result<Task> {
+    toggle_with(root, id, &crate::write::Guard::default())
+}
+
+/// [`toggle`] with a stale guard and dry-run switch (N13).
+pub fn toggle_with(root: &Path, id: &str, guard: &crate::write::Guard) -> Result<Task> {
     let (rel, idx) = split_id(id)?;
     let (rel, abs) = notes::resolve(root, &rel)?;
-    let text = std::fs::read_to_string(&abs)?;
+    let raw = std::fs::read(&abs)?;
+    guard.check(&rel, &abs, &raw)?;
+    let text = String::from_utf8(raw).map_err(|_| LapisError::Usage(format!("{rel}: not UTF-8 text")))?;
     let (next, want_index) = match idx {
         Some(i) => {
             let (next, _) =
@@ -314,7 +321,9 @@ pub fn toggle(root: &Path, id: &str) -> Result<Task> {
         }
     };
     let next = crate::write::set_frontmatter_key(&next, "updated", &crate::write::today());
-    std::fs::write(&abs, &next)?;
+    if !guard.dry_run {
+        std::fs::write(&abs, &next)?;
+    }
     let mut tasks = parse(&rel, &next);
     let pos = if idx.is_some() { want_index } else { 0 };
     if pos < tasks.len() {
@@ -331,9 +340,20 @@ pub struct Filter {
     pub due: Option<String>,
     pub tag: Option<String>,
     pub prefix: Option<String>,
+    /// Vault-relative prefixes to skip (from `[agent].task_exclude`), e.g. `assets/`.
+    pub exclude: Vec<String>,
 }
 
 impl Filter {
+    /// True when `rel` sits under one of the configured exclude prefixes
+    /// (`assets/` and `assets` both mean the folder).
+    pub fn excluded(&self, rel: &str) -> bool {
+        self.exclude.iter().any(|p| {
+            let p = p.trim_start_matches("./").trim_end_matches('/');
+            !p.is_empty() && rel.strip_prefix(p).is_some_and(|rest| rest.starts_with('/'))
+        })
+    }
+
     pub fn matches(&self, t: &Task, today: &str) -> bool {
         if let Some(s) = &self.status
             && t.status != *s
@@ -405,10 +425,46 @@ pub fn scan_files(root: &Path, prefix: Option<&str>) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// Counts instead of rows: what an unscoped `task list` returns.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Summary {
+    pub n: usize,
+    /// `open`, `done`, `in-progress`, … → count.
+    pub by_status: std::collections::BTreeMap<String, usize>,
+    /// First path segment (`foundry`, `agents`, …; `.` for root notes) → count.
+    pub by_folder: std::collections::BTreeMap<String, usize>,
+}
+
+/// Top-level folder of a vault-relative path; `.` for a root-level note.
+pub fn folder_of(rel: &str) -> &str {
+    match rel.split_once('/') {
+        Some((head, _)) => head,
+        None => ".",
+    }
+}
+
+pub fn summarize(tasks: &[Task]) -> Summary {
+    let mut s = Summary { n: tasks.len(), ..Default::default() };
+    for t in tasks {
+        *s.by_status.entry(t.status.clone()).or_default() += 1;
+        *s.by_folder.entry(folder_of(&t.source_path).to_string()).or_default() += 1;
+    }
+    s
+}
+
+/// Unscoped and not `--full` → summary. A PATH scope always means rows.
+pub fn wants_summary(scope: Option<&str>, full: bool) -> bool {
+    scope.is_none_or(|s| s.trim().is_empty()) && !full
+}
+
 pub fn list(root: &Path, filter: &Filter) -> Result<Vec<Task>> {
     let today = crate::write::today();
     let mut out = Vec::new();
     for rel in scan_files(root, filter.prefix.as_deref())? {
+        if filter.excluded(&rel) {
+            continue;
+        }
         let Ok(text) = std::fs::read_to_string(root.join(&rel)) else { continue };
         out.extend(parse(&rel, &text).into_iter().filter(|t| filter.matches(t, &today)));
     }
@@ -481,6 +537,26 @@ mod tests {
     }
 
     #[test]
+    fn summary_counts_by_status_and_folder() {
+        let mut ts = parse("foundry/lapis/plan.md", NOTE);
+        ts.extend(parse("agents/FLEET.md", "- [ ] a\n- [x] b\n- [x] c\n"));
+        ts.extend(parse("ROOT.md", "- [ ] root task\n"));
+        let s = summarize(&ts);
+        assert_eq!(s.n, ts.len());
+        // NOTE: open, done, in-progress, cancelled, forwarded (fenced one skipped)
+        assert_eq!(s.by_folder["foundry"], 5);
+        assert_eq!(s.by_folder["agents"], 3);
+        assert_eq!(s.by_folder["."], 1);
+        assert_eq!(s.by_status["done"], 1 + 2);
+        assert_eq!(s.by_status["open"], 1 + 1 + 1);
+        assert_eq!(s.by_status["in-progress"], 1);
+        assert_eq!(folder_of("a/b/c.md"), "a");
+        assert_eq!(folder_of("c.md"), ".");
+        let j = serde_json::to_value(&s).unwrap();
+        assert!(j.get("byStatus").is_some() && j.get("byFolder").is_some() && j["n"] == ts.len());
+    }
+
+    #[test]
     fn toggle_on_disk_and_scan_respects_exclusions() {
         let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let v = std::env::temp_dir().join(format!("lapis-tasks-{}-{n}", std::process::id()));
@@ -502,6 +578,27 @@ mod tests {
         assert_eq!(scan_files(&v, Some("inbox")).unwrap(), ["inbox/q.md"]);
         let all = list(&v, &Filter::default()).unwrap();
         assert_eq!(all.len(), 7);
+        // N4: unscoped → summary; scoped or --full → rows
+        assert!(wants_summary(None, false));
+        assert!(wants_summary(Some(""), false));
+        assert!(!wants_summary(Some("foundry/lapis"), false));
+        assert!(!wants_summary(None, true));
+        let s = summarize(&all);
+        assert_eq!(s.n, 7);
+        assert_eq!(s.by_folder.get("foundry"), Some(&6));
+        assert_eq!(s.by_folder.get("inbox"), Some(&1));
+        assert_eq!(s.by_status.values().sum::<usize>(), 7);
+        let scoped =
+            list(&v, &Filter { prefix: Some("foundry/lapis".into()), ..Default::default() }).unwrap();
+        assert_eq!(scoped.len(), 6);
+        assert!(scoped.iter().all(|t| t.source_path.starts_with("foundry/lapis/")));
+        // N22: configured exclude prefixes are honoured (with or without a trailing slash)
+        let ex = list(&v, &Filter { exclude: vec!["foundry/".into()], ..Default::default() }).unwrap();
+        assert_eq!(ex.len(), 1);
+        assert_eq!(ex[0].source_path, "inbox/q.md");
+        let f = Filter { exclude: vec!["inbox".into()], ..Default::default() };
+        assert!(f.excluded("inbox/q.md") && !f.excluded("inboxes/q.md") && !f.excluded("foundry/x.md"));
+        assert_eq!(list(&v, &f).unwrap().len(), 6);
         let open = list(&v, &Filter { status: Some("open".into()), ..Default::default() }).unwrap();
         assert_eq!(open.len(), 3);
         let overdue = list(&v, &Filter { due: Some("overdue".into()), ..Default::default() }).unwrap();
@@ -520,6 +617,18 @@ mod tests {
         assert!(!f.checked);
         assert_eq!(toggle(&v, "foundry/lapis/plan.md#99").unwrap_err().exit_code(), 3);
         assert_eq!(toggle(&v, "foundry/lapis/plan.md#task").unwrap_err().exit_code(), 1);
+        // N13: dry run reports the flipped task without touching the file
+        let before = std::fs::read_to_string(v.join("foundry/lapis/plan.md")).unwrap();
+        let dry = toggle_with(
+            &v,
+            "foundry/lapis/plan.md#0",
+            &crate::write::Guard { dry_run: true, ..Default::default() },
+        )
+        .unwrap();
+        assert!(!dry.checked, "was toggled to done above; dry run flips back in the report only");
+        assert_eq!(std::fs::read_to_string(v.join("foundry/lapis/plan.md")).unwrap(), before);
+        let stale = crate::write::Guard { if_hash: Some("fnv1a64:0".into()), ..Default::default() };
+        assert_eq!(toggle_with(&v, "foundry/lapis/plan.md#0", &stale).unwrap_err().exit_code(), 1);
         let _ = std::fs::remove_dir_all(&v);
     }
 }

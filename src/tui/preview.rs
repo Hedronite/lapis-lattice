@@ -80,7 +80,7 @@ pub fn render(md: &str) -> Vec<Line<'static>> {
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_FOOTNOTES);
-    let base = Style::default().fg(theme::CREAM);
+    let base = Style::default().fg(theme::cream());
     let mut st = State { style: base, ..Default::default() };
     for ev in Parser::new_ext(md, opts) {
         match ev {
@@ -245,7 +245,7 @@ pub fn render(md: &str) -> Vec<Line<'static>> {
                 let (glyph, style) = if done {
                     ("[x] ", Style::default().fg(theme::OK))
                 } else {
-                    ("[ ] ", Style::default().fg(theme::GOLD))
+                    ("[ ] ", Style::default().fg(theme::gold()))
                 };
                 st.cur.push(Span::styled(glyph, style));
             }
@@ -300,7 +300,7 @@ mod tests {
         assert!(t.iter().any(|l| l.starts_with("────")), "{t:?}");
         assert!(t.iter().any(|l| l == "a │ b"), "{t:?}");
         assert!(t.iter().any(|l| l == "1 │ 2"), "{t:?}");
-        assert!(lines[0].spans.iter().any(|s| s.style.fg == Some(theme::GOLD)), "h1 is gold");
+        assert!(lines[0].spans.iter().any(|s| s.style.fg == Some(theme::gold())), "h1 is gold");
     }
 
     #[test]

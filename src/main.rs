@@ -6,6 +6,7 @@
 
 mod cli;
 mod config;
+mod envelope;
 mod error;
 mod hal;
 mod lattice;
@@ -13,6 +14,7 @@ mod mcp;
 mod notes;
 mod ops;
 mod overlay;
+mod resolve;
 mod tasks;
 mod taxonomy;
 mod templates;
@@ -27,18 +29,28 @@ use clap::Parser;
 use serde::Serialize;
 use serde_json::json;
 
+use cli::{AnalyticsArgs, ResolveArgs, TreeArgs};
 use cli::{
     AppendArgs, CaptureArgs, Cli, Command, CreateArgs, DailyArgs, ListArgs, NeighborsArgs, ReadArgs,
     ReindexArgs, SearchArgs, TaskCommand, TaskListArgs, TaskToggleArgs, TemplateCommand, TrashArgs,
     VaultCommand,
 };
+use envelope::Meta;
 use error::{LapisError, Result};
 use lattice::{ListParams, SearchParams};
 use ops::Ctx;
 
 // Multi-thread so the TUI can block its thread while lattice requests run.
+/// Process start, for `meta.latency_ms` in every envelope.
+static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+fn elapsed_ms() -> f64 {
+    START.get().map(|t| t.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0)
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
+    let _ = START.set(std::time::Instant::now());
     // clap exits 2 on usage errors by default; SPEC reserves 2 for "lattice
     // down", so route usage errors through our own code (1).
     let cli = match Cli::try_parse() {
@@ -64,8 +76,8 @@ async fn main() -> ExitCode {
 
 fn report_error(e: &LapisError, json: bool) {
     if json {
-        let v = json!({ "error": { "kind": e.kind(), "message": e.message(), "exit": e.exit_code() } });
-        println!("{v}");
+        let v = envelope::err(e, elapsed_ms());
+        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
     }
     eprintln!("lapis: {e}");
 }
@@ -86,6 +98,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Search(args) => search(&ctx, args).await,
         Command::Read(args) => read(&ctx, args),
         Command::Neighbors(args) => neighbors(&ctx, args).await,
+        Command::Resolve(args) => resolve_link(&ctx, args),
+        Command::Analytics(args) => analytics(&ctx, args).await,
+        Command::TreeRetrieve(args) => tree_retrieve(&ctx, args).await,
         Command::List(args) => list(&ctx, args).await,
         Command::Reindex(args) => reindex(&ctx, args).await,
         Command::Create(args) => create(&ctx, args).await,
@@ -101,12 +116,19 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Restore(args) => restore(&ctx, args).await,
         Command::Template { command } => template(&ctx, command),
         Command::Tui => tui::run(ctx).await,
+        Command::Desktop(args) => desktop(&ctx, args),
     }
 }
 
+/// `--json` output: always the `{ok, data, error, meta}` envelope.
 fn emit_json<T: Serialize>(v: &T) -> Result<()> {
+    emit_with(v, Meta::default())
+}
+
+fn emit_with<T: Serialize>(v: &T, meta: Meta) -> Result<()> {
+    let env = envelope::ok(v, meta.with_latency(elapsed_ms()));
     let mut out = std::io::stdout().lock();
-    serde_json::to_writer_pretty(&mut out, v)?;
+    serde_json::to_writer_pretty(&mut out, &env)?;
     out.write_all(b"\n")?;
     Ok(())
 }
@@ -154,18 +176,38 @@ async fn vault_info(ctx: &Ctx) -> Result<()> {
 // --------------------------------------------------------------------- search
 
 async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
+    let limit = args.limit.max(1);
+    let offset = args.offset;
+    let requested = offset + limit;
+    if requested > 50 {
+        return Err(LapisError::Usage(format!("offset + limit must be ≤ 50 (got {requested})")));
+    }
     let params = SearchParams {
         query: args.query_text(),
-        top_k: args.limit,
+        top_k: requested,
         domain: args.domain.clone(),
         mode: args.mode,
-        per_doc: args.per_doc,
+        per_doc: args.effective_per_doc(ctx.cfg.agent.per_doc),
         mmr: args.mmr,
         include_archives: args.include_archives,
     };
-    let result = ctx.client()?.search(&params).await?;
+    let mut result = ctx.client()?.search(&params).await?;
+    // The lattice has no offset; ask for offset+limit and drop the head. Ranks stay absolute.
+    let total = result.hits.len();
+    result.hits = result.hits.into_iter().skip(offset as usize).collect();
+    result.count = result.hits.len();
+    let truncated = total as u32 >= requested && requested < 50;
     if ctx.json {
-        return emit_json(&result);
+        let meta = Meta {
+            truncated,
+            next: if truncated { Some(requested) } else { None },
+            latency: Some(result.latency),
+            count: Some(result.count),
+            limit: Some(limit),
+            offset: Some(offset),
+            ..Meta::default()
+        };
+        return emit_with(&result, meta);
     }
     if result.hits.is_empty() {
         println!("No lattice hits for {:?}.", result.query);
@@ -191,7 +233,10 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
 // ----------------------------------------------------------------------- read
 
 fn read(ctx: &Ctx, args: ReadArgs) -> Result<()> {
-    let note = notes::read(&ctx.vault.root, &args.path)?;
+    let mut note = notes::read(&ctx.vault.root, &args.path)?;
+    let max = args.max_chars.or(if ctx.json { ctx.cfg.agent.read_max_chars } else { None });
+    let (body, truncated) = notes::excerpt(&note, args.heading.as_deref(), args.chunk, max)?;
+    note.body = body;
     if ctx.json {
         if args.meta {
             return emit_json(&json!({
@@ -200,10 +245,11 @@ fn read(ctx: &Ctx, args: ReadArgs) -> Result<()> {
                 "tags": note.tags, "size": note.size, "updatedAt": note.updated_at,
             }));
         }
+        let meta = Meta { truncated, ..Meta::default() };
         if args.body {
-            return emit_json(&json!({ "path": note.path, "body": note.body }));
+            return emit_with(&json!({ "path": note.path, "body": note.body }), meta);
         }
-        return emit_json(&note);
+        return emit_with(&note, meta);
     }
     if args.meta {
         return emit_json(&note.hal);
@@ -238,7 +284,7 @@ async fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
     };
     let rows = ops::list(ctx, params).await?;
     if ctx.json {
-        return emit_json(&rows);
+        return emit_with(&rows, Meta::page(rows.len(), args.limit, args.offset));
     }
     if rows.is_empty() {
         println!("No documents match.");
@@ -295,7 +341,7 @@ fn print_write(ctx: &Ctx, report: &ops::WriteReport) -> Result<()> {
             (None, Some(_)) => "  (index kick failed)".into(),
             (None, None) => String::new(),
         };
-        println!("{}{idx}", report.written.path);
+        println!("{}{idx}{}", report.written.path, if report.written.dry_run { "  (dry run)" } else { "" });
     }
     if let Some(e) = &report.reindex_error {
         eprintln!("lapis: written, but reindex failed: {e}");
@@ -317,6 +363,7 @@ async fn create(ctx: &Ctx, args: CreateArgs) -> Result<()> {
         inbox: ctx.inbox()?,
         director: args.director.clone(),
         template_date: None,
+        dry_run: args.dry_run,
     };
     let w = write::create(&ctx.vault.root, &opts)?;
     print_write(ctx, &ops::kick(ctx, w, args.no_reindex).await?)
@@ -330,7 +377,7 @@ async fn append(ctx: &Ctx, args: AppendArgs) -> Result<()> {
     if text.trim().is_empty() {
         return Err(LapisError::Usage("nothing to append".into()));
     }
-    let w = write::append(&ctx.vault.root, &args.path, &text)?;
+    let w = write::append_with(&ctx.vault.root, &args.path, &text, &args.guard.guard())?;
     print_write(ctx, &ops::kick(ctx, w, args.no_reindex).await?)
 }
 
@@ -423,16 +470,45 @@ fn task_mark(t: &tasks::Task) -> &'static str {
 }
 
 fn task_list(ctx: &Ctx, args: TaskListArgs) -> Result<()> {
-    let f = tasks::Filter { status: args.status, due: args.due, tag: args.tag, prefix: args.path };
+    let scope = args.scope();
+    let summary = tasks::wants_summary(scope.as_deref(), args.full || ctx.cfg.agent.task_unscoped_full());
+    let f = tasks::Filter {
+        status: args.status,
+        due: args.due,
+        tag: args.tag,
+        prefix: scope,
+        exclude: ctx.cfg.agent.task_exclude.clone(),
+    };
     let list = tasks::list(&ctx.vault.root, &f)?;
-    if ctx.json {
-        return emit_json(&list);
+    if summary {
+        // Unscoped: the whole vault is hundreds of rows. Counts first; a PATH
+        // (or --full) gets the rows.
+        let s = tasks::summarize(&list);
+        if ctx.json {
+            return emit_json(&s);
+        }
+        println!("{} tasks  (pass a PATH or --full for rows)", s.n);
+        for (k, v) in &s.by_status {
+            println!("  {k:<12} {v:>5}");
+        }
+        println!("by folder:");
+        for (k, v) in &s.by_folder {
+            println!("  {k:<28} {v:>5}");
+        }
+        return Ok(());
     }
-    if list.is_empty() {
+    let (page, meta) = envelope::slice_page(&list, args.limit, args.offset);
+    if ctx.json {
+        return emit_with(&page, meta);
+    }
+    if page.is_empty() {
         println!("No tasks match.");
         return Ok(());
     }
-    for t in &list {
+    if let Some(next) = meta.next {
+        eprintln!("lapis: {} of {} tasks shown; --offset {next} for more", page.len(), list.len());
+    }
+    for t in &page {
         let meta = meta_line(&[
             t.due.as_ref().map(|d| format!("due:{d}")),
             t.priority.as_ref().map(|p| format!("!{p}")),
@@ -444,14 +520,122 @@ fn task_list(ctx: &Ctx, args: TaskListArgs) -> Result<()> {
 }
 
 async fn task_toggle(ctx: &Ctx, args: TaskToggleArgs) -> Result<()> {
-    let r = ops::toggle_task(ctx, &args.id, args.no_reindex).await?;
+    let r = ops::toggle_task_with(ctx, &args.id, args.no_reindex, &args.guard.guard()).await?;
     if ctx.json {
         emit_json(&r)?;
     } else {
-        println!("[{}] {}  {}", task_mark(&r.task), r.task.id, r.task.content);
+        println!(
+            "[{}] {}  {}{}",
+            task_mark(&r.task),
+            r.task.id,
+            r.task.content,
+            if r.dry_run { "  (dry run)" } else { "" }
+        );
     }
     if let Some(e) = &r.reindex_error {
         eprintln!("lapis: toggled, but reindex failed: {e}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------- analytics / tree
+
+async fn analytics(ctx: &Ctx, args: AnalyticsArgs) -> Result<()> {
+    let a = ctx.client()?.analytics(&args.query).await?;
+    if ctx.json {
+        let meta = Meta { truncated: a.truncated, count: Some(a.count), ..Meta::default() };
+        return emit_with(&a, meta);
+    }
+    for (k, v) in &a.extra {
+        println!("{k}: {v}");
+    }
+    if !a.columns.is_empty() {
+        println!("{}", a.columns.join("\t"));
+    }
+    for row in &a.rows {
+        let cells: Vec<String> = row
+            .iter()
+            .map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => String::new(),
+                other => other.to_string(),
+            })
+            .collect();
+        println!("{}", cells.join("\t"));
+    }
+    if a.truncated {
+        eprintln!("lapis: {} rows shown (truncated)", a.count);
+    }
+    Ok(())
+}
+
+async fn tree_retrieve(ctx: &Ctx, args: TreeArgs) -> Result<()> {
+    let rel = match &args.path {
+        Some(p) => {
+            let r = notes::clean_rel(p)?;
+            Some(if std::path::Path::new(&r).extension().is_none() { format!("{r}.md") } else { r })
+        }
+        None => None,
+    };
+    let t = ctx.client()?.tree(rel.as_deref(), args.query.as_deref(), args.depth, args.max_nodes).await?;
+    if ctx.json {
+        let meta = Meta { truncated: t.truncated, count: Some(t.count), ..Meta::default() };
+        return emit_with(&t, meta);
+    }
+    println!("seed: {}{}", t.seed, if t.ranked { "  (ranked by query)" } else { "" });
+    for n in &t.nodes {
+        let hub = if n.is_hub { " ◆" } else { "" };
+        let score = n.score.map(|s| format!("  {s:.3}")).unwrap_or_default();
+        println!("{}{}{hub}{score}", "  ".repeat(n.depth as usize), n.path);
+    }
+    if t.truncated {
+        eprintln!("lapis: tree truncated at {} nodes (--max-nodes)", t.count);
+    }
+    Ok(())
+}
+
+// -------------------------------------------------------------------- desktop
+
+/// `lapis desktop`: the GPUI shell (N23). Built without the `desktop` feature
+/// this reports exactly that instead of pretending.
+fn desktop(ctx: &Ctx, args: cli::DesktopArgs) -> Result<()> {
+    let opts = lapis_desktop::Options {
+        vault_root: ctx.vault.root.clone(),
+        lattice_url: ctx.lattice_url.clone(),
+        seed: args.path,
+        title: "Lapis".into(),
+    };
+    if args.check {
+        let report = lapis_desktop::preflight(&opts);
+        if ctx.json {
+            return emit_json(&report);
+        }
+        println!(
+            "desktop: gpui={} sidecar={}",
+            report.gpui_available,
+            report.gitnexus.as_deref().unwrap_or("none")
+        );
+        return Ok(());
+    }
+    lapis_desktop::run(opts).map_err(|e| match e {
+        lapis_desktop::DesktopError::NotBuilt(m) => LapisError::Usage(m),
+        lapis_desktop::DesktopError::Runtime(m) => LapisError::Internal(m),
+    })
+}
+
+// -------------------------------------------------------------------- resolve
+
+fn resolve_link(ctx: &Ctx, args: ResolveArgs) -> Result<()> {
+    let r = resolve::resolve(&ctx.vault.root, &args.link)?;
+    if ctx.json {
+        return emit_json(&r);
+    }
+    match (&r.path, r.how) {
+        (Some(p), how) => println!("{p}  ({how})"),
+        (None, "collision") => {
+            println!("collision: {}", r.candidates.join(", "));
+        }
+        (None, _) => println!("dangling: {}", r.target),
     }
     Ok(())
 }
@@ -462,7 +646,34 @@ async fn neighbors(ctx: &Ctx, args: NeighborsArgs) -> Result<()> {
     // Path escape rules apply even though the lattice, not the disk, answers.
     let rel = notes::clean_rel(&args.path)?;
     let rel = if std::path::Path::new(&rel).extension().is_none() { format!("{rel}.md") } else { rel };
-    let n = ctx.client()?.neighbors(&rel, &args.direction, !args.dangling).await?;
+    let dir = args.direction.clone().unwrap_or_else(|| ctx.cfg.agent.direction().to_string());
+    if args.hop == 2 {
+        let e = ctx.client()?.ego(&rel, 2, &dir, !args.dangling).await?;
+        if ctx.json {
+            let meta = Meta { truncated: e.truncated, count: Some(e.count), ..Meta::default() };
+            return emit_with(&e, meta);
+        }
+        if e.rows.is_empty() {
+            println!("No {} neighbors within 2 hops of {}.", e.direction, e.path);
+            return Ok(());
+        }
+        for r in &e.rows {
+            let arrow = if r.direction == "in" { "<-" } else { "->" };
+            let shown = r.path.clone().or_else(|| r.dst_raw.clone()).unwrap_or_else(|| "?".into());
+            let flag = if r.resolved { "" } else { "  (dangling)" };
+            let via = if r.depth > 1 {
+                format!("  via {}", r.via.clone().unwrap_or_default())
+            } else {
+                String::new()
+            };
+            println!("{}{arrow} {shown}{flag}{via}", "  ".repeat(r.depth as usize - 1));
+        }
+        if e.truncated {
+            eprintln!("lapis: ego graph truncated at {} rows", e.count);
+        }
+        return Ok(());
+    }
+    let n = ctx.client()?.neighbors(&rel, &dir, !args.dangling).await?;
     if ctx.json {
         return emit_json(&n);
     }
@@ -473,7 +684,7 @@ async fn neighbors(ctx: &Ctx, args: NeighborsArgs) -> Result<()> {
     for e in &n.neighbors {
         let arrow = if e.direction == "in" { "<-" } else { "->" };
         let flag = if e.resolved { "" } else { "  (dangling)" };
-        println!("{arrow} {}{flag}", e.path);
+        println!("{arrow} {}{flag}", e.label());
     }
     Ok(())
 }

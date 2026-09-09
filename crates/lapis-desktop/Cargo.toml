@@ -1,0 +1,16 @@
+[package]
+name = "lapis-desktop"
+version = "0.1.0"
+edition = "2024"
+description = "Lapis desktop shell: GPUI window (feature `gpui`), HTML renderer, graph scene, GitNexus sidecar."
+license = "MIT"
+
+[features]
+default = []
+# The real window. Heavy build (Metal shaders); everything else in this crate compiles without it.
+gpui = ["dep:gpui"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+gpui = { version = "0.2", optional = true }

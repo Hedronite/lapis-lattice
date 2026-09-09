@@ -71,6 +71,15 @@ pub enum Command {
     /// Hop-1 wikilink neighbors of a note from the lattice `edges` table.
     Neighbors(NeighborsArgs),
 
+    /// Resolve a wikilink (`[[Name|alias#anchor]]`) or lattice `dst_raw` to a vault path.
+    Resolve(ResolveArgs),
+
+    /// Named lattice analytics (DuckDB, read-only): inventory, priority, tags, health, recent, hubs, density, degree, dangling.
+    Analytics(AnalyticsArgs),
+
+    /// Hub-routed link walk from a seed note (or the nearest Cross-References hub for --query).
+    TreeRetrieve(TreeArgs),
+
     /// List notes from the lattice `documents` table (metadata only). Never walks the vault.
     List(ListArgs),
 
@@ -115,6 +124,9 @@ pub enum Command {
 
     /// Terminal UI: sidebar tree, editor, lattice search palette (Ctrl+P), HAL inspector.
     Tui,
+
+    /// Desktop shell (GPUI). Needs a build with `--features desktop`; `--check` reports what is available.
+    Desktop(DesktopArgs),
 
     /// MCP server over stdio (tools: vault_info, search, read_note, list_notes, neighbors, create_note, append_to_note, list_tasks, toggle_task).
     Mcp,
@@ -163,6 +175,22 @@ pub struct TaskListArgs {
     #[arg(value_name = "PATH")]
     pub path: Option<String>,
 
+    /// Same as the positional PATH.
+    #[arg(long = "path", value_name = "PATH", conflicts_with = "path")]
+    pub path_flag: Option<String>,
+
+    /// Unscoped runs print a summary (counts by status and folder); `--full` prints every row.
+    #[arg(long)]
+    pub full: bool,
+
+    /// Max rows per page when listing rows (0 = all).
+    #[arg(long, short = 'n', default_value_t = 500, value_name = "N")]
+    pub limit: u32,
+
+    /// Row offset for paging.
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    pub offset: u32,
+
     /// open | done | in-progress | cancelled | forwarded | waiting
     #[arg(long, value_name = "STATUS")]
     pub status: Option<String>,
@@ -176,6 +204,13 @@ pub struct TaskListArgs {
     pub tag: Option<String>,
 }
 
+impl TaskListArgs {
+    /// Scope from the positional or `--path`.
+    pub fn scope(&self) -> Option<String> {
+        self.path.clone().or_else(|| self.path_flag.clone())
+    }
+}
+
 #[derive(Debug, Args)]
 pub struct TaskToggleArgs {
     /// Task id from `task list`, e.g. `foundry/lapis/plan.md#0`.
@@ -185,6 +220,31 @@ pub struct TaskToggleArgs {
     /// Skip the lattice reindex kick after writing.
     #[arg(long)]
     pub no_reindex: bool,
+
+    #[command(flatten)]
+    pub guard: GuardArgs,
+}
+
+/// `--dry-run` / stale guards shared by append and task toggle.
+#[derive(Debug, Args, Clone, Default)]
+pub struct GuardArgs {
+    /// Compute and report the result without writing.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Refuse if the note's mtime (ms, `updatedAt` from `read`) no longer matches.
+    #[arg(long, value_name = "MS")]
+    pub if_mtime: Option<u64>,
+
+    /// Refuse if the note's content hash (`hash` from `read`) no longer matches.
+    #[arg(long, value_name = "HASH")]
+    pub if_hash: Option<String>,
+}
+
+impl GuardArgs {
+    pub fn guard(&self) -> crate::write::Guard {
+        crate::write::Guard { dry_run: self.dry_run, if_mtime: self.if_mtime, if_hash: self.if_hash.clone() }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -228,6 +288,10 @@ pub struct CreateArgs {
     /// Skip the lattice reindex kick after writing.
     #[arg(long)]
     pub no_reindex: bool,
+
+    /// Compute path, HAL and text; write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -247,6 +311,9 @@ pub struct AppendArgs {
     /// Skip the lattice reindex kick after writing.
     #[arg(long)]
     pub no_reindex: bool,
+
+    #[command(flatten)]
+    pub guard: GuardArgs,
 }
 
 #[derive(Debug, Args)]
@@ -318,6 +385,10 @@ pub struct SearchArgs {
     #[arg(long, short = 'n', default_value_t = 10, value_name = "N")]
     pub limit: u32,
 
+    /// Skip this many hits (offset + limit must stay ≤ 50).
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    pub offset: u32,
+
     /// Filter by HAL `domain`.
     #[arg(long, value_name = "DOMAIN")]
     pub domain: Option<String>,
@@ -329,6 +400,10 @@ pub struct SearchArgs {
     /// Collapse to the best chunk per document.
     #[arg(long)]
     pub per_doc: bool,
+
+    /// Agent defaults: one hit per document (per_doc). Same as the MCP `search` tool.
+    #[arg(long)]
+    pub agent: bool,
 
     /// MMR diversity re-ranking.
     #[arg(long)]
@@ -342,6 +417,10 @@ pub struct SearchArgs {
 impl SearchArgs {
     pub fn query_text(&self) -> String {
         self.query.join(" ")
+    }
+    /// `--per-doc`, or `--agent` with the `[agent].per_doc` profile default.
+    pub fn effective_per_doc(&self, agent_default: bool) -> bool {
+        self.per_doc || (self.agent && agent_default)
     }
 }
 
@@ -358,6 +437,36 @@ pub struct ReadArgs {
     /// Print only the body, without frontmatter.
     #[arg(long)]
     pub body: bool,
+
+    /// Only the section under this heading (case-insensitive, nested sub-sections included).
+    #[arg(long, value_name = "H", conflicts_with = "chunk")]
+    pub heading: Option<String>,
+
+    /// Only the N-th heading section (0 = preamble / first section), local outline order.
+    #[arg(long, value_name = "N")]
+    pub chunk: Option<usize>,
+
+    /// Clip the body to this many chars; `meta.truncated` says when it happened.
+    #[arg(long, value_name = "N")]
+    pub max_chars: Option<usize>,
+}
+
+#[derive(Debug, Args)]
+pub struct DesktopArgs {
+    /// Note to open / seed the graph canvas with.
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<String>,
+
+    /// Report whether the GPUI shell and the GitNexus sidecar are available, then exit.
+    #[arg(long)]
+    pub check: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ResolveArgs {
+    /// `[[Name]]`, `[[Name|alias#anchor]]`, or a raw link target such as a lattice `dst_raw`.
+    #[arg(value_name = "LINK")]
+    pub link: String,
 }
 
 #[derive(Debug, Args)]
@@ -366,13 +475,43 @@ pub struct NeighborsArgs {
     #[arg(value_name = "PATH")]
     pub path: String,
 
-    /// Edge direction: out, in, or both.
-    #[arg(long, default_value = "out", value_parser = ["out", "in", "both"])]
-    pub direction: String,
+    /// Edge direction: out, in, or both (default from `[agent].neighbors_direction`, else both).
+    #[arg(long, value_parser = ["out", "in", "both"])]
+    pub direction: Option<String>,
 
     /// Include dangling (unresolved) links too.
     #[arg(long)]
     pub dangling: bool,
+
+    /// 1 = direct neighbors (edges table); 2 = ego graph with depth / via per row.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=2))]
+    pub hop: u32,
+}
+
+#[derive(Debug, Args)]
+pub struct AnalyticsArgs {
+    /// One of: inventory, priority, tags, health, recent, hubs, density, degree, dangling.
+    #[arg(value_name = "QUERY")]
+    pub query: String,
+}
+
+#[derive(Debug, Args)]
+pub struct TreeArgs {
+    /// Seed note (vault-relative). Omit to start at the hub nearest to --query.
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<String>,
+
+    /// Rank children by nomic similarity to this text; also picks the seed hub when --path is omitted.
+    #[arg(long, value_name = "TEXT")]
+    pub query: Option<String>,
+
+    /// Walk depth (1..3).
+    #[arg(long, default_value_t = 2, value_name = "N")]
+    pub depth: u32,
+
+    /// Node cap (1..200); `truncated` says when it was hit.
+    #[arg(long, default_value_t = 60, value_name = "N")]
+    pub max_nodes: u32,
 }
 
 #[cfg(test)]
@@ -498,5 +637,181 @@ mod tests {
     fn neighbors_direction_is_validated() {
         assert!(Cli::try_parse_from(["lapis", "neighbors", "a.md", "--direction", "sideways"]).is_err());
         assert!(Cli::try_parse_from(["lapis", "neighbors", "a.md", "--direction", "both"]).is_ok());
+    }
+
+    /// N2: hop-1 defaults to both directions; `--direction` still narrows.
+    #[test]
+    fn neighbors_default_direction_is_both() {
+        let c = Cli::try_parse_from(["lapis", "neighbors", "a.md"]).unwrap();
+        let Command::Neighbors(n) = c.command() else { panic!("neighbors") };
+        assert_eq!(n.direction, None, "unset → config default, which is both");
+        assert!(!n.dangling);
+        let c =
+            Cli::try_parse_from(["lapis", "neighbors", "a.md", "--direction", "in", "--dangling"]).unwrap();
+        let Command::Neighbors(n) = c.command() else { panic!("neighbors") };
+        assert_eq!(n.direction.as_deref(), Some("in"));
+        assert!(n.dangling);
+    }
+
+    /// N23: `lapis desktop` parses with and without a build that has GPUI.
+    #[test]
+    fn desktop_subcommand() {
+        let Command::Desktop(d) = Cli::try_parse_from(["lapis", "desktop"]).unwrap().command() else {
+            panic!()
+        };
+        assert!(d.path.is_none() && !d.check);
+        let Command::Desktop(d) =
+            Cli::try_parse_from(["lapis", "desktop", "--check", "--path", "a.md"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert!(d.check && d.path.as_deref() == Some("a.md"));
+    }
+
+    /// N17–N19: hop, analytics and tree-retrieve surfaces.
+    #[test]
+    fn slice3_flags() {
+        let Command::Neighbors(n) = Cli::try_parse_from(["lapis", "neighbors", "a.md"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert_eq!(n.hop, 1);
+        let Command::Neighbors(n) =
+            Cli::try_parse_from(["lapis", "neighbors", "a.md", "--hop", "2"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert_eq!(n.hop, 2);
+        assert!(Cli::try_parse_from(["lapis", "neighbors", "a.md", "--hop", "3"]).is_err());
+        assert!(Cli::try_parse_from(["lapis", "neighbors", "a.md", "--hop", "0"]).is_err());
+        let Command::Analytics(a) = Cli::try_parse_from(["lapis", "analytics", "degree"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert_eq!(a.query, "degree");
+        assert!(Cli::try_parse_from(["lapis", "analytics"]).is_err());
+        let Command::TreeRetrieve(t) = Cli::try_parse_from([
+            "lapis",
+            "tree-retrieve",
+            "--json",
+            "--path",
+            "P.md",
+            "--query",
+            "Q",
+            "--depth",
+            "3",
+            "--max-nodes",
+            "9",
+        ])
+        .unwrap()
+        .command() else {
+            panic!()
+        };
+        assert_eq!(
+            (t.path.as_deref(), t.query.as_deref(), t.depth, t.max_nodes),
+            (Some("P.md"), Some("Q"), 3, 9)
+        );
+        let Command::TreeRetrieve(t) = Cli::try_parse_from(["lapis", "tree-retrieve"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert_eq!((t.depth, t.max_nodes), (2, 60));
+    }
+
+    /// N8 / N11 / N12 / N13: new flags parse and defaults hold.
+    #[test]
+    fn slice2_flags() {
+        let Command::Search(s) =
+            Cli::try_parse_from(["lapis", "search", "q", "--offset", "10", "-n", "5"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert_eq!((s.limit, s.offset), (5, 10));
+        let Command::Read(r) =
+            Cli::try_parse_from(["lapis", "read", "a.md", "--heading", "Goals", "--max-chars", "300"])
+                .unwrap()
+                .command()
+        else {
+            panic!()
+        };
+        assert_eq!((r.heading.as_deref(), r.chunk, r.max_chars), (Some("Goals"), None, Some(300)));
+        assert!(Cli::try_parse_from(["lapis", "read", "a.md", "--heading", "x", "--chunk", "1"]).is_err());
+        let Command::Resolve(x) = Cli::try_parse_from(["lapis", "resolve", "[[A|b#c]]"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert_eq!(x.link, "[[A|b#c]]");
+        let Command::Append(a) = Cli::try_parse_from([
+            "lapis",
+            "append",
+            "a.md",
+            "t",
+            "--dry-run",
+            "--if-hash",
+            "fnv1a64:0",
+            "--if-mtime",
+            "7",
+        ])
+        .unwrap()
+        .command() else {
+            panic!()
+        };
+        let g = a.guard.guard();
+        assert!(g.dry_run);
+        assert_eq!((g.if_mtime, g.if_hash.as_deref()), (Some(7), Some("fnv1a64:0")));
+        let Command::Create(c) =
+            Cli::try_parse_from(["lapis", "create", "--title", "T", "--dry-run"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert!(c.dry_run);
+        let Command::Task { command: TaskCommand::Toggle(t) } =
+            Cli::try_parse_from(["lapis", "task", "toggle", "a.md#0", "--dry-run"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert!(t.guard.dry_run && t.guard.if_mtime.is_none());
+        let Command::Task { command: TaskCommand::List(l) } =
+            Cli::try_parse_from(["lapis", "task", "list", "x", "--offset", "500"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert_eq!((l.limit, l.offset), (500, 500));
+    }
+
+    /// N3: `--agent` implies per_doc; `--per-doc` alone still works.
+    #[test]
+    fn search_agent_implies_per_doc() {
+        let parse = |a: &[&str]| match Cli::try_parse_from(a).unwrap().command() {
+            Command::Search(s) => s,
+            _ => panic!("search"),
+        };
+        assert!(!parse(&["lapis", "search", "q"]).effective_per_doc(true));
+        assert!(parse(&["lapis", "search", "--per-doc", "q"]).effective_per_doc(false));
+        let s = parse(&["lapis", "search", "--agent", "q"]);
+        assert!(s.agent && !s.per_doc && s.effective_per_doc(true));
+        assert!(!s.effective_per_doc(false), "[agent] per_doc=false turns it off");
+    }
+
+    /// N4: scope comes from the positional or `--path`; both plus `--full` parse.
+    #[test]
+    fn task_list_scope_positional_or_flag() {
+        let list = |a: &[&str]| match Cli::try_parse_from(a).unwrap().command() {
+            Command::Task { command: TaskCommand::List(l) } => l,
+            _ => panic!("task list"),
+        };
+        let l = list(&["lapis", "task", "list", "--json"]);
+        assert_eq!(l.scope(), None);
+        assert!(!l.full);
+        assert_eq!(
+            list(&["lapis", "task", "list", "foundry/lapis"]).scope().as_deref(),
+            Some("foundry/lapis")
+        );
+        assert_eq!(
+            list(&["lapis", "task", "list", "--json", "--path", "foundry/lapis"]).scope().as_deref(),
+            Some("foundry/lapis")
+        );
+        assert!(list(&["lapis", "task", "list", "--full"]).full);
+        assert!(Cli::try_parse_from(["lapis", "task", "list", "a", "--path", "b"]).is_err());
     }
 }

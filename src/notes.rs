@@ -108,6 +108,8 @@ pub struct Note {
     pub size: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<u64>,
+    /// Content hash of the file bytes (`fnv1a64:<hex>`); pass back as `--if-hash`.
+    pub hash: String,
     /// PDF only: page count of the extracted text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pages: Option<usize>,
@@ -126,6 +128,7 @@ pub fn read(root: &Path, rel: &str) -> Result<Note> {
         // tome_indexer.py owns PDF *indexing*; this is the on-demand text
         // for `read` / MCP read_note, never a second crawler.
         let (body, pages) = pdf_text(&abs).map_err(|e| LapisError::Usage(format!("{path}: pdf: {e}")))?;
+        let hash = std::fs::read(&abs).map(|b| content_hash(&b)).unwrap_or_default();
         return Ok(Note {
             title: stem_of(&path),
             path,
@@ -137,11 +140,13 @@ pub fn read(root: &Path, rel: &str) -> Result<Note> {
             body,
             size,
             updated_at,
+            hash,
             pages: Some(pages),
         });
     }
 
     let bytes = std::fs::read(&abs)?;
+    let hash = content_hash(&bytes);
     let text = String::from_utf8(bytes).map_err(|_| LapisError::Usage(format!("{path}: not UTF-8 text")))?;
 
     let (hal, hal_valid, hal_error, body) = if kind == Kind::Markdown {
@@ -156,7 +161,130 @@ pub fn read(root: &Path, rel: &str) -> Result<Note> {
         .unwrap_or_else(|| stem_of(&path));
     let tags = hal::tags_from_hal(&hal);
 
-    Ok(Note { path, kind, title, hal, hal_valid, hal_error, tags, body, size, updated_at, pages: None })
+    Ok(Note { path, kind, title, hal, hal_valid, hal_error, tags, body, size, updated_at, hash, pages: None })
+}
+
+/// FNV-1a 64 over the raw bytes. Not cryptographic: a cheap stale-write guard
+/// (`--if-hash`) that agents can round-trip from `read`.
+pub fn content_hash(bytes: &[u8]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("fnv1a64:{h:016x}")
+}
+
+/// Millisecond mtime of a file, as `read` reports in `updatedAt`.
+pub fn mtime_ms(abs: &Path) -> Option<u64> {
+    std::fs::metadata(abs)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+}
+
+/// One `#` section: heading text, level, and the body under it (up to the
+/// next heading of the same or a higher level). Section 0 is the preamble
+/// before the first heading, with an empty heading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Section {
+    pub heading: String,
+    pub level: u8,
+    pub text: String,
+}
+
+fn heading_of(line: &str) -> Option<(u8, &str)> {
+    let t = line.trim_start();
+    let hashes = t.bytes().take_while(|b| *b == b'#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let rest = &t[hashes..];
+    if !rest.starts_with(' ') && !rest.is_empty() {
+        return None;
+    }
+    Some((hashes as u8, rest.trim().trim_end_matches('#').trim()))
+}
+
+/// Split a Markdown body into heading sections (fenced code is not parsed as headings).
+pub fn sections(body: &str) -> Vec<Section> {
+    let mut out: Vec<Section> = vec![Section { heading: String::new(), level: 0, text: String::new() }];
+    let mut in_fence = false;
+    for line in body.lines() {
+        let t = line.trim_start();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            in_fence = !in_fence;
+        }
+        if !in_fence && let Some((level, h)) = heading_of(line) {
+            out.push(Section { heading: h.to_string(), level, text: String::new() });
+            continue;
+        }
+        let cur = out.last_mut().unwrap();
+        cur.text.push_str(line);
+        cur.text.push('\n');
+    }
+    for s in &mut out {
+        s.text = s.text.trim().to_string();
+    }
+    if out.len() > 1 && out[0].text.is_empty() {
+        out.remove(0);
+    }
+    out
+}
+
+/// Body under heading `h` (case-insensitive, `#` prefix optional) including
+/// its nested sub-sections, or `None`.
+pub fn section(body: &str, h: &str) -> Option<String> {
+    let want = h.trim().trim_start_matches('#').trim().to_lowercase();
+    let secs = sections(body);
+    let i = secs.iter().position(|s| s.heading.to_lowercase() == want)?;
+    let level = secs[i].level;
+    let mut text = format!("{} {}\n\n{}", "#".repeat(level as usize), secs[i].heading, secs[i].text);
+    for s in &secs[i + 1..] {
+        if s.level <= level {
+            break;
+        }
+        text.push_str(&format!("\n\n{} {}\n\n{}", "#".repeat(s.level as usize), s.heading, s.text));
+    }
+    Some(text.trim().to_string())
+}
+
+/// `read --heading / --chunk / --max-chars` on an already-read note: the body
+/// slice and whether it was clipped. Missing heading / chunk is exit 3.
+pub fn excerpt(
+    note: &Note,
+    heading: Option<&str>,
+    chunk: Option<usize>,
+    max_chars: Option<usize>,
+) -> Result<(String, bool)> {
+    let body = if let Some(h) = heading {
+        section(&note.body, h).ok_or_else(|| LapisError::Path(format!("{}: no heading {h:?}", note.path)))?
+    } else if let Some(n) = chunk {
+        let secs = sections(&note.body);
+        let s = secs.get(n).ok_or_else(|| {
+            LapisError::Path(format!("{}: no chunk #{n} ({} sections)", note.path, secs.len()))
+        })?;
+        if s.level == 0 {
+            s.text.clone()
+        } else {
+            format!("{} {}\n\n{}", "#".repeat(s.level as usize), s.heading, s.text)
+        }
+    } else {
+        note.body.clone()
+    };
+    Ok(match max_chars {
+        Some(m) => clip(&body, m),
+        None => (body, false),
+    })
+}
+
+/// Clip to `max` chars on a char boundary. Returns `(text, truncated)`.
+pub fn clip(s: &str, max: usize) -> (String, bool) {
+    if s.chars().count() <= max {
+        return (s.to_string(), false);
+    }
+    (s.chars().take(max).collect(), true)
 }
 
 /// Extracted text and page count. Pages are joined with a blank line; runs
@@ -328,6 +456,48 @@ mod tests {
         assert_eq!(e.exit_code(), 1);
         assert!(e.to_string().contains("pdf"));
         let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// N11: heading / chunk slicing and clipping are pure on the body.
+    #[test]
+    fn sections_heading_chunk_and_clip() {
+        let body = "intro line\n\n# One\n\ntext one\n\n## One.a\n\nnested\n\n```\n# not a heading\n```\n\n# Two\n\ntext two\n";
+        let s = sections(body);
+        let heads: Vec<(&str, u8)> = s.iter().map(|x| (x.heading.as_str(), x.level)).collect();
+        assert_eq!(heads, [("", 0), ("One", 1), ("One.a", 2), ("Two", 1)]);
+        assert_eq!(s[0].text, "intro line");
+        assert!(s[2].text.contains("# not a heading"), "fenced hash stays in the section");
+        assert_eq!(s[3].text, "text two");
+        let one = section(body, "one").unwrap();
+        assert!(one.starts_with("# One"));
+        assert!(one.contains("## One.a") && one.contains("nested"));
+        assert!(!one.contains("text two"));
+        assert_eq!(section(body, "## Two").unwrap(), "# Two\n\ntext two");
+        assert!(section(body, "Three").is_none());
+        let note = Note {
+            path: "n.md".into(),
+            kind: Kind::Markdown,
+            title: "n".into(),
+            hal: Map::new(),
+            hal_valid: true,
+            hal_error: None,
+            tags: vec![],
+            body: body.to_string(),
+            size: 0,
+            updated_at: None,
+            hash: String::new(),
+            pages: None,
+        };
+        assert_eq!(excerpt(&note, None, Some(0), None).unwrap(), ("intro line".to_string(), false));
+        assert!(excerpt(&note, None, Some(3), None).unwrap().0.starts_with("# Two"));
+        assert_eq!(excerpt(&note, None, Some(9), None).unwrap_err().exit_code(), 3);
+        assert_eq!(excerpt(&note, Some("nope"), None, None).unwrap_err().exit_code(), 3);
+        let (t, trunc) = excerpt(&note, Some("Two"), None, Some(5)).unwrap();
+        assert_eq!((t.as_str(), trunc), ("# Two", true));
+        assert_eq!(clip("héllo", 3), ("hél".to_string(), true));
+        assert_eq!(clip("hi", 3), ("hi".to_string(), false));
+        assert!(content_hash(b"a") != content_hash(b"b"));
+        assert_eq!(content_hash(b"").len(), "fnv1a64:".len() + 16);
     }
 
     #[test]

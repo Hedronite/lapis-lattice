@@ -42,6 +42,8 @@ pub struct CreateOpts {
     /// Date the template placeholders refer to (`{{date}}`, `{{week}}`,
     /// `{{month}}`); default today. `created`/`updated` are always today.
     pub template_date: Option<jiff::civil::Date>,
+    /// Compute everything, write nothing.
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -52,6 +54,12 @@ pub struct Written {
     pub hal: Map<String, Value>,
     pub bytes: u64,
     pub taxonomy: &'static str,
+    /// `true` when nothing touched the disk (`--dry-run`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
+    /// Full text that was (or would be) written; only on dry runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 pub fn today() -> String {
@@ -170,6 +178,35 @@ fn is_canon(doc_type: &str) -> bool {
     CANON_TYPES.contains(&doc_type)
 }
 
+/// Stale-write guard and dry-run switch shared by append / toggle.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Guard {
+    pub dry_run: bool,
+    /// Refuse unless the file's mtime (ms, as `read` reports `updatedAt`) still matches.
+    pub if_mtime: Option<u64>,
+    /// Refuse unless the file's content hash (as `read` reports `hash`) still matches.
+    pub if_hash: Option<String>,
+}
+
+impl Guard {
+    /// Usage error (exit 1) when the note changed since the agent read it.
+    pub fn check(&self, rel: &str, abs: &Path, bytes: &[u8]) -> Result<()> {
+        if let Some(want) = self.if_mtime {
+            let have = notes::mtime_ms(abs).unwrap_or(0);
+            if have != want {
+                return Err(LapisError::Usage(format!("{rel}: stale: mtime {have} != expected {want}")));
+            }
+        }
+        if let Some(want) = &self.if_hash {
+            let have = notes::content_hash(bytes);
+            if &have != want {
+                return Err(LapisError::Usage(format!("{rel}: stale: hash {have} != expected {want}")));
+            }
+        }
+        Ok(())
+    }
+}
+
 fn write_atomic(abs: &Path, text: &str) -> Result<u64> {
     if let Some(parent) = abs.parent() {
         std::fs::create_dir_all(parent)?;
@@ -224,17 +261,41 @@ pub fn create(root: &Path, opts: &CreateOpts) -> Result<Written> {
     let doc_type = hal.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let marker = if is_canon(&doc_type) { format!("{AUTHORITATIVE_MARKER}\n\n") } else { String::new() };
     let text = format!("---\n{}\n---\n{marker}{}\n", to_yaml(&hal)?, body.trim_end());
+    if opts.dry_run {
+        let bytes = text.len() as u64;
+        return Ok(Written {
+            path: rel,
+            title: opts.title.clone(),
+            hal,
+            bytes,
+            taxonomy: tax_source,
+            dry_run: true,
+            text: Some(text),
+        });
+    }
     let bytes = write_atomic(&root.join(&rel), &text)?;
-    Ok(Written { path: rel, title: opts.title.clone(), hal, bytes, taxonomy: tax_source })
+    Ok(Written {
+        path: rel,
+        title: opts.title.clone(),
+        hal,
+        bytes,
+        taxonomy: tax_source,
+        dry_run: false,
+        text: None,
+    })
 }
 
-/// Append `text` to an existing note and bump `updated:` (allowlisted).
-pub fn append(root: &Path, rel: &str, text: &str) -> Result<Written> {
+/// Append `text` to an existing note and bump `updated:` (allowlisted), with
+/// a stale guard and dry-run switch (N13).
+pub fn append_with(root: &Path, rel: &str, text: &str, guard: &Guard) -> Result<Written> {
     let (rel, abs) = notes::resolve(root, rel)?;
     if notes::kind_of(&rel) != notes::Kind::Markdown {
         return Err(LapisError::Usage(format!("{rel}: append only supports markdown notes")));
     }
-    let mut current = std::fs::read_to_string(&abs)?;
+    let raw = std::fs::read(&abs)?;
+    guard.check(&rel, &abs, &raw)?;
+    let mut current =
+        String::from_utf8(raw).map_err(|_| LapisError::Usage(format!("{rel}: not UTF-8 text")))?;
     current = set_frontmatter_key(&current, "updated", &today());
     if !current.is_empty() && !current.ends_with('\n') {
         current.push('\n');
@@ -244,10 +305,18 @@ pub fn append(root: &Path, rel: &str, text: &str) -> Result<Written> {
     }
     current.push_str(text.trim_end());
     current.push('\n');
-    let bytes = write_atomic(&abs, &current)?;
+    let bytes = if guard.dry_run { current.len() as u64 } else { write_atomic(&abs, &current)? };
     let p = hal::parse(&current);
     let title = hal::title_from_hal(&p.hal).unwrap_or_else(|| notes::stem_of(&rel));
-    Ok(Written { path: rel, title, hal: p.hal, bytes, taxonomy: "unchanged" })
+    Ok(Written {
+        path: rel,
+        title,
+        hal: p.hal,
+        bytes,
+        taxonomy: "unchanged",
+        dry_run: guard.dry_run,
+        text: if guard.dry_run { Some(current) } else { None },
+    })
 }
 
 /// Line-wise edit of one top-level scalar key inside the frontmatter block.
@@ -292,6 +361,7 @@ pub fn capture(root: &Path, text: &str, inbox: &str, operator: Option<String>) -
         inbox: inbox.to_string(),
         director: None,
         template_date: None,
+        dry_run: false,
     };
     create(root, &opts)
 }
@@ -355,6 +425,7 @@ pub fn periodic(
         inbox: "inbox".into(),
         director: None,
         template_date: Some(day),
+        dry_run: false,
     };
     let w = create(root, &opts)?;
     Ok(Periodic { path: w.path, created: true, date: label })
@@ -502,6 +573,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&v);
     }
 
+    /// N13: dry runs write nothing; stale guards refuse with exit 1.
+    #[test]
+    fn dry_run_and_stale_guards() {
+        let v = vault();
+        std::fs::write(v.join("foundry/lapis/g.md"), "---\nname: G\n---\nbody\n").unwrap();
+        let before = std::fs::read_to_string(v.join("foundry/lapis/g.md")).unwrap();
+        let w = append_with(&v, "foundry/lapis/g.md", "more", &Guard { dry_run: true, ..Default::default() })
+            .unwrap();
+        assert!(w.dry_run);
+        assert!(w.text.as_deref().unwrap().ends_with("more\n"));
+        assert_eq!(
+            std::fs::read_to_string(v.join("foundry/lapis/g.md")).unwrap(),
+            before,
+            "dry run must not write"
+        );
+        let j = serde_json::to_value(&w).unwrap();
+        assert_eq!(j["dryRun"], true);
+
+        let n = notes::read(&v, "foundry/lapis/g.md").unwrap();
+        let ok = Guard { if_hash: Some(n.hash.clone()), if_mtime: n.updated_at, dry_run: false };
+        append_with(&v, "foundry/lapis/g.md", "real", &ok).unwrap();
+        assert!(std::fs::read_to_string(v.join("foundry/lapis/g.md")).unwrap().contains("real"));
+        // the file changed: the old hash is now stale
+        let e = append_with(&v, "foundry/lapis/g.md", "again", &ok).unwrap_err();
+        assert_eq!(e.exit_code(), 1);
+        assert!(e.to_string().contains("stale"));
+        let e =
+            append_with(&v, "foundry/lapis/g.md", "x", &Guard { if_mtime: Some(1), ..Default::default() })
+                .unwrap_err();
+        assert!(e.to_string().contains("mtime"));
+        // wire shape without a dry run has neither key
+        let w = append_with(&v, "foundry/lapis/g.md", "z", &Guard::default()).unwrap();
+        let j = serde_json::to_value(&w).unwrap();
+        assert!(j.get("dryRun").is_none() && j.get("text").is_none());
+
+        let mut o = CreateOpts {
+            title: "Dry".into(),
+            path: Some("foundry/lapis/".into()),
+            template: None,
+            doc_type: None,
+            domain: None,
+            tags: vec![],
+            body: None,
+            operator: None,
+            inbox: "inbox".into(),
+            director: None,
+            template_date: None,
+            dry_run: true,
+        };
+        let w = create(&v, &o).unwrap();
+        assert_eq!(w.path, "foundry/lapis/dry.md");
+        assert!(w.dry_run && !v.join("foundry/lapis/dry.md").exists());
+        assert!(w.text.as_deref().unwrap().starts_with("---\n"));
+        o.dry_run = false;
+        assert!(v.join(create(&v, &o).unwrap().path).exists());
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
     #[test]
     fn trash_moves_under_bucket_and_never_overwrites() {
         let v = vault();
@@ -620,14 +749,17 @@ mod tests {
         let v = vault();
         let raw = "---\nname: X\n# a comment\nweird-key: [1, 2]\nupdated: 2020-01-01\n---\n<!--hal:authoritative:yaml-->\n\nbody\n";
         std::fs::write(v.join("foundry/lapis/x.md"), raw).unwrap();
-        let w = append(&v, "foundry/lapis/x", "more text").unwrap();
+        let w = append_with(&v, "foundry/lapis/x", "more text", &Guard::default()).unwrap();
         assert_eq!(w.path, "foundry/lapis/x.md");
         let out = std::fs::read_to_string(v.join("foundry/lapis/x.md")).unwrap();
         assert!(out.contains("# a comment\nweird-key: [1, 2]\n"));
         assert!(out.contains(&format!("updated: {}\n---\n<!--hal:authoritative:yaml-->", today())), "{out}");
         assert!(out.ends_with("body\n\nmore text\n"), "{out}");
         assert_eq!(w.hal["weird-key"], serde_json::json!([1, 2]));
-        assert_eq!(append(&v, "foundry/lapis/missing.md", "x").unwrap_err().exit_code(), 3);
+        assert_eq!(
+            append_with(&v, "foundry/lapis/missing.md", "x", &Guard::default()).unwrap_err().exit_code(),
+            3
+        );
         let _ = std::fs::remove_dir_all(&v);
     }
 

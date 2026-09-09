@@ -28,7 +28,7 @@ pub fn lines(hal: &Map<String, Value>, valid: bool) -> Vec<Line<'static>> {
     if !valid {
         return vec![Line::from(Span::styled(
             "frontmatter is not valid YAML",
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         ))];
     }
     let mut out: Vec<Line<'static>> = summary(hal)
