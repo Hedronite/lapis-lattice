@@ -97,21 +97,25 @@ pub fn list(root: &Path) -> Vec<Template> {
     out
 }
 
+/// Custom `.lapis/templates/<id>.md` wins over a built-in of the same short
+/// id, so a vault can override `daily` without renaming it.
 pub fn find(root: &Path, id: &str) -> Result<Template> {
     let id = id.trim();
+    let clean = notes::clean_rel(id)?;
+    let file = root.join(".lapis/templates").join(format!("{clean}.md"));
+    if !id.starts_with("builtin.")
+        && let Ok(text) = std::fs::read_to_string(&file)
+    {
+        return Ok(Template { id: clean, name: id.to_string(), target: String::new(), builtin: false, text });
+    }
     if let Some(t) = builtins().into_iter().find(|t| t.id == id || t.id.strip_prefix("builtin.") == Some(id))
     {
         return Ok(t);
     }
-    let clean = notes::clean_rel(id)?;
-    let file = root.join(".lapis/templates").join(format!("{clean}.md"));
-    let text = std::fs::read_to_string(&file).map_err(|_| {
-        LapisError::Usage(format!(
-            "template not found: {id} (built-ins: {})",
-            BUILTINS.iter().map(|b| b.0).collect::<Vec<_>>().join(", ")
-        ))
-    })?;
-    Ok(Template { id: clean, name: id.to_string(), target: String::new(), builtin: false, text })
+    Err(LapisError::Usage(format!(
+        "template not found: {id} (built-ins: {})",
+        BUILTINS.iter().map(|b| b.0).collect::<Vec<_>>().join(", ")
+    )))
 }
 
 #[derive(Debug, Clone, Default)]

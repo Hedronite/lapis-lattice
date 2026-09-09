@@ -676,6 +676,7 @@ impl App {
             operator: self.ctx.cfg.operator.name.clone(),
             inbox: self.ctx.inbox().unwrap_or_else(|_| "inbox".into()),
             director: None,
+            template_date: None,
         };
         let root = self.root();
         match write::create(&root, &opts) {

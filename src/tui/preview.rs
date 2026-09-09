@@ -68,7 +68,7 @@ impl State {
         self.lines.push(Line::from(spans));
     }
     fn blank(&mut self) {
-        if !self.lines.last().is_some_and(|l| l.spans.is_empty()) {
+        if !self.lines.is_empty() && !self.lines.last().is_some_and(|l| l.spans.is_empty()) {
             self.lines.push(Line::default());
         }
     }

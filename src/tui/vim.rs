@@ -240,7 +240,10 @@ impl Vim {
         // Two-key sequences: gg, gt, gT.
         if let Some(pending) = self.pending.take() {
             match (pending, input.key) {
-                ('g', Key::Char('g')) => ta.move_cursor(CursorMove::Top),
+                ('g', Key::Char('g')) => {
+                    ta.move_cursor(CursorMove::Top);
+                    ta.move_cursor(CursorMove::Head);
+                }
                 ('g', Key::Char('t')) => return Action::NextTab,
                 ('g', Key::Char('T')) => return Action::PrevTab,
                 _ => {}
@@ -315,10 +318,14 @@ impl Vim {
             }
             Input { key: Key::Char('$') | Key::End, .. } => {
                 ta.move_cursor(CursorMove::End);
+                if self.mode == Mode::Normal && ta.cursor().1 > 0 {
+                    ta.move_cursor(CursorMove::Back);
+                }
                 Action::None
             }
             Input { key: Key::Char('G'), .. } => {
                 ta.move_cursor(CursorMove::Bottom);
+                ta.move_cursor(CursorMove::Head);
                 Action::None
             }
             Input { key: Key::Char('{'), .. } => {
@@ -345,8 +352,18 @@ impl Vim {
                 return Action::None;
             }
             Input { key: Key::Char('p'), ctrl: false, .. } => {
+                let y = ta.yank_text();
                 for _ in 0..n {
-                    ta.paste();
+                    if y.ends_with('\n') {
+                        // linewise register: paste below the current line
+                        let row = ta.cursor().0;
+                        ta.move_cursor(CursorMove::End);
+                        ta.insert_newline();
+                        ta.insert_str(y.trim_end_matches('\n'));
+                        ta.move_cursor(CursorMove::Jump(row as u16 + 1, 0));
+                    } else {
+                        ta.paste();
+                    }
                 }
                 self.mode = Mode::Normal;
                 return Action::None;
@@ -497,7 +514,11 @@ impl Vim {
             }
             Input { key: Key::Char('y'), ctrl: false, .. } if self.mode == Mode::Visual => {
                 ta.move_cursor(CursorMove::Forward);
+                let start = ta.selection_range().map(|(s, _)| s);
                 ta.copy();
+                if let Some((r, c)) = start {
+                    ta.move_cursor(CursorMove::Jump(r as u16, c as u16));
+                }
                 self.mode = Mode::Normal;
                 return Action::None;
             }
@@ -515,9 +536,15 @@ impl Vim {
             }
             Input { key: Key::Char(op), ctrl: false, .. } if self.mode == Mode::Operator(op) => {
                 // dd / yy / cc: whole line(s)
+                let row = ta.cursor().0;
                 Self::select_line(ta);
                 for _ in 1..n {
                     ta.move_cursor(CursorMove::Down);
+                }
+                if op == 'y' {
+                    self.apply_operator(op, ta);
+                    ta.move_cursor(CursorMove::Jump(row as u16, 0));
+                    return Action::None;
                 }
                 Action::None
             }
@@ -577,9 +604,11 @@ mod tests {
         assert_eq!(v.mode, Mode::Normal);
         feed(&mut v, &mut t, "u");
         assert_eq!(t.lines(), ["one", "two", "three"]);
-        feed(&mut v, &mut t, "yyjp");
-        assert!(t.lines().len() >= 4, "{:?}", t.lines());
-        assert_eq!(t.lines()[0], "one");
+        feed(&mut v, &mut t, "ggyyp");
+        assert_eq!(t.lines(), ["one", "one", "two", "three"]);
+        assert_eq!((t.cursor().0, t.cursor().1), (1, 0));
+        feed(&mut v, &mut t, "Gp");
+        assert_eq!(t.lines(), ["one", "one", "two", "three", "one"]);
     }
 
     #[test]

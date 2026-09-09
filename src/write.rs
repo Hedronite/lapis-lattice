@@ -39,6 +39,9 @@ pub struct CreateOpts {
     pub inbox: String,
     /// `{{director}}` for mail-room templates (default: operator).
     pub director: Option<String>,
+    /// Date the template placeholders refer to (`{{date}}`, `{{week}}`,
+    /// `{{month}}`); default today. `created`/`updated` are always today.
+    pub template_date: Option<jiff::civil::Date>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -135,24 +138,26 @@ pub fn to_yaml(m: &Map<String, Value>) -> Result<String> {
 
 /// Resolve a template (built-in or `.lapis/templates/<name>.md`), substitute
 /// placeholders, split HAL.
-fn load_template(root: &Path, name: &str, title: &str, director: Option<&str>) -> Result<hal::Parsed> {
+fn load_template(
+    root: &Path,
+    name: &str,
+    title: &str,
+    director: Option<&str>,
+    date: Option<jiff::civil::Date>,
+) -> Result<hal::Parsed> {
     let t = templates::find(root, name)?;
-    Ok(hal::parse(&substitute(&t.text, title, director)))
+    let vars = template_vars_at(title, director, date.unwrap_or_else(|| jiff::Zoned::now().date()));
+    Ok(hal::parse(&templates::substitute(&t.text, &vars)))
 }
 
-pub fn template_vars(title: &str, director: Option<&str>) -> templates::Vars {
-    let now = jiff::Zoned::now();
+pub fn template_vars_at(title: &str, director: Option<&str>, day: jiff::civil::Date) -> templates::Vars {
     templates::Vars {
         title: title.to_string(),
-        date: now.strftime("%Y-%m-%d").to_string(),
-        week: iso_week(&now.date()),
-        month: now.strftime("%Y-%m").to_string(),
+        date: day.strftime("%Y-%m-%d").to_string(),
+        week: iso_week(&day),
+        month: day.strftime("%Y-%m").to_string(),
         director: director.unwrap_or("").to_string(),
     }
-}
-
-pub fn substitute(text: &str, title: &str, director: Option<&str>) -> String {
-    templates::substitute(text, &template_vars(title, director))
 }
 
 /// ISO week label `YYYY-Www` for a date.
@@ -185,7 +190,7 @@ pub fn create(root: &Path, opts: &CreateOpts) -> Result<Written> {
     let mut body = opts.body.clone().unwrap_or_default();
     if let Some(name) = &opts.template {
         let director = opts.director.clone().or_else(|| opts.operator.clone());
-        let t = load_template(root, name, &opts.title, director.as_deref())?;
+        let t = load_template(root, name, &opts.title, director.as_deref(), opts.template_date)?;
         if !t.hal_valid {
             return Err(LapisError::Usage(format!("template {name}: invalid YAML frontmatter")));
         }
@@ -286,6 +291,7 @@ pub fn capture(root: &Path, text: &str, inbox: &str, operator: Option<String>) -
         operator,
         inbox: inbox.to_string(),
         director: None,
+        template_date: None,
     };
     create(root, &opts)
 }
@@ -348,19 +354,9 @@ pub fn periodic(
         operator,
         inbox: "inbox".into(),
         director: None,
+        template_date: Some(day),
     };
-    // Periodic templates carry their own {{date}}/{{week}}/{{month}}; for an
-    // explicit past date the title is the label, so patch the body label too.
     let w = create(root, &opts)?;
-    if date.is_some() {
-        let abs = root.join(&w.path);
-        if let Ok(text) = std::fs::read_to_string(&abs) {
-            let now = template_vars(&label, None);
-            let fixed =
-                text.replace(&now.date, &label).replace(&now.week, &label).replace(&now.month, &label);
-            let _ = std::fs::write(&abs, fixed);
-        }
-    }
     Ok(Periodic { path: w.path, created: true, date: label })
 }
 
@@ -615,7 +611,7 @@ mod tests {
         assert!(n.body.contains("# ADR: Use Rust"));
         assert!(n.body.contains(&format!("Date: {}", today())));
         assert!(!n.body.contains("{{"));
-        assert!(matches!(load_template(&v, "nope", "t", None), Err(LapisError::Usage(_))));
+        assert!(matches!(load_template(&v, "nope", "t", None, None), Err(LapisError::Usage(_))));
         let _ = std::fs::remove_dir_all(&v);
     }
 

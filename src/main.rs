@@ -316,6 +316,7 @@ async fn create(ctx: &Ctx, args: CreateArgs) -> Result<()> {
         operator: ctx.cfg.operator.name.clone(),
         inbox: ctx.inbox()?,
         director: args.director.clone(),
+        template_date: None,
     };
     let w = write::create(&ctx.vault.root, &opts)?;
     print_write(ctx, &ops::kick(ctx, w, args.no_reindex).await?)
