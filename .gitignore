@@ -11,3 +11,7 @@ vendor/
 /tmp/
 .env
 .lapis-local/
+
+# Rust
+/target
+Cargo.lock.bak
