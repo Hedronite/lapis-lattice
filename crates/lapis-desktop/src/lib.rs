@@ -81,39 +81,59 @@ pub fn run(opts: Options) -> Result<(), DesktopError> {
 mod window {
     use super::{DesktopError, Options};
     use gpui::{
-        App, Application, Context, IntoElement, ParentElement, Render, Styled, Window, WindowOptions, div,
-        rgb,
+        App, Application, Bounds, Context, SharedString, TitlebarOptions, Window, WindowBounds,
+        WindowOptions, div, prelude::*, px, rgb, size,
     };
 
+    /// Brand palette, same values the TUI asserts.
+    const BLUE: u32 = 0x1F_2D68;
+    const CREAM: u32 = 0xF3_E9D2;
+    const REGENT: u32 = 0x80_9DAF;
+
     struct Root {
-        title: String,
-        seed: Option<String>,
+        title: SharedString,
+        vault: SharedString,
+        seed: SharedString,
     }
 
     impl Render for Root {
-        fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            // Brand ground / ink: BLUE #1F2D68, CREAM #F3E9D2, REGENT #809DAF.
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div()
+                .flex()
+                .flex_col()
+                .gap_2()
                 .size_full()
-                .bg(rgb(0x1F2D68))
-                .text_color(rgb(0xF3E9D2))
+                .bg(rgb(BLUE))
+                .text_color(rgb(CREAM))
                 .p_4()
-                .child(self.title.clone())
-                .child(
-                    div()
-                        .text_color(rgb(0x809DAF))
-                        .child(self.seed.clone().unwrap_or_else(|| "no seed".into())),
-                )
+                .child(div().text_xl().child(self.title.clone()))
+                .child(div().text_color(rgb(REGENT)).child(self.vault.clone()))
+                .child(div().text_color(rgb(REGENT)).child(self.seed.clone()))
         }
     }
 
     pub fn open(opts: Options) -> Result<(), DesktopError> {
         Application::new().run(move |cx: &mut App| {
-            let title = opts.title.clone();
-            let seed = opts.seed.clone();
-            if let Err(e) = cx.open_window(WindowOptions::default(), |_, cx| cx.new(|_| Root { title, seed }))
-            {
-                eprintln!("lapis desktop: {e}");
+            let bounds = Bounds::centered(None, size(px(1100.0), px(720.0)), cx);
+            let title: SharedString = opts.title.clone().into();
+            let vault: SharedString = opts.vault_root.display().to_string().into();
+            let seed: SharedString =
+                opts.seed.clone().unwrap_or_else(|| "no note selected".to_string()).into();
+            let opened = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some(title.clone()),
+                        appears_transparent: false,
+                        traffic_light_position: None,
+                    }),
+                    ..Default::default()
+                },
+                |_, cx| cx.new(|_| Root { title, vault, seed }),
+            );
+            match opened {
+                Ok(_) => cx.activate(true),
+                Err(e) => eprintln!("lapis desktop: could not open a window: {e}"),
             }
         });
         Ok(())
