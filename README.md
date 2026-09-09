@@ -1,5 +1,5 @@
 <p align="center">
-  <strong>Lapis</strong>
+  <img src="assets/lapis-wordmark.jpg" alt="Lapis" width="320">
 </p>
 
 <p align="center">
