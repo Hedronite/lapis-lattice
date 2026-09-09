@@ -20,9 +20,9 @@ use clap::Parser;
 use serde::Serialize;
 use serde_json::json;
 
-use cli::{Cli, Command, NeighborsArgs, ReadArgs, SearchArgs, VaultCommand};
+use cli::{Cli, Command, ListArgs, NeighborsArgs, ReadArgs, ReindexArgs, SearchArgs, VaultCommand};
 use error::{LapisError, Result};
-use lattice::{Client, SearchParams};
+use lattice::{Client, ListParams, SearchParams};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
@@ -86,6 +86,8 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Search(args) => search(&ctx, args).await,
         Command::Read(args) => read(&ctx, args),
         Command::Neighbors(args) => neighbors(&ctx, args).await,
+        Command::List(args) => list(&ctx, args).await,
+        Command::Reindex(args) => reindex(&ctx, args).await,
     }
 }
 
@@ -262,6 +264,116 @@ fn read(ctx: &Ctx, args: ReadArgs) -> Result<()> {
             note.path,
             note.hal_error.unwrap_or_default()
         );
+    }
+    Ok(())
+}
+
+// ----------------------------------------------------------------------- list
+
+#[derive(Serialize)]
+struct ListRow<'a> {
+    path: &'a str,
+    kind: notes::Kind,
+    title: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    domain: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    doc_type: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    priority: &'a Option<String>,
+    tags: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_at: Option<u64>,
+}
+
+async fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
+    let prefix = match &args.prefix {
+        // Same escape rules as `read`, but a prefix may be a directory (trailing slash kept).
+        Some(p) => {
+            let trailing = p.ends_with('/');
+            let clean = notes::clean_rel(p)?;
+            Some(if trailing { format!("{clean}/") } else { clean })
+        }
+        None => None,
+    };
+    let params = ListParams {
+        domain: args.domain,
+        doc_type: args.doc_type,
+        status: args.status,
+        tag: args.tag,
+        prefix,
+        limit: args.limit,
+        offset: args.offset,
+        include_archives: args.include_archives,
+    };
+    let client = ctx.client()?;
+    let docs = client.documents(&params).await?;
+    let rows: Vec<ListRow<'_>> = docs
+        .iter()
+        .map(|d| ListRow {
+            path: &d.path,
+            kind: if d.doc_type.as_deref() == Some("tome") {
+                notes::Kind::Pdf
+            } else {
+                notes::kind_of(&d.path)
+            },
+            title: d.title.as_deref().filter(|t| !t.trim().is_empty()).unwrap_or(&d.path),
+            domain: &d.domain,
+            doc_type: &d.doc_type,
+            status: &d.status,
+            priority: &d.priority,
+            tags: &d.tags,
+            updated_at: d.mtime.map(|m| (m * 1000.0) as u64),
+        })
+        .collect();
+    if ctx.json {
+        return emit_json(&rows);
+    }
+    if rows.is_empty() {
+        println!("No documents match.");
+        return Ok(());
+    }
+    for r in &rows {
+        let mut meta = Vec::new();
+        if let Some(d) = r.doc_type {
+            meta.push(d.clone());
+        }
+        if let Some(s) = r.status {
+            meta.push(s.clone());
+        }
+        println!("{}", r.path);
+        println!(
+            "    {}{}",
+            r.title,
+            if meta.is_empty() { String::new() } else { format!("  ·  {}", meta.join("  ")) }
+        );
+    }
+    Ok(())
+}
+
+// -------------------------------------------------------------------- reindex
+
+async fn reindex(ctx: &Ctx, args: ReindexArgs) -> Result<()> {
+    // Validate locally first so an escape is exit 3 before any HTTP.
+    let (rel, _abs) = notes::resolve(&ctx.vault.root, &args.path)?;
+    let client = ctx.client()?;
+    let r = client.reindex(&rel).await?;
+    if ctx.json {
+        return emit_json(&r);
+    }
+    let what = match (r.changed, r.chunks) {
+        (Some(true), Some(n)) => format!("re-indexed, {n} chunks"),
+        (Some(false), _) => "unchanged".to_string(),
+        _ => "done".to_string(),
+    };
+    println!("{}  {}{}", r.path, what, r.elapsed_ms.map(|ms| format!("  ({ms:.0} ms)")).unwrap_or_default());
+    if !r.ok {
+        for l in &r.stderr_tail {
+            eprintln!("  {l}");
+        }
+        return Err(LapisError::LatticeDown(format!("indexer exit {}", r.indexer_exit.unwrap_or(-1))));
     }
     Ok(())
 }

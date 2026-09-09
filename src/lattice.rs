@@ -173,6 +173,58 @@ pub struct Neighbors {
     pub neighbors: Vec<Neighbor>,
 }
 
+/// One row from `GET /documents` (metadata only, no chunks or embeddings).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Document {
+    pub path: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ListParams {
+    pub domain: Option<String>,
+    pub doc_type: Option<String>,
+    pub status: Option<String>,
+    pub tag: Option<String>,
+    pub prefix: Option<String>,
+    pub limit: u32,
+    pub offset: u32,
+    pub include_archives: bool,
+}
+
+/// `POST /reindex` result. `ok=false` with a 500 is surfaced as an error by
+/// the client; this struct is what a 200 carries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Reindex {
+    pub ok: bool,
+    pub path: String,
+    #[serde(default)]
+    pub changed: Option<bool>,
+    #[serde(default)]
+    pub chunks: Option<u64>,
+    #[serde(default)]
+    pub indexer_exit: Option<i32>,
+    #[serde(default)]
+    pub elapsed_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stdout_tail: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stderr_tail: Vec<String>,
+}
+
 fn int_or_bool<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<bool, D::Error> {
     let v = Value::deserialize(d)?;
     Ok(match v {
@@ -310,6 +362,65 @@ impl Client {
     }
 }
 
+impl Client {
+    /// `GET /documents`: list notes from the lattice table. Never walks the vault.
+    pub async fn documents(&self, p: &ListParams) -> Result<Vec<Document>> {
+        let mut query: Vec<(&str, String)> =
+            vec![("limit", p.limit.clamp(1, 1000).to_string()), ("offset", p.offset.to_string())];
+        for (k, v) in [
+            ("domain", &p.domain),
+            ("doc_type", &p.doc_type),
+            ("status", &p.status),
+            ("tag", &p.tag),
+            ("prefix", &p.prefix),
+        ] {
+            if let Some(v) = v {
+                query.push((k, v.clone()));
+            }
+        }
+        if p.include_archives {
+            query.push(("include_archives", "true".into()));
+        }
+        self.get_json("/documents", &query).await
+    }
+
+    /// `POST /reindex?path=`: ask the lattice to run its own indexer on one
+    /// note. The indexer is the only writer of `lattice.db`; this binary
+    /// never inserts. Used by L2 after create/append.
+    pub async fn reindex(&self, rel_path: &str) -> Result<Reindex> {
+        let url = format!("{}/reindex", self.base);
+        let resp = self
+            .http
+            .post(&url)
+            .query(&[("path", rel_path)])
+            .send()
+            .await
+            .map_err(|e| LapisError::LatticeDown(describe_reqwest(&url, &e)))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if status.is_success() {
+            return serde_json::from_str::<Reindex>(&text)
+                .map_err(|e| LapisError::LatticeDown(format!("lattice /reindex: bad JSON: {e}")));
+        }
+        // A 500 from /reindex carries the same body with indexer output; keep it readable.
+        let detail = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| {
+                v.get("detail").and_then(|d| d.as_str().map(str::to_string)).or_else(|| {
+                    v.get("stderr_tail")
+                        .and_then(|t| t.as_array())
+                        .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" | "))
+                })
+            })
+            .unwrap_or_else(|| text.trim().to_string());
+        if status.is_client_error() {
+            Err(LapisError::Usage(format!("lattice /reindex {status}: {detail}")))
+        } else {
+            Err(LapisError::LatticeDown(format!("lattice /reindex {status}: {detail}")))
+        }
+    }
+}
+
 fn describe_reqwest(url: &str, e: &reqwest::Error) -> String {
     if e.is_timeout() {
         format!("lattice timed out: {url}")
@@ -375,6 +486,35 @@ mod tests {
         .unwrap();
         assert!(n.neighbors[0].resolved);
         assert_eq!(n.neighbors[0].direction, "out");
+    }
+
+    #[test]
+    fn document_row_tolerates_nulls() {
+        let d: Document = serde_json::from_str(
+            r#"{"path":"a/b.md","title":null,"domain":null,"doc_type":"note","status":null,"priority":null,"tags":[],"mtime":null}"#,
+        )
+        .unwrap();
+        assert_eq!(d.path, "a/b.md");
+        assert!(d.title.is_none());
+        assert!(d.tags.is_empty());
+    }
+
+    #[test]
+    fn reindex_body_parses() {
+        let r: Reindex = serde_json::from_str(
+            r#"{"ok":true,"path":"foundry/lapis/STATUS.md","changed":true,"chunks":7,"indexer_exit":0,"elapsed_ms":900.5,"indexer":"x","stdout_tail":["a"],"stderr_tail":[]}"#,
+        )
+        .unwrap();
+        assert!(r.ok);
+        assert_eq!(r.chunks, Some(7));
+        assert_eq!(r.changed, Some(true));
+    }
+
+    #[tokio::test]
+    async fn reindex_unreachable_is_exit_2() {
+        let c = Client::new("http://127.0.0.1:9", Duration::from_millis(500)).unwrap();
+        let e = c.reindex("a.md").await.unwrap_err();
+        assert_eq!(e.exit_code(), 2, "{e}");
     }
 
     #[tokio::test]

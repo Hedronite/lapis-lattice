@@ -62,6 +62,54 @@ pub enum Command {
 
     /// Hop-1 wikilink neighbors of a note from the lattice `edges` table.
     Neighbors(NeighborsArgs),
+
+    /// List notes from the lattice `documents` table (metadata only). Never walks the vault.
+    List(ListArgs),
+
+    /// Ask the lattice to re-index one note (runs its own indexer; Lapis never writes lattice.db).
+    Reindex(ReindexArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ReindexArgs {
+    /// Vault-relative markdown path, e.g. `foundry/lapis/STATUS.md`.
+    #[arg(value_name = "PATH")]
+    pub path: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ListArgs {
+    /// Only paths under this vault-relative prefix, e.g. `foundry/lapis/`.
+    #[arg(value_name = "PREFIX")]
+    pub prefix: Option<String>,
+
+    /// Filter by HAL `domain` (exact).
+    #[arg(long, value_name = "DOMAIN")]
+    pub domain: Option<String>,
+
+    /// Filter by canonical `doc_type` (exact).
+    #[arg(long, value_name = "TYPE")]
+    pub doc_type: Option<String>,
+
+    /// Filter by HAL `status` (exact).
+    #[arg(long, value_name = "STATUS")]
+    pub status: Option<String>,
+
+    /// Require this tag.
+    #[arg(long, value_name = "TAG")]
+    pub tag: Option<String>,
+
+    /// Max rows (lattice caps at 1000).
+    #[arg(long, short = 'n', default_value_t = 50, value_name = "N")]
+    pub limit: u32,
+
+    /// Row offset for paging.
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    pub offset: u32,
+
+    /// Include `_archives/` and `*.DRAFT-*` documents.
+    #[arg(long)]
+    pub include_archives: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -176,6 +224,22 @@ mod tests {
         match c.command {
             Command::Read(r) => assert_eq!(r.path, "foundry/lapis/SPEC.md"),
             _ => panic!("expected read"),
+        }
+    }
+
+    #[test]
+    fn parses_list() {
+        let c =
+            Cli::try_parse_from(["lapis", "list", "--json", "foundry/lapis/", "--status", "live", "-n", "5"])
+                .unwrap();
+        match c.command {
+            Command::List(l) => {
+                assert_eq!(l.prefix.as_deref(), Some("foundry/lapis/"));
+                assert_eq!(l.status.as_deref(), Some("live"));
+                assert_eq!(l.limit, 5);
+                assert_eq!(l.offset, 0);
+            }
+            _ => panic!("expected list"),
         }
     }
 
