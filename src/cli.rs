@@ -74,6 +74,12 @@ pub enum Command {
     /// Resolve a wikilink (`[[Name|alias#anchor]]`) or lattice `dst_raw` to a vault path.
     Resolve(ResolveArgs),
 
+    /// Named lattice analytics (DuckDB, read-only): inventory, priority, tags, health, recent, hubs, density, degree, dangling.
+    Analytics(AnalyticsArgs),
+
+    /// Hub-routed link walk from a seed note (or the nearest Cross-References hub for --query).
+    TreeRetrieve(TreeArgs),
+
     /// List notes from the lattice `documents` table (metadata only). Never walks the vault.
     List(ListArgs),
 
@@ -462,6 +468,36 @@ pub struct NeighborsArgs {
     /// Include dangling (unresolved) links too.
     #[arg(long)]
     pub dangling: bool,
+
+    /// 1 = direct neighbors (edges table); 2 = ego graph with depth / via per row.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=2))]
+    pub hop: u32,
+}
+
+#[derive(Debug, Args)]
+pub struct AnalyticsArgs {
+    /// One of: inventory, priority, tags, health, recent, hubs, density, degree, dangling.
+    #[arg(value_name = "QUERY")]
+    pub query: String,
+}
+
+#[derive(Debug, Args)]
+pub struct TreeArgs {
+    /// Seed note (vault-relative). Omit to start at the hub nearest to --query.
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<String>,
+
+    /// Rank children by nomic similarity to this text; also picks the seed hub when --path is omitted.
+    #[arg(long, value_name = "TEXT")]
+    pub query: Option<String>,
+
+    /// Walk depth (1..3).
+    #[arg(long, default_value_t = 2, value_name = "N")]
+    pub depth: u32,
+
+    /// Node cap (1..200); `truncated` says when it was hit.
+    #[arg(long, default_value_t = 60, value_name = "N")]
+    pub max_nodes: u32,
 }
 
 #[cfg(test)]
@@ -601,6 +637,56 @@ mod tests {
         let Command::Neighbors(n) = c.command() else { panic!("neighbors") };
         assert_eq!(n.direction.as_deref(), Some("in"));
         assert!(n.dangling);
+    }
+
+    /// N17–N19: hop, analytics and tree-retrieve surfaces.
+    #[test]
+    fn slice3_flags() {
+        let Command::Neighbors(n) = Cli::try_parse_from(["lapis", "neighbors", "a.md"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert_eq!(n.hop, 1);
+        let Command::Neighbors(n) =
+            Cli::try_parse_from(["lapis", "neighbors", "a.md", "--hop", "2"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert_eq!(n.hop, 2);
+        assert!(Cli::try_parse_from(["lapis", "neighbors", "a.md", "--hop", "3"]).is_err());
+        assert!(Cli::try_parse_from(["lapis", "neighbors", "a.md", "--hop", "0"]).is_err());
+        let Command::Analytics(a) = Cli::try_parse_from(["lapis", "analytics", "degree"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert_eq!(a.query, "degree");
+        assert!(Cli::try_parse_from(["lapis", "analytics"]).is_err());
+        let Command::TreeRetrieve(t) = Cli::try_parse_from([
+            "lapis",
+            "tree-retrieve",
+            "--json",
+            "--path",
+            "P.md",
+            "--query",
+            "Q",
+            "--depth",
+            "3",
+            "--max-nodes",
+            "9",
+        ])
+        .unwrap()
+        .command() else {
+            panic!()
+        };
+        assert_eq!(
+            (t.path.as_deref(), t.query.as_deref(), t.depth, t.max_nodes),
+            (Some("P.md"), Some("Q"), 3, 9)
+        );
+        let Command::TreeRetrieve(t) = Cli::try_parse_from(["lapis", "tree-retrieve"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert_eq!((t.depth, t.max_nodes), (2, 60));
     }
 
     /// N8 / N11 / N12 / N13: new flags parse and defaults hold.

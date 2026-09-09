@@ -202,6 +202,122 @@ pub struct Neighbors {
     pub neighbors: Vec<Neighbor>,
 }
 
+/// One row of `GET /graph/ego` (N17). `depth` 1 = direct neighbor, 2 = neighbor of a
+/// depth-1 node; `via` is the node it was reached through. Dangling rows have `path: null`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EgoRow {
+    pub depth: u32,
+    #[serde(default)]
+    pub via: Option<String>,
+    #[serde(default, rename = "dir")]
+    pub direction: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub dst_raw: Option<String>,
+    #[serde(default, deserialize_with = "int_or_bool")]
+    pub resolved: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ego {
+    pub path: String,
+    pub direction: String,
+    pub hops: u32,
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub rows: Vec<EgoRow>,
+}
+
+/// Names `GET /analytics?query=` accepts (N18). Anything else is refused
+/// client-side as a usage error before any HTTP.
+pub const ANALYTICS_QUERIES: [&str; 9] =
+    ["inventory", "priority", "tags", "health", "recent", "hubs", "density", "degree", "dangling"];
+
+pub fn check_analytics_query(q: &str) -> Result<()> {
+    if ANALYTICS_QUERIES.contains(&q) {
+        Ok(())
+    } else {
+        Err(LapisError::Usage(format!(
+            "unknown analytics query {q:?}; one of: {}",
+            ANALYTICS_QUERIES.join(", ")
+        )))
+    }
+}
+
+/// `GET /analytics` result: a small table plus any query-specific extras
+/// (`health` adds index_state / counts).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Analytics {
+    pub query: String,
+    #[serde(default)]
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub rows: Vec<Vec<Value>>,
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<f64>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+/// `GET /tree` (N19): hub-routed out-link walk from a seed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TreeNode {
+    pub path: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub doc_type: Option<String>,
+    #[serde(default)]
+    pub domain: Option<String>,
+    pub depth: u32,
+    #[serde(default)]
+    pub is_hub: bool,
+    #[serde(default)]
+    pub out_degree: u64,
+    /// nomic similarity to `query` when one was given; `null` otherwise.
+    #[serde(default)]
+    pub score: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TreeEdge {
+    pub src: String,
+    pub dst: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tree {
+    pub seed: String,
+    #[serde(default)]
+    pub query: Option<String>,
+    pub depth: u32,
+    #[serde(default)]
+    pub max_nodes: u32,
+    #[serde(default)]
+    pub hubs: Vec<String>,
+    #[serde(default)]
+    pub ranked: bool,
+    #[serde(default)]
+    pub nodes: Vec<TreeNode>,
+    #[serde(default)]
+    pub edges: Vec<TreeEdge>,
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+pub const TREE_MAX_DEPTH: u32 = 3;
+pub const TREE_MAX_NODES: u32 = 200;
+
 /// One row from `GET /documents` (metadata only, no chunks or embeddings).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
@@ -407,6 +523,51 @@ impl Client {
         ];
         self.get_json("/neighbors", &query).await
     }
+
+    /// `GET /graph/ego`: hop-1 or hop-2 ego graph (serve.py rejects hops > 2).
+    pub async fn ego(&self, path: &str, hops: u32, direction: &str, resolved_only: bool) -> Result<Ego> {
+        if !(1..=2).contains(&hops) {
+            return Err(LapisError::Usage(format!("hops must be 1 or 2, got {hops}")));
+        }
+        let query = vec![
+            ("path", path.to_string()),
+            ("hops", hops.to_string()),
+            ("direction", direction.to_string()),
+            ("resolved", if resolved_only { "1" } else { "0" }.to_string()),
+        ];
+        self.get_json("/graph/ego", &query).await
+    }
+
+    /// `GET /analytics?query=`: one of [`ANALYTICS_QUERIES`], run read-only in DuckDB.
+    pub async fn analytics(&self, query: &str) -> Result<Analytics> {
+        check_analytics_query(query)?;
+        self.get_json("/analytics", &[("query", query.to_string())]).await
+    }
+
+    /// `GET /tree`: hub-routed walk. Depth and node caps are clamped client-side
+    /// to what serve.py accepts.
+    pub async fn tree(
+        &self,
+        path: Option<&str>,
+        query: Option<&str>,
+        depth: u32,
+        max_nodes: u32,
+    ) -> Result<Tree> {
+        if path.is_none_or(|p| p.trim().is_empty()) && query.is_none_or(|q| q.trim().is_empty()) {
+            return Err(LapisError::Usage("tree-retrieve needs --path or --query".into()));
+        }
+        let mut q: Vec<(&str, String)> = vec![
+            ("depth", depth.clamp(1, TREE_MAX_DEPTH).to_string()),
+            ("max_nodes", max_nodes.clamp(1, TREE_MAX_NODES).to_string()),
+        ];
+        if let Some(p) = path.filter(|p| !p.trim().is_empty()) {
+            q.push(("path", p.to_string()));
+        }
+        if let Some(s) = query.filter(|s| !s.trim().is_empty()) {
+            q.push(("query", s.to_string()));
+        }
+        self.get_json("/tree", &q).await
+    }
 }
 
 impl Client {
@@ -589,6 +750,72 @@ mod tests {
         let out = serde_json::to_value(d).unwrap();
         assert!(out["path"].is_null());
         assert_eq!(out["dst_raw"], "aes_schema_genesis_canon");
+    }
+
+    /// N18: the allowlist is enforced before any HTTP.
+    #[test]
+    fn analytics_allowlist_rejects_unknown() {
+        for q in ANALYTICS_QUERIES {
+            check_analytics_query(q).unwrap();
+        }
+        for bad in ["select 1", "DROP TABLE documents", "inventory;", "", "Inventory"] {
+            let e = check_analytics_query(bad).unwrap_err();
+            assert_eq!((e.exit_code(), e.kind()), (1, "usage"), "{bad:?}");
+        }
+        let a: Analytics = serde_json::from_str(
+            r#"{"query":"degree","columns":["path","degree"],"rows":[["a.md",3]],"count":1,"truncated":false,"latency_ms":2.5}"#,
+        )
+        .unwrap();
+        assert_eq!(a.rows[0][1], 3);
+        let h: Analytics = serde_json::from_str(
+            r#"{"query":"health","columns":[],"rows":[],"count":0,"truncated":false,"documents":4619,"index_state":{"embedding_model":"nomic-embed-text"}}"#,
+        )
+        .unwrap();
+        assert_eq!(h.extra["documents"], 4619);
+        assert_eq!(h.extra["index_state"]["embedding_model"], "nomic-embed-text");
+    }
+
+    /// N17: a hops=2 ego fixture, as serve.py emits it, including a dangling row.
+    #[test]
+    fn ego_hops2_fixture() {
+        let e: Ego = serde_json::from_str(
+            r#"{"path":"Cross-References/Manual.md","direction":"both","hops":2,"count":3,"truncated":false,"rows":[
+              {"depth":1,"via":"Cross-References/Manual.md","dir":"out","path":"Cross-References/Capital.md","dst_raw":"Capital","resolved":1},
+              {"depth":1,"via":"Cross-References/Manual.md","dir":"out","path":null,"dst_raw":"aes_schema_genesis_canon","resolved":0},
+              {"depth":2,"via":"Cross-References/Capital.md","dir":"out","path":"ideas/capital/x.md","dst_raw":"ideas/capital/x","resolved":1}]}"#,
+        )
+        .unwrap();
+        assert_eq!((e.hops, e.count, e.rows.len()), (2, 3, 3));
+        assert_eq!(e.rows[0].depth, 1);
+        assert!(e.rows[1].path.is_none() && !e.rows[1].resolved);
+        let two = &e.rows[2];
+        assert_eq!(
+            (two.depth, two.via.as_deref(), two.direction.as_str()),
+            (2, Some("Cross-References/Capital.md"), "out")
+        );
+        assert_eq!(two.path.as_deref(), Some("ideas/capital/x.md"));
+        // wire shape keeps `dir`
+        let j = serde_json::to_value(two).unwrap();
+        assert_eq!(j["dir"], "out");
+    }
+
+    /// N19: tree fixture with the node cap hit → `truncated: true`.
+    #[test]
+    fn tree_fixture_truncated_flag() {
+        let t: Tree = serde_json::from_str(
+            r#"{"seed":"Cross-References/Manual.md","query":"lattice","depth":2,"max_nodes":2,"hubs":["Cross-References/Manual.md"],"ranked":true,
+              "nodes":[{"path":"Cross-References/Manual.md","title":"Manual","doc_type":"hub","domain":null,"depth":0,"is_hub":true,"out_degree":8,"score":0.05},
+                       {"path":"ideas/x.md","depth":1,"is_hub":false,"out_degree":0,"score":null}],
+              "edges":[{"src":"Cross-References/Manual.md","dst":"ideas/x.md"}],"count":2,"truncated":true}"#,
+        )
+        .unwrap();
+        assert!(t.truncated);
+        assert_eq!((t.count, t.nodes.len(), t.edges.len(), t.hubs.len()), (2, 2, 1, 1));
+        assert!(t.ranked && t.nodes[0].is_hub && t.nodes[0].score == Some(0.05));
+        assert_eq!(t.nodes[1].depth, 1);
+        assert!(t.nodes[1].score.is_none() && t.nodes[1].title.is_none());
+        let full: Tree = serde_json::from_str(r#"{"seed":"a.md","depth":1,"nodes":[],"edges":[]}"#).unwrap();
+        assert!(!full.truncated && full.hubs.is_empty());
     }
 
     /// N5: lattice 404 is exit 3 like `read`; other 4xx exit 1; 5xx exit 2.

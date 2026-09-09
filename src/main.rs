@@ -29,7 +29,7 @@ use clap::Parser;
 use serde::Serialize;
 use serde_json::json;
 
-use cli::ResolveArgs;
+use cli::{AnalyticsArgs, ResolveArgs, TreeArgs};
 use cli::{
     AppendArgs, CaptureArgs, Cli, Command, CreateArgs, DailyArgs, ListArgs, NeighborsArgs, ReadArgs,
     ReindexArgs, SearchArgs, TaskCommand, TaskListArgs, TaskToggleArgs, TemplateCommand, TrashArgs,
@@ -99,6 +99,8 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Read(args) => read(&ctx, args),
         Command::Neighbors(args) => neighbors(&ctx, args).await,
         Command::Resolve(args) => resolve_link(&ctx, args),
+        Command::Analytics(args) => analytics(&ctx, args).await,
+        Command::TreeRetrieve(args) => tree_retrieve(&ctx, args).await,
         Command::List(args) => list(&ctx, args).await,
         Command::Reindex(args) => reindex(&ctx, args).await,
         Command::Create(args) => create(&ctx, args).await,
@@ -529,6 +531,62 @@ async fn task_toggle(ctx: &Ctx, args: TaskToggleArgs) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------- analytics / tree
+
+async fn analytics(ctx: &Ctx, args: AnalyticsArgs) -> Result<()> {
+    let a = ctx.client()?.analytics(&args.query).await?;
+    if ctx.json {
+        let meta = Meta { truncated: a.truncated, count: Some(a.count), ..Meta::default() };
+        return emit_with(&a, meta);
+    }
+    for (k, v) in &a.extra {
+        println!("{k}: {v}");
+    }
+    if !a.columns.is_empty() {
+        println!("{}", a.columns.join("\t"));
+    }
+    for row in &a.rows {
+        let cells: Vec<String> = row
+            .iter()
+            .map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => String::new(),
+                other => other.to_string(),
+            })
+            .collect();
+        println!("{}", cells.join("\t"));
+    }
+    if a.truncated {
+        eprintln!("lapis: {} rows shown (truncated)", a.count);
+    }
+    Ok(())
+}
+
+async fn tree_retrieve(ctx: &Ctx, args: TreeArgs) -> Result<()> {
+    let rel = match &args.path {
+        Some(p) => {
+            let r = notes::clean_rel(p)?;
+            Some(if std::path::Path::new(&r).extension().is_none() { format!("{r}.md") } else { r })
+        }
+        None => None,
+    };
+    let t = ctx.client()?.tree(rel.as_deref(), args.query.as_deref(), args.depth, args.max_nodes).await?;
+    if ctx.json {
+        let meta = Meta { truncated: t.truncated, count: Some(t.count), ..Meta::default() };
+        return emit_with(&t, meta);
+    }
+    println!("seed: {}{}", t.seed, if t.ranked { "  (ranked by query)" } else { "" });
+    for n in &t.nodes {
+        let hub = if n.is_hub { " ◆" } else { "" };
+        let score = n.score.map(|s| format!("  {s:.3}")).unwrap_or_default();
+        println!("{}{}{hub}{score}", "  ".repeat(n.depth as usize), n.path);
+    }
+    if t.truncated {
+        eprintln!("lapis: tree truncated at {} nodes (--max-nodes)", t.count);
+    }
+    Ok(())
+}
+
 // -------------------------------------------------------------------- resolve
 
 fn resolve_link(ctx: &Ctx, args: ResolveArgs) -> Result<()> {
@@ -553,6 +611,32 @@ async fn neighbors(ctx: &Ctx, args: NeighborsArgs) -> Result<()> {
     let rel = notes::clean_rel(&args.path)?;
     let rel = if std::path::Path::new(&rel).extension().is_none() { format!("{rel}.md") } else { rel };
     let dir = args.direction.clone().unwrap_or_else(|| ctx.cfg.agent.direction().to_string());
+    if args.hop == 2 {
+        let e = ctx.client()?.ego(&rel, 2, &dir, !args.dangling).await?;
+        if ctx.json {
+            let meta = Meta { truncated: e.truncated, count: Some(e.count), ..Meta::default() };
+            return emit_with(&e, meta);
+        }
+        if e.rows.is_empty() {
+            println!("No {} neighbors within 2 hops of {}.", e.direction, e.path);
+            return Ok(());
+        }
+        for r in &e.rows {
+            let arrow = if r.direction == "in" { "<-" } else { "->" };
+            let shown = r.path.clone().or_else(|| r.dst_raw.clone()).unwrap_or_else(|| "?".into());
+            let flag = if r.resolved { "" } else { "  (dangling)" };
+            let via = if r.depth > 1 {
+                format!("  via {}", r.via.clone().unwrap_or_default())
+            } else {
+                String::new()
+            };
+            println!("{}{arrow} {shown}{flag}{via}", "  ".repeat(r.depth as usize - 1));
+        }
+        if e.truncated {
+            eprintln!("lapis: ego graph truncated at {} rows", e.count);
+        }
+        return Ok(());
+    }
     let n = ctx.client()?.neighbors(&rel, &dir, !args.dangling).await?;
     if ctx.json {
         return emit_json(&n);

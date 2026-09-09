@@ -37,7 +37,8 @@ Lapis: an Atrium notes vault with Lapis Lattice retrieval.
 9. `list_tasks` without `path` returns counts (n, byStatus, byFolder); pass `path` (or full=true) for rows.
 10. Every result is `structuredContent` = {ok, data, meta}. meta.truncated / meta.next tell you to page (offset).
 11. `search_and_read` returns top hits with HAL meta and a body snippet in one call; `read_note` takes heading / chunk / max_chars.
-12. Notes are also resources: `lapis://note/{path}` (body as text/markdown). `resolve_link` maps a [[wikilink]] or dst_raw to a path.";
+12. Notes are also resources: `lapis://note/{path}` (body as text/markdown). `resolve_link` maps a [[wikilink]] or dst_raw to a path.
+13. `neighbors` with hop=2 returns the ego graph (rows carry depth and via). `tree_retrieve` walks hub-first from a seed or a query. `analytics` runs named read-only DuckDB queries (inventory, priority, tags, health, recent, hubs, density, degree, dangling).";
 
 pub const NOTE_URI_PREFIX: &str = "lapis://note/";
 
@@ -165,6 +166,26 @@ pub struct NeighborsArg {
     pub direction: Option<String>,
     /// Include dangling links too (rows with `path: null` and `dst_raw`).
     pub dangling: Option<bool>,
+    /// 1 (default) = direct neighbors; 2 = ego graph with depth / via per row.
+    pub hop: Option<u32>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct AnalyticsArg {
+    /// One of: inventory, priority, tags, health, recent, hubs, density, degree, dangling.
+    pub query: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct TreeArg {
+    /// Seed note (vault-relative). Omit to start at the hub nearest to `query`.
+    pub path: Option<String>,
+    /// Rank children by nomic similarity to this text; picks the seed hub when `path` is omitted.
+    pub query: Option<String>,
+    /// Walk depth 1..3 (default 2).
+    pub depth: Option<u32>,
+    /// Node cap 1..200 (default 60); `truncated` says when it was hit.
+    pub max_nodes: Option<u32>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -230,6 +251,14 @@ pub struct ToggleArg {
     pub if_mtime: Option<u64>,
     /// Refuse if the note's `hash` no longer matches.
     pub if_hash: Option<String>,
+}
+
+/// `hop` arg → 1 or 2; anything else is an invalid-params error.
+pub fn hop_of(h: Option<u32>) -> std::result::Result<u32, ErrorData> {
+    match h.unwrap_or(1) {
+        h @ (1 | 2) => Ok(h),
+        other => Err(ErrorData::invalid_params(format!("hop must be 1 or 2, got {other}"), None)),
+    }
 }
 
 fn guard(dry_run: Option<bool>, if_mtime: Option<u64>, if_hash: Option<String>) -> write::Guard {
@@ -515,14 +544,50 @@ impl LapisServer {
         let rel = notes::clean_rel(&a.path).map_err(fail)?;
         let rel = if std::path::Path::new(&rel).extension().is_none() { format!("{rel}.md") } else { rel };
         let dir = a.direction.unwrap_or_else(|| self.ctx.cfg.agent.direction().to_string());
-        let n = self
+        let resolved_only = !a.dangling.unwrap_or(false);
+        if hop_of(a.hop)? == 2 {
+            let e = self.ctx.client().map_err(fail)?.ego(&rel, 2, &dir, resolved_only).await.map_err(fail)?;
+            return ok_meta(t0, &e, Meta { truncated: e.truncated, count: Some(e.count), ..Meta::default() });
+        }
+        let n = self.ctx.client().map_err(fail)?.neighbors(&rel, &dir, resolved_only).await.map_err(fail)?;
+        ok_meta(t0, &n, Meta { count: Some(n.neighbors.len()), ..Meta::default() })
+    }
+
+    #[tool(
+        description = "Named lattice analytics over a read-only DuckDB attach: inventory, priority, tags, health, recent, hubs, density, degree, dangling. Returns {columns, rows} plus query-specific extras."
+    )]
+    async fn analytics(
+        &self,
+        Parameters(a): Parameters<AnalyticsArg>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let t0 = Instant::now();
+        let r = self.ctx.client().map_err(fail)?.analytics(&a.query).await.map_err(fail)?;
+        ok_meta(t0, &r, Meta { truncated: r.truncated, count: Some(r.count), ..Meta::default() })
+    }
+
+    #[tool(
+        description = "Hub-routed link walk from a seed note (or the Cross-References hub nearest to `query`): {seed, hubs, nodes, edges, truncated}. Children are ranked by nomic similarity when `query` is given."
+    )]
+    async fn tree_retrieve(
+        &self,
+        Parameters(a): Parameters<TreeArg>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let t0 = Instant::now();
+        let rel = match &a.path {
+            Some(p) => {
+                let r = notes::clean_rel(p).map_err(fail)?;
+                Some(if std::path::Path::new(&r).extension().is_none() { format!("{r}.md") } else { r })
+            }
+            None => None,
+        };
+        let t = self
             .ctx
             .client()
             .map_err(fail)?
-            .neighbors(&rel, &dir, !a.dangling.unwrap_or(false))
+            .tree(rel.as_deref(), a.query.as_deref(), a.depth.unwrap_or(2), a.max_nodes.unwrap_or(60))
             .await
             .map_err(fail)?;
-        ok_meta(t0, &n, Meta { count: Some(n.neighbors.len()), ..Meta::default() })
+        ok_meta(t0, &t, Meta { truncated: t.truncated, count: Some(t.count), ..Meta::default() })
     }
 
     #[tool(
@@ -704,6 +769,18 @@ mod tests {
         assert!(!tasks::wants_summary(t.path.as_deref(), t.full.unwrap_or(false)));
         let g = guard(Some(true), Some(5), None);
         assert!(g.dry_run && g.if_mtime == Some(5) && g.if_hash.is_none());
+    }
+
+    /// N17: hop arg validation.
+    #[test]
+    fn hop_arg() {
+        assert_eq!(hop_of(None).unwrap(), 1);
+        assert_eq!(hop_of(Some(2)).unwrap(), 2);
+        assert!(hop_of(Some(3)).is_err() && hop_of(Some(0)).is_err());
+        let n: NeighborsArg = serde_json::from_str(r#"{"path":"a.md","hop":2}"#).unwrap();
+        assert_eq!(n.hop, Some(2));
+        let t: TreeArg = serde_json::from_str(r#"{"query":"lattice"}"#).unwrap();
+        assert!(t.path.is_none() && t.depth.is_none());
     }
 
     /// N7: structuredContent carries the envelope; the text block stays short.
