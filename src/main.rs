@@ -1,4 +1,4 @@
-//! `lapis` — one Rust binary: CLI now, MCP (L3) and Ratatui TUI (L5) later.
+//! `lapis` — one Rust binary: CLI, MCP (`lapis mcp`), Ratatui TUI (L5).
 //!
 //! Read law: `foundry/lapis/SPEC.md`, `SHIP.md`, `CRATES.md`. Files are the
 //! write source of truth, the lattice is the read source of truth, and this
@@ -9,8 +9,11 @@ mod config;
 mod error;
 mod hal;
 mod lattice;
+mod mcp;
 mod notes;
+mod ops;
 mod overlay;
+mod tasks;
 mod taxonomy;
 mod vault;
 mod write;
@@ -24,10 +27,11 @@ use serde_json::json;
 
 use cli::{
     AppendArgs, CaptureArgs, Cli, Command, CreateArgs, ListArgs, NeighborsArgs, ReadArgs, ReindexArgs,
-    SearchArgs, VaultCommand,
+    SearchArgs, TaskCommand, TaskListArgs, TaskToggleArgs, VaultCommand,
 };
 use error::{LapisError, Result};
-use lattice::{Client, ListParams, SearchParams};
+use lattice::{ListParams, SearchParams};
+use ops::Ctx;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
@@ -62,19 +66,6 @@ fn report_error(e: &LapisError, json: bool) {
     eprintln!("lapis: {e}");
 }
 
-struct Ctx {
-    json: bool,
-    vault: vault::Vault,
-    cfg: config::Config,
-    lattice_url: String,
-}
-
-impl Ctx {
-    fn client(&self) -> Result<Client> {
-        Client::new(&self.lattice_url, self.cfg.lattice.timeout())
-    }
-}
-
 async fn run(cli: Cli) -> Result<()> {
     let cfg = config::load()?;
     let vault = vault::resolve(cli.global.vault.as_deref(), &cfg)?;
@@ -96,6 +87,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Create(args) => create(&ctx, args).await,
         Command::Append(args) => append(&ctx, args).await,
         Command::Capture(args) => capture(&ctx, args).await,
+        Command::Task { command: TaskCommand::List(args) } => task_list(&ctx, args),
+        Command::Task { command: TaskCommand::Toggle(args) } => task_toggle(&ctx, args).await,
+        Command::Mcp => mcp::serve(ctx).await,
     }
 }
 
@@ -106,64 +100,19 @@ fn emit_json<T: Serialize>(v: &T) -> Result<()> {
     Ok(())
 }
 
+fn meta_line(parts: &[Option<String>]) -> String {
+    let m: Vec<&str> = parts.iter().flatten().map(String::as_str).collect();
+    if m.is_empty() { String::new() } else { format!("  ·  {}", m.join("  ")) }
+}
+
 // ---------------------------------------------------------------- vault info
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct VaultInfo<'a> {
-    vault_root: String,
-    vault_source: &'static str,
-    overlay: OverlayInfo<'a>,
-    lattice: LatticeInfo,
-}
-
-#[derive(Serialize)]
-struct OverlayInfo<'a> {
-    source: overlay::OverlaySource,
-    path: String,
-    #[serde(flatten)]
-    overlay: &'a overlay::Overlay,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LatticeInfo {
-    url: String,
-    reachable: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    health: Option<lattice::Health>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
 async fn vault_info(ctx: &Ctx) -> Result<()> {
-    let (ov, ov_src) = overlay::load(&ctx.vault.root)?;
-    let client = ctx.client()?;
-    let health = client.health().await;
-    let lattice = match &health {
-        Ok(h) => LatticeInfo {
-            url: client.base().to_string(),
-            reachable: true,
-            health: Some(h.clone()),
-            error: None,
-        },
-        Err(e) => LatticeInfo {
-            url: client.base().to_string(),
-            reachable: false,
-            health: None,
-            error: Some(e.to_string()),
-        },
-    };
-    let info = VaultInfo {
-        vault_root: ctx.vault.root.display().to_string(),
-        vault_source: ctx.vault.source,
-        overlay: OverlayInfo { source: ov_src, path: overlay::OVERLAY_REL.to_string(), overlay: &ov },
-        lattice,
-    };
-
+    let (info, err) = ops::vault_info(ctx).await?;
     if ctx.json {
         emit_json(&info)?;
     } else {
+        let ov = &info.overlay.overlay;
         println!("Vault    {}  ({})", info.vault_root, info.vault_source);
         println!(
             "Overlay  {}  inbox={} quick={} archive={} trash={}",
@@ -184,11 +133,10 @@ async fn vault_info(ctx: &Ctx) -> Result<()> {
             None => println!("Lattice  {}  DOWN", info.lattice.url),
         }
     }
-
     // Always print the report, then fail with exit 2 if the lattice is down.
-    match health {
-        Ok(_) => Ok(()),
-        Err(e) => Err(e),
+    match err {
+        Some(e) => Err(e),
+        None => Ok(()),
     }
 }
 
@@ -204,9 +152,7 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
         mmr: args.mmr,
         include_archives: args.include_archives,
     };
-    let client = ctx.client()?;
-    let result = client.search(&params).await?;
-
+    let result = ctx.client()?.search(&params).await?;
     if ctx.json {
         return emit_json(&result);
     }
@@ -217,23 +163,13 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
     for h in &result.hits {
         let rank = h.rank.map(|r| format!("{r:>2}.")).unwrap_or_else(|| "  ".into());
         println!("{rank} {}", h.path);
-        let mut meta = Vec::new();
-        if let Some(hd) = &h.heading
-            && hd != &h.title
-        {
-            meta.push(hd.clone());
-        }
-        if let Some(d) = &h.domain {
-            meta.push(format!("domain={d}"));
-        }
-        if let Some(s) = h.score {
-            meta.push(format!("score={s:.4}"));
-        }
-        println!(
-            "    {}{}",
-            h.title,
-            if meta.is_empty() { String::new() } else { format!("  ·  {}", meta.join("  ")) }
-        );
+        let heading = h.heading.clone().filter(|hd| hd != &h.title);
+        let meta = meta_line(&[
+            heading,
+            h.domain.as_ref().map(|d| format!("domain={d}")),
+            h.score.map(|s| format!("score={s:.4}")),
+        ]);
+        println!("    {}{meta}", h.title);
     }
     if let Some(ms) = result.latency_ms {
         eprintln!("{} hits · lattice {:.0} ms · {}", result.count, ms, result.modalities.join("+"));
@@ -278,64 +214,18 @@ fn read(ctx: &Ctx, args: ReadArgs) -> Result<()> {
 
 // ----------------------------------------------------------------------- list
 
-#[derive(Serialize)]
-struct ListRow<'a> {
-    path: &'a str,
-    kind: notes::Kind,
-    title: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    domain: &'a Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    doc_type: &'a Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    status: &'a Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    priority: &'a Option<String>,
-    tags: &'a [String],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    updated_at: Option<u64>,
-}
-
 async fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
-    let prefix = match &args.prefix {
-        // Same escape rules as `read`, but a prefix may be a directory (trailing slash kept).
-        Some(p) => {
-            let trailing = p.ends_with('/');
-            let clean = notes::clean_rel(p)?;
-            Some(if trailing { format!("{clean}/") } else { clean })
-        }
-        None => None,
-    };
     let params = ListParams {
         domain: args.domain,
         doc_type: args.doc_type,
         status: args.status,
         tag: args.tag,
-        prefix,
+        prefix: args.prefix,
         limit: args.limit,
         offset: args.offset,
         include_archives: args.include_archives,
     };
-    let client = ctx.client()?;
-    let docs = client.documents(&params).await?;
-    let rows: Vec<ListRow<'_>> = docs
-        .iter()
-        .map(|d| ListRow {
-            path: &d.path,
-            kind: if d.doc_type.as_deref() == Some("tome") {
-                notes::Kind::Pdf
-            } else {
-                notes::kind_of(&d.path)
-            },
-            title: d.title.as_deref().filter(|t| !t.trim().is_empty()).unwrap_or(&d.path),
-            domain: &d.domain,
-            doc_type: &d.doc_type,
-            status: &d.status,
-            priority: &d.priority,
-            tags: &d.tags,
-            updated_at: d.mtime.map(|m| (m * 1000.0) as u64),
-        })
-        .collect();
+    let rows = ops::list(ctx, params).await?;
     if ctx.json {
         return emit_json(&rows);
     }
@@ -344,19 +234,8 @@ async fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
         return Ok(());
     }
     for r in &rows {
-        let mut meta = Vec::new();
-        if let Some(d) = r.doc_type {
-            meta.push(d.clone());
-        }
-        if let Some(s) = r.status {
-            meta.push(s.clone());
-        }
         println!("{}", r.path);
-        println!(
-            "    {}{}",
-            r.title,
-            if meta.is_empty() { String::new() } else { format!("  ·  {}", meta.join("  ")) }
-        );
+        println!("    {}{}", r.title, meta_line(&[r.doc_type.clone(), r.status.clone()]));
     }
     Ok(())
 }
@@ -366,8 +245,7 @@ async fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
 async fn reindex(ctx: &Ctx, args: ReindexArgs) -> Result<()> {
     // Validate locally first so an escape is exit 3 before any HTTP.
     let (rel, _abs) = notes::resolve(&ctx.vault.root, &args.path)?;
-    let client = ctx.client()?;
-    let r = client.reindex(&rel).await?;
+    let r = ctx.client()?.reindex(&rel).await?;
     if ctx.json {
         return emit_json(&r);
     }
@@ -388,38 +266,15 @@ async fn reindex(ctx: &Ctx, args: ReindexArgs) -> Result<()> {
 
 // ---------------------------------------------------------------------- write
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WriteReport {
-    #[serde(flatten)]
-    written: write::Written,
-    /// `null` when `--no-reindex`; otherwise the lattice's answer or its error.
-    reindex: Option<lattice::Reindex>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reindex_error: Option<String>,
-}
-
 fn read_stdin() -> Result<String> {
     let mut s = String::new();
     std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
     Ok(s)
 }
 
-/// Kick the index after a successful write. The file is the source of truth
-/// and is already on disk, so a failed kick is reported, not fatal: nightly
-/// reconcile catches it, and the agent sees `reindex: null` + `reindexError`.
-async fn kick(ctx: &Ctx, written: write::Written, no_reindex: bool) -> Result<()> {
-    let (reindex, reindex_error) = if no_reindex {
-        (None, None)
-    } else {
-        match ctx.client()?.reindex(&written.path).await {
-            Ok(r) => (Some(r), None),
-            Err(e) => (None, Some(e.to_string())),
-        }
-    };
-    let report = WriteReport { written, reindex, reindex_error };
+fn print_write(ctx: &Ctx, report: &ops::WriteReport) -> Result<()> {
     if ctx.json {
-        emit_json(&report)?;
+        emit_json(report)?;
     } else {
         let idx = match (&report.reindex, &report.reindex_error) {
             (Some(r), _) if r.changed == Some(true) => {
@@ -437,10 +292,6 @@ async fn kick(ctx: &Ctx, written: write::Written, no_reindex: bool) -> Result<()
     Ok(())
 }
 
-fn inbox_bucket(ctx: &Ctx) -> Result<String> {
-    Ok(overlay::load(&ctx.vault.root)?.0.buckets.inbox)
-}
-
 async fn create(ctx: &Ctx, args: CreateArgs) -> Result<()> {
     let body = if args.stdin { Some(read_stdin()?) } else { args.body.clone() };
     let opts = write::CreateOpts {
@@ -452,29 +303,75 @@ async fn create(ctx: &Ctx, args: CreateArgs) -> Result<()> {
         tags: args.tags.clone(),
         body,
         operator: ctx.cfg.operator.name.clone(),
-        inbox: inbox_bucket(ctx)?,
+        inbox: ctx.inbox()?,
     };
     let w = write::create(&ctx.vault.root, &opts)?;
-    kick(ctx, w, args.no_reindex).await
+    print_write(ctx, &ops::kick(ctx, w, args.no_reindex).await?)
 }
 
 async fn append(ctx: &Ctx, args: AppendArgs) -> Result<()> {
-    let text = match (&args.text, args.stdin) {
-        (Some(t), _) => t.clone(),
-        (None, _) => read_stdin()?,
+    let text = match &args.text {
+        Some(t) => t.clone(),
+        None => read_stdin()?,
     };
     if text.trim().is_empty() {
         return Err(LapisError::Usage("nothing to append".into()));
     }
     let w = write::append(&ctx.vault.root, &args.path, &text)?;
-    kick(ctx, w, args.no_reindex).await
+    print_write(ctx, &ops::kick(ctx, w, args.no_reindex).await?)
 }
 
 async fn capture(ctx: &Ctx, args: CaptureArgs) -> Result<()> {
     let text = if args.text.is_empty() { read_stdin()? } else { args.text.join(" ") };
-    let inbox = inbox_bucket(ctx)?;
+    let inbox = ctx.inbox()?;
     let w = write::capture(&ctx.vault.root, &text, &inbox, ctx.cfg.operator.name.clone())?;
-    kick(ctx, w, args.no_reindex).await
+    print_write(ctx, &ops::kick(ctx, w, args.no_reindex).await?)
+}
+
+// ---------------------------------------------------------------------- tasks
+
+fn task_mark(t: &tasks::Task) -> &'static str {
+    match t.status.as_str() {
+        "done" => "x",
+        "in-progress" => "/",
+        "cancelled" => "-",
+        "forwarded" => ">",
+        _ => " ",
+    }
+}
+
+fn task_list(ctx: &Ctx, args: TaskListArgs) -> Result<()> {
+    let f = tasks::Filter { status: args.status, due: args.due, tag: args.tag, prefix: args.path };
+    let list = tasks::list(&ctx.vault.root, &f)?;
+    if ctx.json {
+        return emit_json(&list);
+    }
+    if list.is_empty() {
+        println!("No tasks match.");
+        return Ok(());
+    }
+    for t in &list {
+        let meta = meta_line(&[
+            t.due.as_ref().map(|d| format!("due:{d}")),
+            t.priority.as_ref().map(|p| format!("!{p}")),
+            if t.waiting { Some("@waiting".into()) } else { None },
+        ]);
+        println!("[{}] {}  {}{meta}", task_mark(t), t.id, t.content);
+    }
+    Ok(())
+}
+
+async fn task_toggle(ctx: &Ctx, args: TaskToggleArgs) -> Result<()> {
+    let r = ops::toggle_task(ctx, &args.id, args.no_reindex).await?;
+    if ctx.json {
+        emit_json(&r)?;
+    } else {
+        println!("[{}] {}  {}", task_mark(&r.task), r.task.id, r.task.content);
+    }
+    if let Some(e) = &r.reindex_error {
+        eprintln!("lapis: toggled, but reindex failed: {e}");
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------ neighbors
@@ -483,8 +380,7 @@ async fn neighbors(ctx: &Ctx, args: NeighborsArgs) -> Result<()> {
     // Path escape rules apply even though the lattice, not the disk, answers.
     let rel = notes::clean_rel(&args.path)?;
     let rel = if std::path::Path::new(&rel).extension().is_none() { format!("{rel}.md") } else { rel };
-    let client = ctx.client()?;
-    let n = client.neighbors(&rel, &args.direction, !args.dangling).await?;
+    let n = ctx.client()?.neighbors(&rel, &args.direction, !args.dangling).await?;
     if ctx.json {
         return emit_json(&n);
     }
@@ -493,10 +389,7 @@ async fn neighbors(ctx: &Ctx, args: NeighborsArgs) -> Result<()> {
         return Ok(());
     }
     for e in &n.neighbors {
-        let arrow = match e.direction.as_str() {
-            "in" => "<-",
-            _ => "->",
-        };
+        let arrow = if e.direction == "in" { "<-" } else { "->" };
         let flag = if e.resolved { "" } else { "  (dangling)" };
         println!("{arrow} {}{flag}", e.path);
     }

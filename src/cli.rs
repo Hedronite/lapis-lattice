@@ -77,6 +77,53 @@ pub enum Command {
 
     /// Quick capture: timestamped note under the inbox bucket with doc_type=capture.
     Capture(CaptureArgs),
+
+    /// Checkbox tasks: list and toggle by id (`path#index` or `path#task`).
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
+    },
+
+    /// MCP server over stdio (tools: vault_info, search, read_note, list_notes, neighbors, create_note, append_to_note, list_tasks, toggle_task).
+    Mcp,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TaskCommand {
+    /// Scan .md notes (skipping media, archives, trash) and list tasks.
+    List(TaskListArgs),
+    /// Flip one task between open and done.
+    Toggle(TaskToggleArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct TaskListArgs {
+    /// Restrict the scan to this vault-relative folder or file.
+    #[arg(value_name = "PATH")]
+    pub path: Option<String>,
+
+    /// open | done | in-progress | cancelled | forwarded | waiting
+    #[arg(long, value_name = "STATUS")]
+    pub status: Option<String>,
+
+    /// today | overdue | YYYY-MM-DD
+    #[arg(long, value_name = "WHEN")]
+    pub due: Option<String>,
+
+    /// Require this inline #tag.
+    #[arg(long, value_name = "TAG")]
+    pub tag: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct TaskToggleArgs {
+    /// Task id from `task list`, e.g. `foundry/lapis/plan.md#0`.
+    #[arg(value_name = "ID")]
+    pub id: String,
+
+    /// Skip the lattice reindex kick after writing.
+    #[arg(long)]
+    pub no_reindex: bool,
 }
 
 #[derive(Debug, Args)]
@@ -350,6 +397,17 @@ mod tests {
         assert!(matches!(c.command, Command::Append(a) if a.text.as_deref() == Some("hello")));
         let c = Cli::try_parse_from(["lapis", "capture", "two", "words"]).unwrap();
         assert!(matches!(c.command, Command::Capture(a) if a.text == ["two", "words"]));
+    }
+
+    #[test]
+    fn parses_task_and_mcp() {
+        let c = Cli::try_parse_from(["lapis", "task", "list", "--status", "open", "--due", "today"]).unwrap();
+        assert!(
+            matches!(c.command, Command::Task { command: TaskCommand::List(a) } if a.status.as_deref() == Some("open"))
+        );
+        let c = Cli::try_parse_from(["lapis", "task", "toggle", "a.md#3"]).unwrap();
+        assert!(matches!(c.command, Command::Task { command: TaskCommand::Toggle(a) } if a.id == "a.md#3"));
+        assert!(matches!(Cli::try_parse_from(["lapis", "mcp"]).unwrap().command, Command::Mcp));
     }
 
     #[test]
