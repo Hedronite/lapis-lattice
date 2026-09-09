@@ -30,11 +30,7 @@
 
 ---
 
-Lapis is the operator and agent face of an [Atrium](https://hedronite.com) vault: one Go binary that speaks `--json`, MCP stdio, and a Vim TUI, bound to **Atrium Lattice** (hybrid search, wikilink graph, HAL frontmatter) instead of a four-bucket notes app.
-
-Obsidian stays a second IDE on the same files. Lattice stays the recall engine. Lapis does not write `lattice.db`.
-
-**spec-draft** · binary not shipped · vault spec in Atrium `foundry/lapis/`
+Lapis is notes and vault application that is optimized for RAG. : one Go binary that speaks `--json`, MCP stdio, and a Vim TUI, bound to **Lapis Lattice** (hybrid search, wikilink graph, YAML frontmatter)
 
 ## What it is
 
@@ -46,16 +42,7 @@ Obsidian stays a second IDE on the same files. Lattice stays the recall engine. 
 | Operator | TUI: Vim, preview, tasks, Kanban, daily notes, templates, graph pane |
 | Tasks | Checkbox grammar with stable IDs (`path#n`) so agents toggle work without editing YAML |
 
-The top layer (CLI, MCP, TUI, tasks, Kanban, dailies, templates) is the shape we wanted from [ZenNotes `zn`](https://github.com/ZenNotes/tui). The memory layer is ours. This is not a fork of `zn`: we would have thrown most of it away. We copy chrome under MIT and credit it. See [CREDITS.md](CREDITS.md).
-
 ## What it is not
-
-- Not `zn`. Different binary, different MCP name, different vault contract.
-- Not a rewrite of the Atrium folder tree into inbox / quick / archive / trash. Those are overlays on dirs that already exist.
-- Not the lathe Halo roles vault (`~/Obsidian/Lapis` on lathe). Same word, different object.
-- Not Obsidian Sync, Canvas, or mobile.
-- Not a second writer of `lattice.db`. Indexer and reconcile own the rows.
-
 ## Intended surface
 
 ```text
