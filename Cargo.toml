@@ -1,0 +1,29 @@
+[package]
+name = "lapis"
+version = "0.1.0"
+edition = "2024"
+description = "Agent-first notes vault: JSON CLI, MCP, and TUI over Markdown files indexed by Lapis Lattice."
+license = "MIT"
+repository = "https://github.com/VirtualMachinist/lapis"
+default-run = "lapis"
+
+[[bin]]
+name = "lapis"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+gray_matter = "0.3"
+pulldown-cmark = { version = "0.13", default-features = false }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+toml = "1"
+yaml_serde = "0.10"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
