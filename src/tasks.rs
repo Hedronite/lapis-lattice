@@ -295,9 +295,16 @@ pub fn split_id(id: &str) -> Result<(String, Option<usize>)> {
 /// Toggle a task by id on disk. File tasks (`#task`) flip HAL `status`
 /// between `done` and `open` (an allowlisted key), line-wise.
 pub fn toggle(root: &Path, id: &str) -> Result<Task> {
+    toggle_with(root, id, &crate::write::Guard::default())
+}
+
+/// [`toggle`] with a stale guard and dry-run switch (N13).
+pub fn toggle_with(root: &Path, id: &str, guard: &crate::write::Guard) -> Result<Task> {
     let (rel, idx) = split_id(id)?;
     let (rel, abs) = notes::resolve(root, &rel)?;
-    let text = std::fs::read_to_string(&abs)?;
+    let raw = std::fs::read(&abs)?;
+    guard.check(&rel, &abs, &raw)?;
+    let text = String::from_utf8(raw).map_err(|_| LapisError::Usage(format!("{rel}: not UTF-8 text")))?;
     let (next, want_index) = match idx {
         Some(i) => {
             let (next, _) =
@@ -314,7 +321,9 @@ pub fn toggle(root: &Path, id: &str) -> Result<Task> {
         }
     };
     let next = crate::write::set_frontmatter_key(&next, "updated", &crate::write::today());
-    std::fs::write(&abs, &next)?;
+    if !guard.dry_run {
+        std::fs::write(&abs, &next)?;
+    }
     let mut tasks = parse(&rel, &next);
     let pos = if idx.is_some() { want_index } else { 0 };
     if pos < tasks.len() {
@@ -587,6 +596,18 @@ mod tests {
         assert!(!f.checked);
         assert_eq!(toggle(&v, "foundry/lapis/plan.md#99").unwrap_err().exit_code(), 3);
         assert_eq!(toggle(&v, "foundry/lapis/plan.md#task").unwrap_err().exit_code(), 1);
+        // N13: dry run reports the flipped task without touching the file
+        let before = std::fs::read_to_string(v.join("foundry/lapis/plan.md")).unwrap();
+        let dry = toggle_with(
+            &v,
+            "foundry/lapis/plan.md#0",
+            &crate::write::Guard { dry_run: true, ..Default::default() },
+        )
+        .unwrap();
+        assert!(!dry.checked, "was toggled to done above; dry run flips back in the report only");
+        assert_eq!(std::fs::read_to_string(v.join("foundry/lapis/plan.md")).unwrap(), before);
+        let stale = crate::write::Guard { if_hash: Some("fnv1a64:0".into()), ..Default::default() };
+        assert_eq!(toggle_with(&v, "foundry/lapis/plan.md#0", &stale).unwrap_err().exit_code(), 1);
         let _ = std::fs::remove_dir_all(&v);
     }
 }

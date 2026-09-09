@@ -152,7 +152,7 @@ pub struct WriteReport {
 /// of truth on disk, so a failed kick is reported, not fatal; nightly
 /// reconcile catches it.
 pub async fn kick(ctx: &Ctx, written: write::Written, no_reindex: bool) -> Result<WriteReport> {
-    let (reindex, reindex_error) = if no_reindex {
+    let (reindex, reindex_error) = if no_reindex || written.dry_run {
         (None, None)
     } else {
         match ctx.client()?.reindex(&written.path).await {
@@ -167,14 +167,21 @@ pub async fn kick(ctx: &Ctx, written: write::Written, no_reindex: bool) -> Resul
 #[serde(rename_all = "camelCase")]
 pub struct ToggleReport {
     pub task: tasks::Task,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
     pub reindex: Option<Reindex>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reindex_error: Option<String>,
 }
 
-pub async fn toggle_task(ctx: &Ctx, id: &str, no_reindex: bool) -> Result<ToggleReport> {
-    let task = tasks::toggle(&ctx.vault.root, id)?;
-    let (reindex, reindex_error) = if no_reindex {
+pub async fn toggle_task_with(
+    ctx: &Ctx,
+    id: &str,
+    no_reindex: bool,
+    guard: &write::Guard,
+) -> Result<ToggleReport> {
+    let task = tasks::toggle_with(&ctx.vault.root, id, guard)?;
+    let (reindex, reindex_error) = if no_reindex || guard.dry_run {
         (None, None)
     } else {
         match ctx.client()?.reindex(&task.source_path).await {
@@ -182,7 +189,7 @@ pub async fn toggle_task(ctx: &Ctx, id: &str, no_reindex: bool) -> Result<Toggle
             Err(e) => (None, Some(e.to_string())),
         }
     };
-    Ok(ToggleReport { task, reindex, reindex_error })
+    Ok(ToggleReport { task, dry_run: guard.dry_run, reindex, reindex_error })
 }
 
 #[derive(Serialize)]

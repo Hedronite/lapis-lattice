@@ -71,6 +71,9 @@ pub enum Command {
     /// Hop-1 wikilink neighbors of a note from the lattice `edges` table.
     Neighbors(NeighborsArgs),
 
+    /// Resolve a wikilink (`[[Name|alias#anchor]]`) or lattice `dst_raw` to a vault path.
+    Resolve(ResolveArgs),
+
     /// List notes from the lattice `documents` table (metadata only). Never walks the vault.
     List(ListArgs),
 
@@ -171,6 +174,14 @@ pub struct TaskListArgs {
     #[arg(long)]
     pub full: bool,
 
+    /// Max rows per page when listing rows (0 = all).
+    #[arg(long, short = 'n', default_value_t = 500, value_name = "N")]
+    pub limit: u32,
+
+    /// Row offset for paging.
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    pub offset: u32,
+
     /// open | done | in-progress | cancelled | forwarded | waiting
     #[arg(long, value_name = "STATUS")]
     pub status: Option<String>,
@@ -200,6 +211,31 @@ pub struct TaskToggleArgs {
     /// Skip the lattice reindex kick after writing.
     #[arg(long)]
     pub no_reindex: bool,
+
+    #[command(flatten)]
+    pub guard: GuardArgs,
+}
+
+/// `--dry-run` / stale guards shared by append and task toggle.
+#[derive(Debug, Args, Clone, Default)]
+pub struct GuardArgs {
+    /// Compute and report the result without writing.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Refuse if the note's mtime (ms, `updatedAt` from `read`) no longer matches.
+    #[arg(long, value_name = "MS")]
+    pub if_mtime: Option<u64>,
+
+    /// Refuse if the note's content hash (`hash` from `read`) no longer matches.
+    #[arg(long, value_name = "HASH")]
+    pub if_hash: Option<String>,
+}
+
+impl GuardArgs {
+    pub fn guard(&self) -> crate::write::Guard {
+        crate::write::Guard { dry_run: self.dry_run, if_mtime: self.if_mtime, if_hash: self.if_hash.clone() }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -243,6 +279,10 @@ pub struct CreateArgs {
     /// Skip the lattice reindex kick after writing.
     #[arg(long)]
     pub no_reindex: bool,
+
+    /// Compute path, HAL and text; write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -262,6 +302,9 @@ pub struct AppendArgs {
     /// Skip the lattice reindex kick after writing.
     #[arg(long)]
     pub no_reindex: bool,
+
+    #[command(flatten)]
+    pub guard: GuardArgs,
 }
 
 #[derive(Debug, Args)]
@@ -333,6 +376,10 @@ pub struct SearchArgs {
     #[arg(long, short = 'n', default_value_t = 10, value_name = "N")]
     pub limit: u32,
 
+    /// Skip this many hits (offset + limit must stay ≤ 50).
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    pub offset: u32,
+
     /// Filter by HAL `domain`.
     #[arg(long, value_name = "DOMAIN")]
     pub domain: Option<String>,
@@ -362,9 +409,9 @@ impl SearchArgs {
     pub fn query_text(&self) -> String {
         self.query.join(" ")
     }
-    /// `--per-doc`, or implied by `--agent`.
-    pub fn effective_per_doc(&self) -> bool {
-        self.per_doc || self.agent
+    /// `--per-doc`, or `--agent` with the `[agent].per_doc` profile default.
+    pub fn effective_per_doc(&self, agent_default: bool) -> bool {
+        self.per_doc || (self.agent && agent_default)
     }
 }
 
@@ -381,6 +428,25 @@ pub struct ReadArgs {
     /// Print only the body, without frontmatter.
     #[arg(long)]
     pub body: bool,
+
+    /// Only the section under this heading (case-insensitive, nested sub-sections included).
+    #[arg(long, value_name = "H", conflicts_with = "chunk")]
+    pub heading: Option<String>,
+
+    /// Only the N-th heading section (0 = preamble / first section), local outline order.
+    #[arg(long, value_name = "N")]
+    pub chunk: Option<usize>,
+
+    /// Clip the body to this many chars; `meta.truncated` says when it happened.
+    #[arg(long, value_name = "N")]
+    pub max_chars: Option<usize>,
+}
+
+#[derive(Debug, Args)]
+pub struct ResolveArgs {
+    /// `[[Name]]`, `[[Name|alias#anchor]]`, or a raw link target such as a lattice `dst_raw`.
+    #[arg(value_name = "LINK")]
+    pub link: String,
 }
 
 #[derive(Debug, Args)]
@@ -389,9 +455,9 @@ pub struct NeighborsArgs {
     #[arg(value_name = "PATH")]
     pub path: String,
 
-    /// Edge direction: both (default), out, or in.
-    #[arg(long, default_value = "both", value_parser = ["out", "in", "both"])]
-    pub direction: String,
+    /// Edge direction: out, in, or both (default from `[agent].neighbors_direction`, else both).
+    #[arg(long, value_parser = ["out", "in", "both"])]
+    pub direction: Option<String>,
 
     /// Include dangling (unresolved) links too.
     #[arg(long)]
@@ -528,13 +594,74 @@ mod tests {
     fn neighbors_default_direction_is_both() {
         let c = Cli::try_parse_from(["lapis", "neighbors", "a.md"]).unwrap();
         let Command::Neighbors(n) = c.command() else { panic!("neighbors") };
-        assert_eq!(n.direction, "both");
+        assert_eq!(n.direction, None, "unset → config default, which is both");
         assert!(!n.dangling);
         let c =
             Cli::try_parse_from(["lapis", "neighbors", "a.md", "--direction", "in", "--dangling"]).unwrap();
         let Command::Neighbors(n) = c.command() else { panic!("neighbors") };
-        assert_eq!(n.direction, "in");
+        assert_eq!(n.direction.as_deref(), Some("in"));
         assert!(n.dangling);
+    }
+
+    /// N8 / N11 / N12 / N13: new flags parse and defaults hold.
+    #[test]
+    fn slice2_flags() {
+        let Command::Search(s) =
+            Cli::try_parse_from(["lapis", "search", "q", "--offset", "10", "-n", "5"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert_eq!((s.limit, s.offset), (5, 10));
+        let Command::Read(r) =
+            Cli::try_parse_from(["lapis", "read", "a.md", "--heading", "Goals", "--max-chars", "300"])
+                .unwrap()
+                .command()
+        else {
+            panic!()
+        };
+        assert_eq!((r.heading.as_deref(), r.chunk, r.max_chars), (Some("Goals"), None, Some(300)));
+        assert!(Cli::try_parse_from(["lapis", "read", "a.md", "--heading", "x", "--chunk", "1"]).is_err());
+        let Command::Resolve(x) = Cli::try_parse_from(["lapis", "resolve", "[[A|b#c]]"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert_eq!(x.link, "[[A|b#c]]");
+        let Command::Append(a) = Cli::try_parse_from([
+            "lapis",
+            "append",
+            "a.md",
+            "t",
+            "--dry-run",
+            "--if-hash",
+            "fnv1a64:0",
+            "--if-mtime",
+            "7",
+        ])
+        .unwrap()
+        .command() else {
+            panic!()
+        };
+        let g = a.guard.guard();
+        assert!(g.dry_run);
+        assert_eq!((g.if_mtime, g.if_hash.as_deref()), (Some(7), Some("fnv1a64:0")));
+        let Command::Create(c) =
+            Cli::try_parse_from(["lapis", "create", "--title", "T", "--dry-run"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert!(c.dry_run);
+        let Command::Task { command: TaskCommand::Toggle(t) } =
+            Cli::try_parse_from(["lapis", "task", "toggle", "a.md#0", "--dry-run"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert!(t.guard.dry_run && t.guard.if_mtime.is_none());
+        let Command::Task { command: TaskCommand::List(l) } =
+            Cli::try_parse_from(["lapis", "task", "list", "x", "--offset", "500"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert_eq!((l.limit, l.offset), (500, 500));
     }
 
     /// N3: `--agent` implies per_doc; `--per-doc` alone still works.
@@ -544,10 +671,11 @@ mod tests {
             Command::Search(s) => s,
             _ => panic!("search"),
         };
-        assert!(!parse(&["lapis", "search", "q"]).effective_per_doc());
-        assert!(parse(&["lapis", "search", "--per-doc", "q"]).effective_per_doc());
+        assert!(!parse(&["lapis", "search", "q"]).effective_per_doc(true));
+        assert!(parse(&["lapis", "search", "--per-doc", "q"]).effective_per_doc(false));
         let s = parse(&["lapis", "search", "--agent", "q"]);
-        assert!(s.agent && !s.per_doc && s.effective_per_doc());
+        assert!(s.agent && !s.per_doc && s.effective_per_doc(true));
+        assert!(!s.effective_per_doc(false), "[agent] per_doc=false turns it off");
     }
 
     /// N4: scope comes from the positional or `--path`; both plus `--full` parse.

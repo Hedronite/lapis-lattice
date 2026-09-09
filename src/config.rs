@@ -24,6 +24,60 @@ pub struct Config {
     pub vault: Option<String>,
     #[serde(default)]
     pub operator: OperatorConfig,
+    /// Defaults for agent surfaces (`--agent`, MCP).
+    #[serde(default)]
+    pub agent: AgentConfig,
+}
+
+/// `[agent]`: how the MCP server and `--agent` behave by default.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct AgentConfig {
+    /// Collapse search hits to one per document.
+    #[serde(default = "default_true")]
+    pub per_doc: bool,
+    /// `both`, `out`, or `in`.
+    #[serde(default = "default_direction")]
+    pub neighbors_direction: String,
+    /// `summary` (counts) or `full` (rows) for an unscoped task list.
+    #[serde(default = "default_task_unscoped")]
+    pub task_unscoped: String,
+    /// Clip note bodies to this many chars (`meta.truncated`); unset = whole body.
+    #[serde(default)]
+    pub read_max_chars: Option<usize>,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_direction() -> String {
+    "both".into()
+}
+fn default_task_unscoped() -> String {
+    "summary".into()
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            per_doc: true,
+            neighbors_direction: default_direction(),
+            task_unscoped: default_task_unscoped(),
+            read_max_chars: None,
+        }
+    }
+}
+
+impl AgentConfig {
+    pub fn task_unscoped_full(&self) -> bool {
+        self.task_unscoped.eq_ignore_ascii_case("full")
+    }
+    /// Validated direction; anything odd falls back to `both`.
+    pub fn direction(&self) -> &str {
+        match self.neighbors_direction.as_str() {
+            d @ ("out" | "in" | "both") => d,
+            _ => "both",
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -107,6 +161,27 @@ mod tests {
         assert_eq!(c.lattice.url, DEFAULT_LATTICE_URL);
         assert_eq!(c.lattice.timeout_ms, DEFAULT_TIMEOUT_MS);
         assert!(c.vault.is_none());
+        assert_eq!(c.agent, AgentConfig::default());
+        assert!(c.agent.per_doc);
+        assert_eq!(c.agent.direction(), "both");
+        assert!(!c.agent.task_unscoped_full());
+        assert_eq!(c.agent.read_max_chars, None);
+    }
+
+    /// N14: `[agent]` keys, partial tables keep the other defaults.
+    #[test]
+    fn agent_section() {
+        let c: Config = toml::from_str(
+            "[agent]\nper_doc = false\nneighbors_direction = \"out\"\ntask_unscoped = \"full\"\nread_max_chars = 4000\n",
+        )
+        .unwrap();
+        assert!(!c.agent.per_doc);
+        assert_eq!(c.agent.direction(), "out");
+        assert!(c.agent.task_unscoped_full());
+        assert_eq!(c.agent.read_max_chars, Some(4000));
+        let c: Config = toml::from_str("[agent]\nneighbors_direction = \"sideways\"\n").unwrap();
+        assert!(c.agent.per_doc);
+        assert_eq!(c.agent.direction(), "both");
     }
 
     #[test]

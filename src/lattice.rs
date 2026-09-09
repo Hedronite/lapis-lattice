@@ -107,8 +107,26 @@ struct RawSearch {
     modalities: Vec<String>,
     #[serde(default)]
     latency_ms: Option<f64>,
+    /// Per-arm breakdown (serve.py ≥ 2026-09-09); absent on older lattices.
+    #[serde(default)]
+    latency: Option<Latency>,
     #[serde(default)]
     results: Vec<RawHit>,
+}
+
+/// Per-arm search latency in milliseconds. An arm the lattice skipped is `0`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct Latency {
+    #[serde(default)]
+    pub embed: f64,
+    #[serde(default)]
+    pub bm25: f64,
+    #[serde(default)]
+    pub vector: f64,
+    #[serde(default)]
+    pub title: f64,
+    #[serde(default)]
+    pub fuse: f64,
 }
 
 /// Search hit per `schema/search-hit.schema.json`.
@@ -123,11 +141,11 @@ pub struct Hit {
     pub snippet: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 1-based position in this result list; always present.
     pub rank: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Always present (`null` when the note has no HAL domain).
     pub domain: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Always present (`null` when the note has no HAL type).
     pub doc_type: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
@@ -145,6 +163,8 @@ pub struct SearchResult {
     pub modalities: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<f64>,
+    /// Per-arm breakdown; zeros when the lattice did not report one.
+    pub latency: Latency,
     pub count: usize,
     pub hits: Vec<Hit>,
 }
@@ -343,7 +363,8 @@ impl Client {
         let hits: Vec<Hit> = raw
             .results
             .into_iter()
-            .map(|r| {
+            .enumerate()
+            .map(|(i, r)| {
                 let kind = kind_of(&r.path);
                 let title = r
                     .title
@@ -355,7 +376,7 @@ impl Client {
                     heading: r.heading.filter(|h| !h.is_empty()),
                     snippet: r.text.filter(|t| !t.is_empty()),
                     score: r.rrf_score.or(r.score),
-                    rank: r.rank,
+                    rank: Some(r.rank.unwrap_or(i as u32 + 1)),
                     domain: r.domain,
                     doc_type: r.doc_type,
                     tags: r.tags,
@@ -370,6 +391,7 @@ impl Client {
             mode: p.mode,
             modalities: raw.modalities.iter().map(|m| normalize_modality(m)).collect(),
             latency_ms: raw.latency_ms,
+            latency: raw.latency.unwrap_or_default(),
             count: hits.len(),
             hits,
         })
@@ -501,6 +523,40 @@ mod tests {
         let r = &raw.results[0];
         assert_eq!(r.rrf_score, Some(0.05));
         assert_eq!(kind_of(&r.path), Kind::Markdown);
+        assert!(raw.latency.is_none(), "older lattice: no breakdown");
+    }
+
+    /// N9 / N10: latency breakdown decodes with zeros for skipped arms; hit
+    /// JSON always carries rank, domain, doc_type.
+    #[test]
+    fn latency_breakdown_and_hit_keys() {
+        let raw: RawSearch = serde_json::from_str(
+            r#"{"latency_ms":40.5,"latency":{"embed":12.0,"bm25":3.5,"fuse":1.0},"results":[]}"#,
+        )
+        .unwrap();
+        let l = raw.latency.unwrap();
+        assert_eq!(l, Latency { embed: 12.0, bm25: 3.5, vector: 0.0, title: 0.0, fuse: 1.0 });
+        let hit = Hit {
+            path: "a.md".into(),
+            kind: Kind::Markdown,
+            title: "A".into(),
+            heading: None,
+            snippet: None,
+            score: None,
+            rank: Some(1),
+            domain: None,
+            doc_type: None,
+            tags: vec![],
+            chunk_id: None,
+            chunk_index: None,
+        };
+        let j = serde_json::to_value(&hit).unwrap();
+        assert_eq!(j["rank"], 1);
+        assert!(j.get("domain").is_some() && j["domain"].is_null());
+        assert!(j.get("doc_type").is_some() && j["doc_type"].is_null());
+        assert!(j.get("score").is_none());
+        let empty = serde_json::to_value(Latency::default()).unwrap();
+        assert_eq!(empty["vector"], 0.0);
     }
 
     #[test]

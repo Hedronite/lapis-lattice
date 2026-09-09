@@ -698,6 +698,7 @@ impl App {
             inbox: self.ctx.inbox().unwrap_or_else(|_| "inbox".into()),
             director: None,
             template_date: None,
+            dry_run: false,
         };
         let root = self.root();
         match write::create(&root, &opts) {
