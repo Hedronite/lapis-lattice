@@ -1,14 +1,8 @@
 # Credits
 
-## Hedronite
+Lapis is built by [Hedronite](https://hedronite.com).
 
-Lapis is a Hedronite product. Spec, schemas, and operator canon live in the Atrium vault (`foundry/lapis/`).
-
-## ZenNotes / `zn`
-
-Lapis is **not a fork** of [ZenNotes/tui](https://github.com/ZenNotes/tui). We copy selected MIT-licensed components (Vim engine, TUI chrome, task-line grammar, periodic notes, template substitution) because that top layer is what we wanted, and we would have deleted most of a fork.
-
-When those files land here, they keep their notices. The ZenNotes license, quoted in full:
+Interface and task-line ideas draw on [ZenNotes/tui](https://github.com/ZenNotes/tui) (MIT). When those files are adapted here, they keep their notices. The ZenNotes license:
 
 ```
 MIT License
@@ -33,9 +27,3 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
-
-Reference clone on castle (steal-source, not this repo): `~/Developer/zennotes-tui` @ `e5550a380eebb09e4cebf258761b47cb394789cc`.
-
-## Atrium Lattice
-
-Search, document metadata, and the wikilink graph are owned by Atrium Lattice (`projects/atrium-lattice/` in the vault). Lapis is a client. It does not reimplement `is_walked` and it does not write `lattice.db`.

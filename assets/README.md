@@ -1,8 +1,8 @@
 # assets/
 
-Product mark and wordmark live here.
+Product mark and wordmark.
 
-- Lapis blue: `#1F2D68` (`--lapis-core`)
-- Regent grey: `#809DAF` (`--regent-grey`)
+- Lapis blue: `#1F2D68`
+- Regent grey: `#809DAF`
 
-Drop files as `lapis-mark.png` / `lapis-wordmark.png` (or SVG) and wire them from the root README. Until then the README is type-only.
+Add `lapis-mark.png` / `lapis-wordmark.png` (or SVG) and reference them from the root README.

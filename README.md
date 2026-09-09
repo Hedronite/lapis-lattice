@@ -3,8 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Operator TUI, JSON CLI, and MCP for an Atrium vault.</strong><br>
-  Lattice recalls. Markdown and HAL store. Tasks, Kanban, dailies, and a graph on top.
+  <strong>An agent-first notes and vault app, built for RAG, usable by humans.</strong>
 </p>
 
 <p align="center">
@@ -16,95 +15,73 @@
 
 <p align="center">
   <a href="#what-it-is">What it is</a> ·
-  <a href="#what-it-is-not">What it is not</a> ·
-  <a href="#intended-surface">Surface</a> ·
-  <a href="#lattice">Lattice</a> ·
-  <a href="#status">Status</a> ·
-  <a href="#credits">Credits</a>
+  <a href="#what-you-get">What you get</a> ·
+  <a href="#how-it-fits">How it fits</a> ·
+  <a href="#status">Status</a>
 </p>
 
 <p align="center">
-  Built by <a href="https://hedronite.com">Hedronite</a>’s <a href="https://github.com/VirtualMachinist">VirtualMachinist</a>.<br>
-  <em>Product mark lands in <code>assets/</code> — lapis blue <code>#1F2D68</code>, regent grey <code>#809DAF</code>.</em>
+  Built by <a href="https://hedronite.com">Hedronite</a>’s <a href="https://github.com/VirtualMachinist">VirtualMachinist</a>.
 </p>
 
 ---
 
-Lapis is notes and vault application that is optimized for RAG. : one Go binary that speaks `--json`, MCP stdio, and a Vim TUI, bound to **Lapis Lattice** (hybrid search, wikilink graph, YAML frontmatter)
+Lapis is a notes vault for people who work with agents. Notes stay ordinary Markdown files in a folder you own. **Lapis Lattice** indexes them for retrieval: lexical search, embeddings, and a wikilink graph. Agents talk to the vault through a JSON CLI and an MCP server. You talk to it through a terminal app — Vim editing, preview, tasks, a Kanban board, daily notes, and a graph view.
+
+The point is one vault both sides can use without a hosted notes service in the middle.
 
 ## What it is
 
-| | Lapis |
-|---|---|
-| Store | Plain Markdown + HAL YAML on disk (the same vault Obsidian opens) |
-| Recall | Atrium Lattice — BM25 + vectors + `edges`, via `127.0.0.1:8080` |
-| Agents | `lapis --json` and `lapis mcp` (trust the `path` other tools return) |
-| Operator | TUI: Vim, preview, tasks, Kanban, daily notes, templates, graph pane |
-| Tasks | Checkbox grammar with stable IDs (`path#n`) so agents toggle work without editing YAML |
+A local knowledge base with three faces on the same files:
 
-## What it is not
-## Intended surface
+| Face | For | Speaks |
+|---|---|---|
+| **TUI** | you | Vim, preview, tasks, Kanban, dailies, templates, graph |
+| **CLI** | scripts and agents | `lapis --json` |
+| **MCP** | coding agents | `lapis mcp` over stdio |
+
+Underneath, **Lapis Lattice** is the RAG engine: BM25, vector search, fused ranking, and graph neighbors from `[[wikilinks]]`. YAML frontmatter on each note is first-class (title, tags, status, domain) so retrieval can filter as well as search.
+
+## What you get
+
+- **A folder of Markdown** — the vault is files. No proprietary store. Frontmatter is optional on capture and structured when a template creates a note.
+- **Lapis Lattice** — hybrid search (lexical + vectors), document metadata, and a link graph. Search is retrieval, not a linear scan of the disk.
+- **Agent contract** — every command has `--json`. MCP tools take and return vault-relative `path` values. Tasks have stable IDs (`notes/plan.md#3`) so an agent can toggle a checkbox without rewriting the file by guesswork.
+- **Human contract** — a terminal app with splits, a command palette, task lists and boards, daily/weekly notes, and a graph pane of the note you have open.
+- **Writes that stay boring** — create, append, rename, trash. The index updates after the file does. Search never mutates the vault.
 
 ```text
-lapis tui                 # operator app
-lapis search --json Q     # hybrid lattice search
-lapis read --json PATH
+lapis tui
+lapis search --json "hybrid retrieval"
+lapis read --json notes/plan.md
 lapis task list --json
-lapis task toggle PATH#0
-lapis mcp                 # stdio MCP for Halo / Claude Code / Codex
+lapis task toggle notes/plan.md#3
+lapis mcp
 ```
 
 ```json
 { "mcpServers": { "lapis": { "command": "lapis", "args": ["mcp"] } } }
 ```
 
-Writes go to Markdown. HAL is stamped on create (templates), then agents prefer `toggle_task` / `append` over patching frontmatter. Lapis may rewrite only an allowlist of HAL keys (`status`, `priority`, `tags`, `updated`, `name`).
+## How it fits
 
-## Lattice
+```text
+you ─────────── TUI ──┐
+                      │
+agent ── CLI / MCP ───┤
+                      │
+                      ▼
+              Markdown on disk
+                      │
+                      ▼
+               Lapis Lattice
+          (search, graph, metadata)
+```
 
-Lapis is a **client** of Atrium Lattice:
-
-- Walk rule: `is_walked` (do not reimplement)
-- Search: `GET /search`
-- Graph: `edges` / neighbors (hop-2 is a lattice route, not a second wikilink parser)
-- Health: `GET /healthz`
-
-If lattice is down, search fails with a clear exit code. The TUI must still open files.
+Use it as a personal wiki, a project vault, or the memory layer next to an agent session. The TUI is for reading and editing. Lattice is for finding. MCP is for giving an agent the same verbs you have, with JSON instead of a screen.
 
 ## Status
 
-Spec-draft. No `lapis` binary in this tree yet. Law, schemas, and the milestone checklist live in the Atrium vault under `foundry/lapis/` (SPEC, CHECKLIST, STATUS).
+Spec-draft. The `lapis` binary is not in this tree yet. License is MIT.
 
-Milestones, short:
-
-| | Gate |
-|---|---|
-| M1 | Read CLI against live lattice (`search`, `read`, `vault info`, `neighbors`) |
-| M2 | MCP + HAL create/append + index kick |
-| M3 | TUI shell (sidebar, Vim/preview, search palette, HAL inspector) |
-| M4 | Tasks, Kanban, dailies, templates, graph pane |
-| M5 | Tree retrieve + health in the palette |
-
-## Repository map
-
-```
-README.md          # this file
-LICENSE            # MIT
-CREDITS.md         # ZenNotes and other notices
-assets/            # product mark (forthcoming)
-cmd/lapis/         # entrypoint (forthcoming)
-```
-
-## Contributing
-
-Issues and pull requests are welcome once M1 exists. Until then, the contract is the vault spec.
-
-```bash
-go test ./...
-```
-
-## Credits
-
-Lapis is built and maintained by [Hedronite](https://hedronite.com).
-
-TUI/Vim/task-grammar chrome is adapted from [ZenNotes/tui](https://github.com/ZenNotes/tui) (MIT, Copyright 2026 Adib Hanna and ZenNotes contributors). Full notice: [CREDITS.md](CREDITS.md).
+Inspired by [ZenNotes](https://github.com/ZenNotes/tui) and Obsidian. Notices: [CREDITS.md](CREDITS.md).
