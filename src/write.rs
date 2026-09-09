@@ -1,0 +1,416 @@
+//! The write path: create, append, capture.
+//!
+//! Files are the write source of truth. Every function here writes exactly
+//! one file under the vault root and returns its vault-relative path; the
+//! caller kicks `POST /reindex`. Nothing here touches `lattice.db`.
+//!
+//! HAL rules (SPEC.md § HAL): create stamps the create-set; later edits only
+//! touch allowlisted keys, line-wise, so unknown keys and comments survive.
+
+use std::path::Path;
+
+use serde_json::{Map, Value};
+
+use crate::error::{LapisError, Result};
+use crate::hal;
+use crate::notes;
+use crate::taxonomy;
+
+pub const HAL_VERSION: &str = "1.0";
+pub const AUTHORITATIVE_MARKER: &str = "<!--hal:authoritative:yaml-->";
+/// Types that get the authoritative marker after the closing `---`.
+const CANON_TYPES: &[&str] =
+    &["foundry-doc", "foundry-product", "status", "cross-reference", "maintenance-canon"];
+
+#[derive(Debug, Clone, Default)]
+pub struct CreateOpts {
+    pub title: String,
+    /// Vault-relative file or directory. Directory when it ends with `/` or exists as one.
+    pub path: Option<String>,
+    /// Name of `.lapis/templates/<name>.md`.
+    pub template: Option<String>,
+    pub doc_type: Option<String>,
+    pub domain: Option<String>,
+    pub tags: Vec<String>,
+    pub body: Option<String>,
+    pub operator: Option<String>,
+    /// Default bucket when `path` is absent (overlay `buckets.inbox`).
+    pub inbox: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Written {
+    pub path: String,
+    pub title: String,
+    pub hal: Map<String, Value>,
+    pub bytes: u64,
+    pub taxonomy: &'static str,
+}
+
+pub fn today() -> String {
+    jiff::Zoned::now().strftime("%Y-%m-%d").to_string()
+}
+
+pub fn slug(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut dash = false;
+    for ch in s.chars() {
+        if ch.is_alphanumeric() {
+            out.extend(ch.to_lowercase());
+            dash = false;
+        } else if !dash && !out.is_empty() {
+            out.push('-');
+            dash = true;
+        }
+    }
+    let out = out.trim_end_matches('-').to_string();
+    if out.is_empty() { "note".to_string() } else { out }
+}
+
+/// Decide the vault-relative file path for a new note. Never overwrites.
+fn target_path(root: &Path, opts: &CreateOpts) -> Result<String> {
+    let file = format!("{}.md", slug(&opts.title));
+    let rel = match opts.path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        None => format!("{}/{}", opts.inbox.trim_matches('/'), file),
+        Some(p) => {
+            let is_dir = p.ends_with('/') || root.join(notes::clean_rel(p)?).is_dir();
+            let clean = notes::clean_rel(p)?;
+            if is_dir {
+                format!("{clean}/{file}")
+            } else if clean.ends_with(".md") {
+                clean
+            } else {
+                format!("{clean}.md")
+            }
+        }
+    };
+    if !rel.contains('/') {
+        // No Welcome.md-style root drops: a note needs a folder (SPEC D-BUCKETS).
+        return Err(LapisError::Usage(format!(
+            "refusing to create at the vault root: {rel} (use --path <folder>/)"
+        )));
+    }
+    if root.join(&rel).exists() {
+        return Err(LapisError::Usage(format!("already exists: {rel}")));
+    }
+    Ok(rel)
+}
+
+/// Build the create-set mapping in canonical key order.
+fn create_set(rel: &str, opts: &CreateOpts, root: &Path) -> (Map<String, Value>, &'static str) {
+    let class = taxonomy::classify(root, rel, opts.doc_type.as_deref());
+    let doc_type = opts.doc_type.clone().or(class.doc_type.clone()).unwrap_or_else(|| "note".to_string());
+    let domain = opts.domain.clone().or(class.domain.clone());
+    let today = today();
+    let mut m = Map::new();
+    m.insert("name".into(), Value::String(opts.title.clone()));
+    m.insert("type".into(), Value::String(doc_type.clone()));
+    m.insert("doc_type".into(), Value::String(doc_type));
+    if let Some(d) = domain {
+        m.insert("domain".into(), Value::String(d));
+    }
+    m.insert("status".into(), Value::String("draft".into()));
+    m.insert("created".into(), Value::String(today.clone()));
+    m.insert("updated".into(), Value::String(today));
+    m.insert("hal_version".into(), Value::String(HAL_VERSION.into()));
+    if let Some(op) = opts.operator.as_deref().filter(|s| !s.trim().is_empty()) {
+        m.insert("operator".into(), Value::String(op.to_string()));
+    }
+    m.insert("tags".into(), Value::Array(opts.tags.iter().map(|t| Value::String(t.clone())).collect()));
+    (m, class.source)
+}
+
+/// Serialize a mapping as YAML frontmatter text (no delimiters).
+pub fn to_yaml(m: &Map<String, Value>) -> Result<String> {
+    let v = serde_json::Value::Object(m.clone());
+    let y: yaml_serde::Value =
+        yaml_serde::to_value(&v).map_err(|e| LapisError::Internal(format!("yaml: {e}")))?;
+    let s = yaml_serde::to_string(&y).map_err(|e| LapisError::Internal(format!("yaml: {e}")))?;
+    Ok(s.strip_prefix("---\n").unwrap_or(&s).trim_end().to_string())
+}
+
+/// Load `.lapis/templates/<name>.md`, substitute placeholders, split HAL.
+fn load_template(root: &Path, name: &str, title: &str) -> Result<hal::Parsed> {
+    let clean = notes::clean_rel(name)?;
+    let file = root.join(".lapis/templates").join(format!("{clean}.md"));
+    let text = std::fs::read_to_string(&file)
+        .map_err(|_| LapisError::Usage(format!("template not found: .lapis/templates/{clean}.md")))?;
+    Ok(hal::parse(&substitute(&text, title)))
+}
+
+pub fn substitute(text: &str, title: &str) -> String {
+    let today = today();
+    text.replace("{{title}}", title)
+        .replace("{{date:YYYY-MM-DD}}", &today)
+        .replace("{{date}}", &today)
+        .replace("{{cursor}}", "")
+}
+
+fn is_canon(doc_type: &str) -> bool {
+    CANON_TYPES.contains(&doc_type)
+}
+
+fn write_atomic(abs: &Path, text: &str) -> Result<u64> {
+    if let Some(parent) = abs.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = abs.with_extension("md.lapis-tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, abs)?;
+    Ok(text.len() as u64)
+}
+
+pub fn create(root: &Path, opts: &CreateOpts) -> Result<Written> {
+    if opts.title.trim().is_empty() {
+        return Err(LapisError::Usage("--title is required".into()));
+    }
+    let rel = target_path(root, opts)?;
+    let (mut hal, tax_source) = create_set(&rel, opts, root);
+
+    let mut body = opts.body.clone().unwrap_or_default();
+    if let Some(name) = &opts.template {
+        let t = load_template(root, name, &opts.title)?;
+        if !t.hal_valid {
+            return Err(LapisError::Usage(format!("template {name}: invalid YAML frontmatter")));
+        }
+        // Template keys lay over the create-set; unknown keys are kept.
+        // `type` and `doc_type` are one fact: a template setting either sets both.
+        let has_type = t.hal.contains_key("type");
+        let has_doc_type = t.hal.contains_key("doc_type");
+        for (k, v) in t.hal {
+            hal.insert(k, v);
+        }
+        match (has_type, has_doc_type) {
+            (true, false) => {
+                let v = hal["type"].clone();
+                hal.insert("doc_type".into(), v);
+            }
+            (false, true) => {
+                let v = hal["doc_type"].clone();
+                hal.insert("type".into(), v);
+            }
+            _ => {}
+        }
+        if body.is_empty() {
+            body = t.body;
+        } else {
+            body = format!("{}\n\n{}", t.body.trim_end(), body);
+        }
+    }
+    if body.trim().is_empty() {
+        body = format!("# {}\n", opts.title);
+    }
+    let doc_type = hal.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let marker = if is_canon(&doc_type) { format!("{AUTHORITATIVE_MARKER}\n\n") } else { String::new() };
+    let text = format!("---\n{}\n---\n{marker}{}\n", to_yaml(&hal)?, body.trim_end());
+    let bytes = write_atomic(&root.join(&rel), &text)?;
+    Ok(Written { path: rel, title: opts.title.clone(), hal, bytes, taxonomy: tax_source })
+}
+
+/// Append `text` to an existing note and bump `updated:` (allowlisted).
+pub fn append(root: &Path, rel: &str, text: &str) -> Result<Written> {
+    let (rel, abs) = notes::resolve(root, rel)?;
+    if notes::kind_of(&rel) != notes::Kind::Markdown {
+        return Err(LapisError::Usage(format!("{rel}: append only supports markdown notes")));
+    }
+    let mut current = std::fs::read_to_string(&abs)?;
+    current = set_frontmatter_key(&current, "updated", &today());
+    if !current.is_empty() && !current.ends_with('\n') {
+        current.push('\n');
+    }
+    if !current.trim_end().ends_with("\n---") && !current.ends_with("\n\n") {
+        current.push('\n');
+    }
+    current.push_str(text.trim_end());
+    current.push('\n');
+    let bytes = write_atomic(&abs, &current)?;
+    let p = hal::parse(&current);
+    let title = hal::title_from_hal(&p.hal).unwrap_or_else(|| notes::stem_of(&rel));
+    Ok(Written { path: rel, title, hal: p.hal, bytes, taxonomy: "unchanged" })
+}
+
+/// Line-wise edit of one top-level scalar key inside the frontmatter block.
+/// Preserves every other line byte-for-byte (unknown keys, comments).
+/// No frontmatter → unchanged. Key absent → inserted before the closing `---`.
+pub fn set_frontmatter_key(text: &str, key: &str, value: &str) -> String {
+    let Some(rest) = text.strip_prefix("---\n").or_else(|| text.strip_prefix("---\r\n")) else {
+        return text.to_string();
+    };
+    let Some(end) = rest.find("\n---").map(|i| i + 1) else {
+        return text.to_string();
+    };
+    let (matter, tail) = rest.split_at(end);
+    let prefix = format!("{key}:");
+    let mut lines: Vec<String> = matter.lines().map(str::to_string).collect();
+    if let Some(l) = lines.iter_mut().find(|l| l.starts_with(&prefix)) {
+        *l = format!("{key}: {value}");
+    } else {
+        lines.push(format!("{key}: {value}"));
+    }
+    format!("---\n{}\n{}", lines.join("\n"), tail)
+}
+
+pub fn capture(root: &Path, text: &str, inbox: &str, operator: Option<String>) -> Result<Written> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(LapisError::Usage("capture needs some text".into()));
+    }
+    let first = text.lines().next().unwrap_or(text).trim_start_matches('#').trim();
+    let title: String = first.chars().take(80).collect();
+    let stamp = jiff::Zoned::now().strftime("%Y-%m-%d-%H%M").to_string();
+    let file = format!("{}/{stamp}-{}.md", inbox.trim_matches('/'), slug(&title));
+    let opts = CreateOpts {
+        title,
+        path: Some(file),
+        template: None,
+        doc_type: Some("capture".into()),
+        domain: None,
+        tags: vec![],
+        body: Some(text.to_string()),
+        operator,
+        inbox: inbox.to_string(),
+    };
+    create(root, &opts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn vault() -> PathBuf {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let d = std::env::temp_dir().join(format!("lapis-write-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(d.join("foundry/lapis")).unwrap();
+        d
+    }
+    fn opts(title: &str) -> CreateOpts {
+        CreateOpts { title: title.into(), inbox: "inbox".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn slugs() {
+        assert_eq!(slug("Ship Smoke!  Test"), "ship-smoke-test");
+        assert_eq!(slug("  ---  "), "note");
+        assert_eq!(slug("Lapis · SPEC"), "lapis-spec");
+    }
+
+    #[test]
+    fn create_defaults_to_inbox_with_create_set() {
+        let v = vault();
+        let w = create(&v, &opts("ship-smoke")).unwrap();
+        assert_eq!(w.path, "inbox/ship-smoke.md");
+        assert_eq!(w.taxonomy, "fallback");
+        let n = notes::read(&v, &w.path).unwrap();
+        assert!(n.hal_valid);
+        assert_eq!(n.hal["name"], "ship-smoke");
+        assert_eq!(n.hal["status"], "draft");
+        assert_eq!(n.hal["hal_version"], "1.0");
+        assert_eq!(n.hal["domain"], "inbox");
+        assert_eq!(n.hal["created"], today());
+        assert_eq!(n.hal["tags"], serde_json::json!([]));
+        assert!(n.hal.get("operator").is_none());
+        assert_eq!(n.body.trim(), "# ship-smoke");
+        assert!(!std::fs::read_to_string(v.join(&w.path)).unwrap().contains(AUTHORITATIVE_MARKER));
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn create_canon_type_gets_marker_and_refuses_overwrite() {
+        let v = vault();
+        let mut o = opts("Lapis status");
+        o.path = Some("foundry/lapis/".into());
+        o.doc_type = Some("status".into());
+        o.operator = Some("Halo".into());
+        o.tags = vec!["lapis".into()];
+        let w = create(&v, &o).unwrap();
+        assert_eq!(w.path, "foundry/lapis/lapis-status.md");
+        let raw = std::fs::read_to_string(v.join(&w.path)).unwrap();
+        assert!(
+            raw.starts_with("---\nname: Lapis status\ntype: status\ndoc_type: status\ndomain: foundry\n"),
+            "{raw}"
+        );
+        assert!(raw.contains("hal_version: '1.0'") || raw.contains("hal_version: \"1.0\""), "{raw}");
+        assert!(raw.contains("\n---\n<!--hal:authoritative:yaml-->\n\n# Lapis status\n"), "{raw}");
+        assert!(raw.contains("operator: Halo"));
+        assert!(matches!(create(&v, &o), Err(LapisError::Usage(_))));
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn create_rejects_root_and_escape() {
+        let v = vault();
+        let mut o = opts("Welcome");
+        o.path = Some("Welcome.md".into());
+        assert!(matches!(create(&v, &o), Err(LapisError::Usage(_))));
+        o.path = Some("../x/".into());
+        assert_eq!(create(&v, &o).unwrap_err().exit_code(), 3);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn create_with_template_overlays_hal_and_substitutes() {
+        let v = vault();
+        std::fs::create_dir_all(v.join(".lapis/templates")).unwrap();
+        std::fs::write(
+            v.join(".lapis/templates/adr.md"),
+            "---\ntype: adr\nstatus: proposed\nborn_from: template\n---\n# ADR: {{title}}\n\nDate: {{date}}\n{{cursor}}\n",
+        )
+        .unwrap();
+        let mut o = opts("Use Rust");
+        o.path = Some("foundry/lapis/".into());
+        o.template = Some("adr".into());
+        let w = create(&v, &o).unwrap();
+        let n = notes::read(&v, &w.path).unwrap();
+        assert_eq!(n.hal["type"], "adr");
+        assert_eq!(n.hal["doc_type"], "adr", "template `type` must also set doc_type");
+        assert_eq!(n.hal["status"], "proposed");
+        assert_eq!(n.hal["born_from"], "template");
+        assert_eq!(n.hal["name"], "Use Rust");
+        assert!(n.body.contains("# ADR: Use Rust"));
+        assert!(n.body.contains(&format!("Date: {}", today())));
+        assert!(!n.body.contains("{{"));
+        assert!(matches!(load_template(&v, "nope", "t"), Err(LapisError::Usage(_))));
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn append_bumps_updated_and_preserves_unknown_keys() {
+        let v = vault();
+        let raw = "---\nname: X\n# a comment\nweird-key: [1, 2]\nupdated: 2020-01-01\n---\n<!--hal:authoritative:yaml-->\n\nbody\n";
+        std::fs::write(v.join("foundry/lapis/x.md"), raw).unwrap();
+        let w = append(&v, "foundry/lapis/x", "more text").unwrap();
+        assert_eq!(w.path, "foundry/lapis/x.md");
+        let out = std::fs::read_to_string(v.join("foundry/lapis/x.md")).unwrap();
+        assert!(out.contains("# a comment\nweird-key: [1, 2]\n"));
+        assert!(out.contains(&format!("updated: {}\n---\n<!--hal:authoritative:yaml-->", today())), "{out}");
+        assert!(out.ends_with("body\n\nmore text\n"), "{out}");
+        assert_eq!(w.hal["weird-key"], serde_json::json!([1, 2]));
+        assert_eq!(append(&v, "foundry/lapis/missing.md", "x").unwrap_err().exit_code(), 3);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn set_key_inserts_when_absent_and_ignores_no_frontmatter() {
+        let s = set_frontmatter_key("---\nname: X\n---\nbody\n", "updated", "2026-09-09");
+        assert_eq!(s, "---\nname: X\nupdated: 2026-09-09\n---\nbody\n");
+        assert_eq!(set_frontmatter_key("plain\n", "updated", "x"), "plain\n");
+        // a `---` rule in the body is not the closing delimiter of a missing block
+        assert_eq!(set_frontmatter_key("text\n---\nmore\n", "updated", "x"), "text\n---\nmore\n");
+    }
+
+    #[test]
+    fn capture_writes_timestamped_inbox_note() {
+        let v = vault();
+        let w = capture(&v, "  Chinese quant trader built a bot\nsecond line", "inbox", None).unwrap();
+        assert!(w.path.starts_with("inbox/"), "{}", w.path);
+        assert!(w.path.ends_with("-chinese-quant-trader-built-a-bot.md"), "{}", w.path);
+        let n = notes::read(&v, &w.path).unwrap();
+        assert_eq!(n.hal["doc_type"], "capture");
+        assert_eq!(n.title, "Chinese quant trader built a bot");
+        assert!(n.body.contains("second line"));
+        assert!(matches!(capture(&v, "  ", "inbox", None), Err(LapisError::Usage(_))));
+        let _ = std::fs::remove_dir_all(&v);
+    }
+}

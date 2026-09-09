@@ -68,6 +68,84 @@ pub enum Command {
 
     /// Ask the lattice to re-index one note (runs its own indexer; Lapis never writes lattice.db).
     Reindex(ReindexArgs),
+
+    /// Create a note with a HAL create-set (name, type, domain, status=draft, dates, hal_version).
+    Create(CreateArgs),
+
+    /// Append text to a note; bumps `updated:` and keeps every other frontmatter line.
+    Append(AppendArgs),
+
+    /// Quick capture: timestamped note under the inbox bucket with doc_type=capture.
+    Capture(CaptureArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CreateArgs {
+    /// Note title; becomes HAL `name` and the slugged filename.
+    #[arg(long, value_name = "TITLE")]
+    pub title: String,
+
+    /// Vault-relative target: a folder (`foundry/lapis/`) or a file (`foundry/lapis/x.md`). Default: inbox bucket.
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<String>,
+
+    /// Template name from `.lapis/templates/<name>.md` ({{title}}, {{date}}, {{cursor}}).
+    #[arg(long, value_name = "NAME")]
+    pub template: Option<String>,
+
+    /// HAL `type`/`doc_type` (default: taxonomy for the path, else `note`).
+    #[arg(long = "type", value_name = "TYPE")]
+    pub doc_type: Option<String>,
+
+    /// HAL `domain` (default: taxonomy for the path, else first folder).
+    #[arg(long, value_name = "DOMAIN")]
+    pub domain: Option<String>,
+
+    /// Tag (repeatable).
+    #[arg(long = "tag", value_name = "TAG")]
+    pub tags: Vec<String>,
+
+    /// Body text (default: `# <title>`). Use `--stdin` to read it from stdin.
+    #[arg(long, value_name = "TEXT", conflicts_with = "stdin")]
+    pub body: Option<String>,
+
+    /// Read the body from stdin.
+    #[arg(long)]
+    pub stdin: bool,
+
+    /// Skip the lattice reindex kick after writing.
+    #[arg(long)]
+    pub no_reindex: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct AppendArgs {
+    /// Vault-relative note path.
+    #[arg(value_name = "PATH")]
+    pub path: String,
+
+    /// Text to append. Omit (or pass `--stdin`) to read from stdin.
+    #[arg(value_name = "TEXT", conflicts_with = "stdin")]
+    pub text: Option<String>,
+
+    /// Read the text from stdin.
+    #[arg(long)]
+    pub stdin: bool,
+
+    /// Skip the lattice reindex kick after writing.
+    #[arg(long)]
+    pub no_reindex: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct CaptureArgs {
+    /// Captured text. Multiple words are joined; omit to read from stdin.
+    #[arg(value_name = "TEXT", num_args = 0..)]
+    pub text: Vec<String>,
+
+    /// Skip the lattice reindex kick after writing.
+    #[arg(long)]
+    pub no_reindex: bool,
 }
 
 #[derive(Debug, Args)]
@@ -241,6 +319,37 @@ mod tests {
             }
             _ => panic!("expected list"),
         }
+    }
+
+    #[test]
+    fn parses_write_verbs() {
+        let c = Cli::try_parse_from([
+            "lapis",
+            "create",
+            "--title",
+            "ship-smoke",
+            "--json",
+            "--path",
+            "inbox/x/",
+            "--tag",
+            "a",
+            "--tag",
+            "b",
+        ])
+        .unwrap();
+        match c.command {
+            Command::Create(a) => {
+                assert_eq!(a.title, "ship-smoke");
+                assert_eq!(a.tags, ["a", "b"]);
+                assert!(!a.no_reindex);
+            }
+            _ => panic!("expected create"),
+        }
+        assert!(Cli::try_parse_from(["lapis", "create"]).is_err());
+        let c = Cli::try_parse_from(["lapis", "append", "a.md", "hello"]).unwrap();
+        assert!(matches!(c.command, Command::Append(a) if a.text.as_deref() == Some("hello")));
+        let c = Cli::try_parse_from(["lapis", "capture", "two", "words"]).unwrap();
+        assert!(matches!(c.command, Command::Capture(a) if a.text == ["two", "words"]));
     }
 
     #[test]

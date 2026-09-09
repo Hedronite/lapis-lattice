@@ -11,7 +11,9 @@ mod hal;
 mod lattice;
 mod notes;
 mod overlay;
+mod taxonomy;
 mod vault;
+mod write;
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -20,7 +22,10 @@ use clap::Parser;
 use serde::Serialize;
 use serde_json::json;
 
-use cli::{Cli, Command, ListArgs, NeighborsArgs, ReadArgs, ReindexArgs, SearchArgs, VaultCommand};
+use cli::{
+    AppendArgs, CaptureArgs, Cli, Command, CreateArgs, ListArgs, NeighborsArgs, ReadArgs, ReindexArgs,
+    SearchArgs, VaultCommand,
+};
 use error::{LapisError, Result};
 use lattice::{Client, ListParams, SearchParams};
 
@@ -88,6 +93,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Neighbors(args) => neighbors(&ctx, args).await,
         Command::List(args) => list(&ctx, args).await,
         Command::Reindex(args) => reindex(&ctx, args).await,
+        Command::Create(args) => create(&ctx, args).await,
+        Command::Append(args) => append(&ctx, args).await,
+        Command::Capture(args) => capture(&ctx, args).await,
     }
 }
 
@@ -376,6 +384,97 @@ async fn reindex(ctx: &Ctx, args: ReindexArgs) -> Result<()> {
         return Err(LapisError::LatticeDown(format!("indexer exit {}", r.indexer_exit.unwrap_or(-1))));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------- write
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WriteReport {
+    #[serde(flatten)]
+    written: write::Written,
+    /// `null` when `--no-reindex`; otherwise the lattice's answer or its error.
+    reindex: Option<lattice::Reindex>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reindex_error: Option<String>,
+}
+
+fn read_stdin() -> Result<String> {
+    let mut s = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+    Ok(s)
+}
+
+/// Kick the index after a successful write. The file is the source of truth
+/// and is already on disk, so a failed kick is reported, not fatal: nightly
+/// reconcile catches it, and the agent sees `reindex: null` + `reindexError`.
+async fn kick(ctx: &Ctx, written: write::Written, no_reindex: bool) -> Result<()> {
+    let (reindex, reindex_error) = if no_reindex {
+        (None, None)
+    } else {
+        match ctx.client()?.reindex(&written.path).await {
+            Ok(r) => (Some(r), None),
+            Err(e) => (None, Some(e.to_string())),
+        }
+    };
+    let report = WriteReport { written, reindex, reindex_error };
+    if ctx.json {
+        emit_json(&report)?;
+    } else {
+        let idx = match (&report.reindex, &report.reindex_error) {
+            (Some(r), _) if r.changed == Some(true) => {
+                format!("  indexed ({} chunks)", r.chunks.unwrap_or(0))
+            }
+            (Some(_), _) => "  index unchanged".into(),
+            (None, Some(_)) => "  (index kick failed)".into(),
+            (None, None) => String::new(),
+        };
+        println!("{}{idx}", report.written.path);
+    }
+    if let Some(e) = &report.reindex_error {
+        eprintln!("lapis: written, but reindex failed: {e}");
+    }
+    Ok(())
+}
+
+fn inbox_bucket(ctx: &Ctx) -> Result<String> {
+    Ok(overlay::load(&ctx.vault.root)?.0.buckets.inbox)
+}
+
+async fn create(ctx: &Ctx, args: CreateArgs) -> Result<()> {
+    let body = if args.stdin { Some(read_stdin()?) } else { args.body.clone() };
+    let opts = write::CreateOpts {
+        title: args.title.clone(),
+        path: args.path.clone(),
+        template: args.template.clone(),
+        doc_type: args.doc_type.clone(),
+        domain: args.domain.clone(),
+        tags: args.tags.clone(),
+        body,
+        operator: ctx.cfg.operator.name.clone(),
+        inbox: inbox_bucket(ctx)?,
+    };
+    let w = write::create(&ctx.vault.root, &opts)?;
+    kick(ctx, w, args.no_reindex).await
+}
+
+async fn append(ctx: &Ctx, args: AppendArgs) -> Result<()> {
+    let text = match (&args.text, args.stdin) {
+        (Some(t), _) => t.clone(),
+        (None, _) => read_stdin()?,
+    };
+    if text.trim().is_empty() {
+        return Err(LapisError::Usage("nothing to append".into()));
+    }
+    let w = write::append(&ctx.vault.root, &args.path, &text)?;
+    kick(ctx, w, args.no_reindex).await
+}
+
+async fn capture(ctx: &Ctx, args: CaptureArgs) -> Result<()> {
+    let text = if args.text.is_empty() { read_stdin()? } else { args.text.join(" ") };
+    let inbox = inbox_bucket(ctx)?;
+    let w = write::capture(&ctx.vault.root, &text, &inbox, ctx.cfg.operator.name.clone())?;
+    kick(ctx, w, args.no_reindex).await
 }
 
 // ------------------------------------------------------------------ neighbors
