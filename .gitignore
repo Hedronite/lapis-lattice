@@ -1,0 +1,13 @@
+/lapis
+/bin/
+*.exe
+*.test
+*.out
+.DS_Store
+.idea/
+.vscode/
+*.swp
+vendor/
+/tmp/
+.env
+.lapis-local/
