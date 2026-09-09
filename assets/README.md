@@ -2,8 +2,8 @@
 
 | File | Role |
 |---|---|
-| `lapis-wordmark.jpg` | Wordmark (README hero) |
-| `lapis-mark.jpg` | Mark: stylus + hex graph |
+| `lapis-wordmark.jpg` | Wordmark |
+| `lapis-mark.jpg` | Mark: cream stylus + hex graph (README hero) |
 | `lapis-icon.jpg` | App icon: faceted pencil |
 
 Vault SoT: Atrium `foundry/lapis/brand/`.
