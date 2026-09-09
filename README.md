@@ -9,7 +9,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-809DAF?style=flat&colorA=1F2D68" alt="MIT"></a>
   <a href="#status"><img src="https://img.shields.io/badge/Status-spec--draft-809DAF?style=flat&colorA=1F2D68" alt="spec-draft"></a>
-  <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.24-809DAF?style=flat&colorA=1F2D68&logo=go&logoColor=809DAF" alt="Go 1.24"></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-stable-809DAF?style=flat&colorA=1F2D68&logo=rust&logoColor=809DAF" alt="Rust"></a>
   <a href="https://hedronite.com"><img src="https://img.shields.io/badge/Hedronite-hedronite.com-809DAF?style=flat&colorA=1F2D68" alt="Hedronite"></a>
 </p>
 
