@@ -22,7 +22,9 @@ Lapis: an Atrium notes vault with Lapis Lattice retrieval.
 4. Prefer toggle_task / append_to_note over rewriting HAL frontmatter by hand.
 5. On create_note, pass a template or accept the taxonomy defaults; never emit empty frontmatter.
 6. Present notes as [title](path). There is no zennotes:// scheme.
-7. If the lattice is down (vault_info.lattice.reachable=false), say so; do not walk the filesystem for search.";
+7. If the lattice is down (vault_info.lattice.reachable=false), say so; do not walk the filesystem for search.
+8. `search` collapses to one hit per document unless per_doc=false. `neighbors` returns both directions; dangling rows have path=null and dst_raw.
+9. `list_tasks` without `path` returns counts (n, byStatus, byFolder); pass `path` (or full=true) for rows.";
 
 /// `#[tool_handler]` in rmcp 3.x routes through `Self::tool_router()`, so the
 /// server holds only its context.
@@ -61,7 +63,7 @@ pub struct SearchArg {
     pub domain: Option<String>,
     /// `hybrid` (default), `bm25`, or `vector`.
     pub mode: Option<String>,
-    /// Collapse to the best chunk per document.
+    /// Collapse to the best chunk per document. Default true.
     pub per_doc: Option<bool>,
 }
 
@@ -81,9 +83,9 @@ pub struct ListArg {
 #[derive(Deserialize, JsonSchema)]
 pub struct NeighborsArg {
     pub path: String,
-    /// `out` (default), `in`, or `both`.
+    /// `both` (default), `out`, or `in`.
     pub direction: Option<String>,
-    /// Include dangling links too.
+    /// Include dangling links too (rows with `path: null` and `dst_raw`).
     pub dangling: Option<bool>,
 }
 
@@ -117,8 +119,10 @@ pub struct ListTasksArg {
     /// `today`, `overdue`, or `YYYY-MM-DD`.
     pub due: Option<String>,
     pub tag: Option<String>,
-    /// Restrict the scan to this folder or file.
+    /// Restrict the scan to this folder or file. Without it the result is a summary.
     pub path: Option<String>,
+    /// Return every row even when unscoped (default false: counts only).
+    pub full: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -159,26 +163,7 @@ impl LapisServer {
         &self,
         Parameters(a): Parameters<SearchArg>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
-        let mode = match a.mode.as_deref() {
-            None | Some("hybrid") => Mode::Hybrid,
-            Some("bm25") => Mode::Bm25,
-            Some("vector") => Mode::Vector,
-            Some(other) => {
-                return Err(ErrorData::invalid_params(
-                    format!("mode must be hybrid|bm25|vector, got {other}"),
-                    None,
-                ));
-            }
-        };
-        let p = SearchParams {
-            query: a.query,
-            top_k: a.limit.unwrap_or(10),
-            domain: a.domain,
-            mode,
-            per_doc: a.per_doc.unwrap_or(false),
-            mmr: false,
-            include_archives: false,
-        };
+        let p = search_params(a)?;
         ok(&self.ctx.client().map_err(fail)?.search(&p).await.map_err(fail)?)
     }
 
@@ -209,7 +194,7 @@ impl LapisServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let rel = notes::clean_rel(&a.path).map_err(fail)?;
         let rel = if std::path::Path::new(&rel).extension().is_none() { format!("{rel}.md") } else { rel };
-        let dir = a.direction.unwrap_or_else(|| "out".into());
+        let dir = a.direction.unwrap_or_else(|| "both".into());
         ok(&self
             .ctx
             .client()
@@ -261,8 +246,10 @@ impl LapisServer {
         &self,
         Parameters(a): Parameters<ListTasksArg>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
+        let summary = tasks::wants_summary(a.path.as_deref(), a.full.unwrap_or(false));
         let f = tasks::Filter { status: a.status, due: a.due, tag: a.tag, prefix: a.path };
-        ok(&tasks::list(&self.ctx.vault.root, &f).map_err(fail)?)
+        let list = tasks::list(&self.ctx.vault.root, &f).map_err(fail)?;
+        if summary { ok(&tasks::summarize(&list)) } else { ok(&list) }
     }
 
     #[tool(
@@ -274,6 +261,30 @@ impl LapisServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         ok(&ops::toggle_task(&self.ctx, &a.id, false).await.map_err(fail)?)
     }
+}
+
+/// MCP `search` args → lattice params. Agent defaults: `per_doc` on.
+fn search_params(a: SearchArg) -> std::result::Result<SearchParams, ErrorData> {
+    let mode = match a.mode.as_deref() {
+        None | Some("hybrid") => Mode::Hybrid,
+        Some("bm25") => Mode::Bm25,
+        Some("vector") => Mode::Vector,
+        Some(other) => {
+            return Err(ErrorData::invalid_params(
+                format!("mode must be hybrid|bm25|vector, got {other}"),
+                None,
+            ));
+        }
+    };
+    Ok(SearchParams {
+        query: a.query,
+        top_k: a.limit.unwrap_or(10),
+        domain: a.domain,
+        mode,
+        per_doc: a.per_doc.unwrap_or(true),
+        mmr: false,
+        include_archives: false,
+    })
 }
 
 #[tool_handler]
@@ -293,4 +304,38 @@ pub async fn serve(ctx: Ctx) -> crate::error::Result<()> {
         .map_err(|e| LapisError::Internal(format!("mcp: {e}")))?;
     running.waiting().await.map_err(|e| LapisError::Internal(format!("mcp: {e}")))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn arg(json: &str) -> SearchArg {
+        serde_json::from_str(json).unwrap()
+    }
+
+    /// N3: MCP search defaults to per_doc=true; explicit false still wins.
+    #[test]
+    fn mcp_search_defaults_to_per_doc() {
+        let p = search_params(arg(r#"{"query":"lattice"}"#)).unwrap();
+        assert!(p.per_doc);
+        assert_eq!((p.top_k, p.mode), (10, Mode::Hybrid));
+        let p = search_params(arg(r#"{"query":"lattice","per_doc":false,"mode":"bm25","limit":3}"#)).unwrap();
+        assert!(!p.per_doc);
+        assert_eq!((p.top_k, p.mode), (3, Mode::Bm25));
+        assert!(search_params(arg(r#"{"query":"x","mode":"sideways"}"#)).is_err());
+    }
+
+    /// N2 / N4: arg defaults documented in the schema match the handlers.
+    #[test]
+    fn neighbors_and_tasks_arg_defaults() {
+        let n: NeighborsArg = serde_json::from_str(r#"{"path":"a.md"}"#).unwrap();
+        assert_eq!(n.direction.unwrap_or_else(|| "both".into()), "both");
+        let t: ListTasksArg = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(tasks::wants_summary(t.path.as_deref(), t.full.unwrap_or(false)));
+        let t: ListTasksArg = serde_json::from_str(r#"{"path":"foundry/lapis"}"#).unwrap();
+        assert!(!tasks::wants_summary(t.path.as_deref(), t.full.unwrap_or(false)));
+        let t: ListTasksArg = serde_json::from_str(r#"{"full":true}"#).unwrap();
+        assert!(!tasks::wants_summary(t.path.as_deref(), t.full.unwrap_or(false)));
+    }
 }

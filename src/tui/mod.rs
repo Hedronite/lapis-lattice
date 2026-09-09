@@ -1478,9 +1478,8 @@ impl App {
                     Target::Preview => self.focus = Focus::Preview,
                     Target::Bottom { row } => {
                         if self.show_neighbors
-                            && let Some(n) = self.neighbors.get(row)
+                            && let Some(p) = self.neighbors.get(row).and_then(|n| n.path.clone())
                         {
-                            let p = n.path.clone();
                             self.open_note(&p);
                         }
                     }

@@ -159,7 +159,7 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
         top_k: args.limit,
         domain: args.domain.clone(),
         mode: args.mode,
-        per_doc: args.per_doc,
+        per_doc: args.effective_per_doc(),
         mmr: args.mmr,
         include_archives: args.include_archives,
     };
@@ -423,8 +423,27 @@ fn task_mark(t: &tasks::Task) -> &'static str {
 }
 
 fn task_list(ctx: &Ctx, args: TaskListArgs) -> Result<()> {
-    let f = tasks::Filter { status: args.status, due: args.due, tag: args.tag, prefix: args.path };
+    let scope = args.scope();
+    let summary = tasks::wants_summary(scope.as_deref(), args.full);
+    let f = tasks::Filter { status: args.status, due: args.due, tag: args.tag, prefix: scope };
     let list = tasks::list(&ctx.vault.root, &f)?;
+    if summary {
+        // Unscoped: the whole vault is hundreds of rows. Counts first; a PATH
+        // (or --full) gets the rows.
+        let s = tasks::summarize(&list);
+        if ctx.json {
+            return emit_json(&s);
+        }
+        println!("{} tasks  (pass a PATH or --full for rows)", s.n);
+        for (k, v) in &s.by_status {
+            println!("  {k:<12} {v:>5}");
+        }
+        println!("by folder:");
+        for (k, v) in &s.by_folder {
+            println!("  {k:<28} {v:>5}");
+        }
+        return Ok(());
+    }
     if ctx.json {
         return emit_json(&list);
     }
@@ -473,7 +492,7 @@ async fn neighbors(ctx: &Ctx, args: NeighborsArgs) -> Result<()> {
     for e in &n.neighbors {
         let arrow = if e.direction == "in" { "<-" } else { "->" };
         let flag = if e.resolved { "" } else { "  (dangling)" };
-        println!("{arrow} {}{flag}", e.path);
+        println!("{arrow} {}{flag}", e.label());
     }
     Ok(())
 }

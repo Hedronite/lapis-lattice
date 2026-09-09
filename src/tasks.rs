@@ -405,6 +405,39 @@ pub fn scan_files(root: &Path, prefix: Option<&str>) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// Counts instead of rows: what an unscoped `task list` returns.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Summary {
+    pub n: usize,
+    /// `open`, `done`, `in-progress`, … → count.
+    pub by_status: std::collections::BTreeMap<String, usize>,
+    /// First path segment (`foundry`, `agents`, …; `.` for root notes) → count.
+    pub by_folder: std::collections::BTreeMap<String, usize>,
+}
+
+/// Top-level folder of a vault-relative path; `.` for a root-level note.
+pub fn folder_of(rel: &str) -> &str {
+    match rel.split_once('/') {
+        Some((head, _)) => head,
+        None => ".",
+    }
+}
+
+pub fn summarize(tasks: &[Task]) -> Summary {
+    let mut s = Summary { n: tasks.len(), ..Default::default() };
+    for t in tasks {
+        *s.by_status.entry(t.status.clone()).or_default() += 1;
+        *s.by_folder.entry(folder_of(&t.source_path).to_string()).or_default() += 1;
+    }
+    s
+}
+
+/// Unscoped and not `--full` → summary. A PATH scope always means rows.
+pub fn wants_summary(scope: Option<&str>, full: bool) -> bool {
+    scope.is_none_or(|s| s.trim().is_empty()) && !full
+}
+
 pub fn list(root: &Path, filter: &Filter) -> Result<Vec<Task>> {
     let today = crate::write::today();
     let mut out = Vec::new();
@@ -481,6 +514,26 @@ mod tests {
     }
 
     #[test]
+    fn summary_counts_by_status_and_folder() {
+        let mut ts = parse("foundry/lapis/plan.md", NOTE);
+        ts.extend(parse("agents/FLEET.md", "- [ ] a\n- [x] b\n- [x] c\n"));
+        ts.extend(parse("ROOT.md", "- [ ] root task\n"));
+        let s = summarize(&ts);
+        assert_eq!(s.n, ts.len());
+        // NOTE: open, done, in-progress, cancelled, forwarded (fenced one skipped)
+        assert_eq!(s.by_folder["foundry"], 5);
+        assert_eq!(s.by_folder["agents"], 3);
+        assert_eq!(s.by_folder["."], 1);
+        assert_eq!(s.by_status["done"], 1 + 2);
+        assert_eq!(s.by_status["open"], 1 + 1 + 1);
+        assert_eq!(s.by_status["in-progress"], 1);
+        assert_eq!(folder_of("a/b/c.md"), "a");
+        assert_eq!(folder_of("c.md"), ".");
+        let j = serde_json::to_value(&s).unwrap();
+        assert!(j.get("byStatus").is_some() && j.get("byFolder").is_some() && j["n"] == ts.len());
+    }
+
+    #[test]
     fn toggle_on_disk_and_scan_respects_exclusions() {
         let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let v = std::env::temp_dir().join(format!("lapis-tasks-{}-{n}", std::process::id()));
@@ -502,6 +555,20 @@ mod tests {
         assert_eq!(scan_files(&v, Some("inbox")).unwrap(), ["inbox/q.md"]);
         let all = list(&v, &Filter::default()).unwrap();
         assert_eq!(all.len(), 7);
+        // N4: unscoped → summary; scoped or --full → rows
+        assert!(wants_summary(None, false));
+        assert!(wants_summary(Some(""), false));
+        assert!(!wants_summary(Some("foundry/lapis"), false));
+        assert!(!wants_summary(None, true));
+        let s = summarize(&all);
+        assert_eq!(s.n, 7);
+        assert_eq!(s.by_folder.get("foundry"), Some(&6));
+        assert_eq!(s.by_folder.get("inbox"), Some(&1));
+        assert_eq!(s.by_status.values().sum::<usize>(), 7);
+        let scoped =
+            list(&v, &Filter { prefix: Some("foundry/lapis".into()), ..Default::default() }).unwrap();
+        assert_eq!(scoped.len(), 6);
+        assert!(scoped.iter().all(|t| t.source_path.starts_with("foundry/lapis/")));
         let open = list(&v, &Filter { status: Some("open".into()), ..Default::default() }).unwrap();
         assert_eq!(open.len(), 3);
         let overdue = list(&v, &Filter { due: Some("overdue".into()), ..Default::default() }).unwrap();

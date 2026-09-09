@@ -163,6 +163,14 @@ pub struct TaskListArgs {
     #[arg(value_name = "PATH")]
     pub path: Option<String>,
 
+    /// Same as the positional PATH.
+    #[arg(long = "path", value_name = "PATH", conflicts_with = "path")]
+    pub path_flag: Option<String>,
+
+    /// Unscoped runs print a summary (counts by status and folder); `--full` prints every row.
+    #[arg(long)]
+    pub full: bool,
+
     /// open | done | in-progress | cancelled | forwarded | waiting
     #[arg(long, value_name = "STATUS")]
     pub status: Option<String>,
@@ -174,6 +182,13 @@ pub struct TaskListArgs {
     /// Require this inline #tag.
     #[arg(long, value_name = "TAG")]
     pub tag: Option<String>,
+}
+
+impl TaskListArgs {
+    /// Scope from the positional or `--path`.
+    pub fn scope(&self) -> Option<String> {
+        self.path.clone().or_else(|| self.path_flag.clone())
+    }
 }
 
 #[derive(Debug, Args)]
@@ -330,6 +345,10 @@ pub struct SearchArgs {
     #[arg(long)]
     pub per_doc: bool,
 
+    /// Agent defaults: one hit per document (per_doc). Same as the MCP `search` tool.
+    #[arg(long)]
+    pub agent: bool,
+
     /// MMR diversity re-ranking.
     #[arg(long)]
     pub mmr: bool,
@@ -342,6 +361,10 @@ pub struct SearchArgs {
 impl SearchArgs {
     pub fn query_text(&self) -> String {
         self.query.join(" ")
+    }
+    /// `--per-doc`, or implied by `--agent`.
+    pub fn effective_per_doc(&self) -> bool {
+        self.per_doc || self.agent
     }
 }
 
@@ -366,8 +389,8 @@ pub struct NeighborsArgs {
     #[arg(value_name = "PATH")]
     pub path: String,
 
-    /// Edge direction: out, in, or both.
-    #[arg(long, default_value = "out", value_parser = ["out", "in", "both"])]
+    /// Edge direction: both (default), out, or in.
+    #[arg(long, default_value = "both", value_parser = ["out", "in", "both"])]
     pub direction: String,
 
     /// Include dangling (unresolved) links too.
@@ -498,5 +521,54 @@ mod tests {
     fn neighbors_direction_is_validated() {
         assert!(Cli::try_parse_from(["lapis", "neighbors", "a.md", "--direction", "sideways"]).is_err());
         assert!(Cli::try_parse_from(["lapis", "neighbors", "a.md", "--direction", "both"]).is_ok());
+    }
+
+    /// N2: hop-1 defaults to both directions; `--direction` still narrows.
+    #[test]
+    fn neighbors_default_direction_is_both() {
+        let c = Cli::try_parse_from(["lapis", "neighbors", "a.md"]).unwrap();
+        let Command::Neighbors(n) = c.command() else { panic!("neighbors") };
+        assert_eq!(n.direction, "both");
+        assert!(!n.dangling);
+        let c =
+            Cli::try_parse_from(["lapis", "neighbors", "a.md", "--direction", "in", "--dangling"]).unwrap();
+        let Command::Neighbors(n) = c.command() else { panic!("neighbors") };
+        assert_eq!(n.direction, "in");
+        assert!(n.dangling);
+    }
+
+    /// N3: `--agent` implies per_doc; `--per-doc` alone still works.
+    #[test]
+    fn search_agent_implies_per_doc() {
+        let parse = |a: &[&str]| match Cli::try_parse_from(a).unwrap().command() {
+            Command::Search(s) => s,
+            _ => panic!("search"),
+        };
+        assert!(!parse(&["lapis", "search", "q"]).effective_per_doc());
+        assert!(parse(&["lapis", "search", "--per-doc", "q"]).effective_per_doc());
+        let s = parse(&["lapis", "search", "--agent", "q"]);
+        assert!(s.agent && !s.per_doc && s.effective_per_doc());
+    }
+
+    /// N4: scope comes from the positional or `--path`; both plus `--full` parse.
+    #[test]
+    fn task_list_scope_positional_or_flag() {
+        let list = |a: &[&str]| match Cli::try_parse_from(a).unwrap().command() {
+            Command::Task { command: TaskCommand::List(l) } => l,
+            _ => panic!("task list"),
+        };
+        let l = list(&["lapis", "task", "list", "--json"]);
+        assert_eq!(l.scope(), None);
+        assert!(!l.full);
+        assert_eq!(
+            list(&["lapis", "task", "list", "foundry/lapis"]).scope().as_deref(),
+            Some("foundry/lapis")
+        );
+        assert_eq!(
+            list(&["lapis", "task", "list", "--json", "--path", "foundry/lapis"]).scope().as_deref(),
+            Some("foundry/lapis")
+        );
+        assert!(list(&["lapis", "task", "list", "--full"]).full);
+        assert!(Cli::try_parse_from(["lapis", "task", "list", "a", "--path", "b"]).is_err());
     }
 }

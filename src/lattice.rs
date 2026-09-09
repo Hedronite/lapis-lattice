@@ -152,7 +152,9 @@ pub struct SearchResult {
 /// One row from `/neighbors`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Neighbor {
-    pub path: String,
+    /// Resolved vault path. `None` on a dangling link; see `dst_raw`.
+    #[serde(default)]
+    pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dst_raw: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -163,6 +165,13 @@ pub struct Neighbor {
     pub resolved: bool,
     #[serde(default, rename = "dir")]
     pub direction: String,
+}
+
+impl Neighbor {
+    /// What to show for this edge: the resolved path, else the raw link target.
+    pub fn label(&self) -> &str {
+        self.path.as_deref().or(self.dst_raw.as_deref()).unwrap_or("?")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +234,30 @@ pub struct Reindex {
     pub stderr_tail: Vec<String>,
 }
 
+/// serve.py error bodies are `{"detail": "..."}`; pull the text out.
+fn lattice_detail(body: &str) -> String {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v.get("detail").and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_else(|| body.to_string())
+}
+
+/// Non-2xx from the lattice → the exit-code contract. 404 is "that note is not
+/// in the index" (exit 3, same as `read` on a missing file); other 4xx are our
+/// own bad params (exit 1); 5xx is the lattice being down (exit 2).
+fn http_error(route: &str, status: reqwest::StatusCode, body: &str) -> LapisError {
+    let body = body.trim();
+    let detail = if body.is_empty() { String::new() } else { format!(": {}", lattice_detail(body)) };
+    let msg = format!("lattice {route} {status}{detail}");
+    if status == reqwest::StatusCode::NOT_FOUND {
+        LapisError::Path(msg)
+    } else if status.is_client_error() {
+        LapisError::Usage(msg)
+    } else {
+        LapisError::LatticeDown(msg)
+    }
+}
+
 fn int_or_bool<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<bool, D::Error> {
     let v = Value::deserialize(d)?;
     Ok(match v {
@@ -277,15 +310,7 @@ impl Client {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            let body = body.trim();
-            let detail = if body.is_empty() { String::new() } else { format!(": {body}") };
-            // 4xx on our own route call is a user error (bad path/param),
-            // not the lattice being down.
-            return if status.is_client_error() {
-                Err(LapisError::Usage(format!("lattice {route} {status}{detail}")))
-            } else {
-                Err(LapisError::LatticeDown(format!("lattice {route} {status}{detail}")))
-            };
+            return Err(http_error(route, status, &body));
         }
         resp.json::<T>().await.map_err(|e| LapisError::LatticeDown(format!("lattice {route}: bad JSON: {e}")))
     }
@@ -486,6 +511,46 @@ mod tests {
         .unwrap();
         assert!(n.neighbors[0].resolved);
         assert_eq!(n.neighbors[0].direction, "out");
+        assert_eq!(n.neighbors[0].path.as_deref(), Some("b.md"));
+    }
+
+    /// N1: serve.py emits `"path": null` on unresolved edges (`resolved=0`).
+    #[test]
+    fn neighbors_null_path_is_a_dangling_row() {
+        let n: Neighbors = serde_json::from_str(
+            r#"{"path":"Cross-References/Manual.md","direction":"both","hop":1,"neighbors":[
+                {"path":"Cross-References/Hedronite-Capital.md","dst_raw":"Hedronite-Capital","alias":null,"anchor":null,"resolved":1,"dir":"out"},
+                {"path":null,"dst_raw":"aes_schema_genesis_canon","alias":null,"anchor":null,"resolved":0,"dir":"out"}]}"#,
+        )
+        .expect("null path must decode");
+        assert_eq!(n.neighbors.len(), 2);
+        let d = &n.neighbors[1];
+        assert!(d.path.is_none());
+        assert!(!d.resolved);
+        assert_eq!(d.label(), "aes_schema_genesis_canon");
+        assert_eq!(n.neighbors[0].label(), "Cross-References/Hedronite-Capital.md");
+        // round-trips with an explicit null so agents can tell dangling from resolved
+        let out = serde_json::to_value(d).unwrap();
+        assert!(out["path"].is_null());
+        assert_eq!(out["dst_raw"], "aes_schema_genesis_canon");
+    }
+
+    /// N5: lattice 404 is exit 3 like `read`; other 4xx exit 1; 5xx exit 2.
+    #[test]
+    fn http_status_maps_to_exit_codes() {
+        use reqwest::StatusCode;
+        let e =
+            http_error("/neighbors", StatusCode::NOT_FOUND, r#"{"detail":"document not found: nope.md"}"#);
+        assert_eq!(e.exit_code(), 3);
+        assert_eq!(e.kind(), "path");
+        assert_eq!(e.message(), "lattice /neighbors 404 Not Found: document not found: nope.md");
+        let e = http_error("/neighbors", StatusCode::BAD_REQUEST, r#"{"detail":"hop=1 only"}"#);
+        assert_eq!((e.exit_code(), e.kind()), (1, "usage"));
+        let e = http_error("/search", StatusCode::INTERNAL_SERVER_ERROR, "boom");
+        assert_eq!((e.exit_code(), e.kind()), (2, "lattice_down"));
+        assert_eq!(e.message(), "lattice /search 500 Internal Server Error: boom");
+        let e = http_error("/healthz", StatusCode::BAD_GATEWAY, "");
+        assert_eq!(e.message(), "lattice /healthz 502 Bad Gateway");
     }
 
     #[test]
