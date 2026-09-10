@@ -1,0 +1,127 @@
+# Release assets (A1).
+#
+# CLI assets ship with the desktop feature OFF, which is what `curl | bash`
+# installs. Desktop is a second, optional asset and Linux-only (D-V02-DESKTOP).
+#
+# There is deliberately no darwin-x64 build. install.sh refuses that triple with
+# a sentence telling the user what to do instead, rather than silently needing a
+# compiler (A2).
+name: pack-release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cli:
+    name: cli ${{ matrix.triple }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - triple: darwin-arm64
+            os: macos-latest
+          - triple: linux-x64
+            os: ubuntu-latest
+          # GitHub-hosted arm64 Linux. If this runner label is not available to
+          # the account, delete this row and document linux-arm64 as unshipped:
+          # do not substitute a QEMU cross-build, which produces a binary nobody
+          # has run on real hardware.
+          - triple: linux-arm64
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build (desktop off)
+        run: cargo build --release --locked --bin lapis
+      - name: strip
+        run: strip target/release/lapis || true
+      - name: the binary runs and needs no daemon
+        run: |
+          ./target/release/lapis --version
+          tmp=$(mktemp -d)
+          ./target/release/lapis init "$tmp"
+          ./target/release/lapis --vault "$tmp" --json search welcome | grep -q '"ok": true'
+          ./target/release/lapis --vault "$tmp" doctor
+      - name: package
+        run: |
+          mkdir -p dist
+          tar -C target/release -czf "dist/lapis-${{ matrix.triple }}.tar.gz" lapis
+          cd dist && shasum -a 256 "lapis-${{ matrix.triple }}.tar.gz" > "lapis-${{ matrix.triple }}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lapis-${{ matrix.triple }}
+          path: dist/*
+
+  # Provisional. The `desktop` feature still builds the Zed-gpui shell, which
+  # D-V02-DESKTOP says is NOT the 0.2 desktop — sequence 5b replaces it with
+  # gpui-omarchy and throws that module away. So a green asset here is not yet
+  # "the Lapis desktop", and a red one must not hold up the CLI release.
+  # Revisit the moment 5b lands.
+  desktop:
+    name: desktop ${{ matrix.triple }} (provisional, pre-5b)
+    continue-on-error: true
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x64 only. gpui is never cross-compiled: a GUI binary nobody has run
+          # on the target architecture is not an asset, it is a guess.
+          - triple: linux-x64
+            os: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # gpui on Linux draws through blade/Vulkan and talks wayland + x11.
+      - name: system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libvulkan-dev libx11-dev libxcb1-dev libfontconfig-1-dev libfreetype-dev \
+            libasound2-dev libssl-dev
+      - name: build (desktop on)
+        run: cargo build --release --locked --bin lapis --features desktop
+      - name: strip
+        run: strip target/release/lapis || true
+      - name: package
+        run: |
+          mkdir -p dist
+          tar -C target/release -czf "dist/lapis-desktop-${{ matrix.triple }}.tar.gz" lapis
+          cd dist && shasum -a 256 "lapis-desktop-${{ matrix.triple }}.tar.gz" > "lapis-desktop-${{ matrix.triple }}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lapis-desktop-${{ matrix.triple }}
+          path: dist/*
+
+  release:
+    name: attach to release
+    needs: [cli]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+      - name: collect and checksum
+        run: |
+          mkdir -p dist
+          find staged -type f -name '*.tar.gz' -exec cp {} dist/ \;
+          cd dist && shasum -a 256 *.tar.gz > SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true
