@@ -392,14 +392,26 @@ pub fn labels(
         key(b).cmp(&key(a)).then_with(|| scene.nodes[a].id.cmp(&scene.nodes[b].id))
     });
 
+    // Widest a label can be, used to reject off-board candidates before
+    // building the string. On a two-thousand-node vault this is the difference
+    // between two thousand allocations a frame and a couple of hundred.
+    let widest = LABEL_MAX_CHARS as f32 * LABEL_CHAR_PX + LABEL_PAD_PX * 2.0;
+
     let mut placed: Vec<[f32; 4]> = Vec::new();
     let mut out = Vec::new();
     for i in order {
+        let at = [pos[i][0], pos[i][1] + rad[i] + 2.0];
+        if at[0] + widest < 0.0
+            || at[0] - widest > board[0]
+            || at[1] + LABEL_HEIGHT_PX < 0.0
+            || at[1] > board[1]
+        {
+            continue;
+        }
         let text = label_stem(&scene.nodes[i].label);
         if text.is_empty() {
             continue;
         }
-        let at = [pos[i][0], pos[i][1] + rad[i] + 2.0];
         let b = label_box(&text, at);
         if b[2] < 0.0 || b[0] > board[0] || b[3] < 0.0 || b[1] > board[1] {
             continue;
