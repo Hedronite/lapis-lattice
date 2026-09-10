@@ -92,7 +92,11 @@ mod tests {
     #[test]
     fn tree_lists_lazily_and_skips_excluded() {
         let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let v = std::env::temp_dir().join(format!("lapis-tui-{}-{n}", std::process::id()));
+        // Unique per call: pid alone repeats across parallel tests in one
+        // binary, and the clock is coarser than a nanosecond.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let v = std::env::temp_dir().join(format!("lapis-tui-{}-{n}-{seq}", std::process::id()));
         for d in ["notes", "agents", "Aeon/notes/media", ".obsidian", "_archives"] {
             std::fs::create_dir_all(v.join(d)).unwrap();
         }

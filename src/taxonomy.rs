@@ -76,7 +76,11 @@ mod tests {
 
     #[test]
     fn classify_without_lattice_is_fallback() {
-        let dir = std::env::temp_dir().join(format!("lapis-tax-{}", std::process::id()));
+        // Unique per call: pid alone repeats across parallel tests in one
+        // binary, and the clock is coarser than a nanosecond.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("lapis-tax-{}-{seq}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let c = classify(&dir, "inbox/a.md", Some("capture"));
         assert_eq!(c.source, "fallback");

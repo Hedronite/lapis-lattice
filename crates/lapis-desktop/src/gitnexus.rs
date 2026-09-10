@@ -84,9 +84,13 @@ impl Sidecar {
 mod tests {
     use super::*;
 
+    /// Unique per call: pid plus nanos is not enough, because tests inside one
+    /// crate run in parallel threads and the clock is coarser than a nanosecond.
     fn tmp() -> PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let d = std::env::temp_dir().join(format!("lapis-gitnexus-{}-{n}", std::process::id()));
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("lapis-gitnexus-{}-{n}-{seq}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         d
     }

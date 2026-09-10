@@ -673,7 +673,11 @@ mod tests {
 
     fn vault() -> PathBuf {
         let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let d = std::env::temp_dir().join(format!("lapis-write-{}-{n}", std::process::id()));
+        // Unique per call: pid alone repeats across parallel tests in one
+        // binary, and the clock is coarser than a nanosecond.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("lapis-write-{}-{n}-{seq}", std::process::id()));
         std::fs::create_dir_all(d.join("notes")).unwrap();
         d
     }
@@ -684,7 +688,11 @@ mod tests {
     #[test]
     fn init_vault_writes_welcome_and_gitignore() {
         let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let d = std::env::temp_dir().join(format!("lapis-init-{}-{n}", std::process::id()));
+        // Unique per call: pid alone repeats across parallel tests in one
+        // binary, and the clock is coarser than a nanosecond.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("lapis-init-{}-{n}-{seq}", std::process::id()));
         let w = init_vault(Some(d.to_str().unwrap())).unwrap();
         assert!(w.created);
         assert!(d.join("Welcome.md").is_file());

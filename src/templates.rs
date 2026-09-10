@@ -141,7 +141,11 @@ mod tests {
 
     #[test]
     fn find_by_short_or_full_id_and_custom() {
-        let dir = std::env::temp_dir().join(format!("lapis-tpl-{}", std::process::id()));
+        // Unique per call: pid alone repeats across parallel tests in one
+        // binary, and the clock is coarser than a nanosecond.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("lapis-tpl-{}-{seq}", std::process::id()));
         std::fs::create_dir_all(dir.join(".lapis/templates")).unwrap();
         std::fs::write(dir.join(".lapis/templates/rfc.md"), "---\nname: RFC\ntype: rfc\n---\n# {{title}}\n")
             .unwrap();

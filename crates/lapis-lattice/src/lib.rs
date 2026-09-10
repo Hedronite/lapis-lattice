@@ -200,9 +200,16 @@ impl Engine {
 mod tests {
     use super::*;
 
+    /// Unique per call. `as_nanos()` alone is not: macOS clock granularity is
+    /// coarser than a nanosecond, so two tests starting together get the same
+    /// value, share a directory, and clobber each other's fixtures. Tests in a
+    /// crate run in parallel threads, so pid does not separate them either —
+    /// hence the counter.
     fn vault() -> PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let d = std::env::temp_dir().join(format!("lapis-lattice-{n}"));
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("lapis-lattice-{}-{n}-{seq}", std::process::id()));
         std::fs::create_dir_all(d.join("notes")).unwrap();
         std::fs::write(
             d.join("Welcome.md"),
