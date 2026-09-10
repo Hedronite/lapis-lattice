@@ -21,6 +21,7 @@ desktop = ["lapis-desktop/gpui"]
 
 [dependencies]
 lapis-desktop = { path = "crates/lapis-desktop" }
+lapis-lattice = { path = "crates/lapis-lattice", version = "0.1.0" }
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 gray_matter = "0.3"

@@ -4,6 +4,7 @@
 //! currently read an HTTP lattice; an embedded index is the 0.2 path.
 //! This binary never writes `lattice.db`.
 
+mod backend;
 mod cli;
 mod config;
 mod envelope;
@@ -86,6 +87,7 @@ async fn run(cli: Cli) -> Result<()> {
     let cfg = config::load()?;
     let vault_flag = cli.global.vault.clone();
     let lattice_flag = cli.global.lattice.clone();
+    let lattice_flag_present = lattice_flag.is_some();
     let json = cli.global.json;
     match cli.command() {
         Command::Init(args) => init_vault_cmd(json, args),
@@ -94,7 +96,9 @@ async fn run(cli: Cli) -> Result<()> {
             let lattice_url = lattice_flag
                 .or_else(|| std::env::var("LAPIS_LATTICE_URL").ok().filter(|s| !s.trim().is_empty()))
                 .unwrap_or_else(|| cfg.lattice.url.clone());
-            let ctx = Ctx { json, vault, cfg, lattice_url };
+            // An explicit --lattice means the operator wants HTTP, whatever config says.
+            let force_http = lattice_flag_present;
+            let ctx = Ctx { json, vault, cfg, lattice_url, force_http };
             dispatch(ctx, cmd).await
         }
     }
@@ -124,6 +128,7 @@ async fn dispatch(ctx: Ctx, cmd: Command) -> Result<()> {
         Command::Trash(args) => trash(&ctx, args),
         Command::Restore(args) => restore(&ctx, args).await,
         Command::Template { command } => template(&ctx, command),
+        Command::Doctor => doctor(&ctx).await,
         Command::Tui => tui::run(ctx).await,
         Command::Desktop(args) => desktop(&ctx, args),
     }
@@ -169,10 +174,16 @@ async fn vault_info(ctx: &Ctx) -> Result<()> {
         );
         match &info.lattice.health {
             Some(h) => println!(
-                "Lattice  {}  {}  documents={} edges={} dangling={}",
-                info.lattice.url, h.status, h.documents_indexed, h.edges, h.dangling_links
+                "Index    {} {}  {}  documents={} links={} dangling={} embedder={}",
+                info.lattice.mode,
+                info.lattice.url,
+                h.status,
+                h.documents_indexed,
+                h.graph.edges,
+                h.graph.dangling_links,
+                h.embedder
             ),
-            None => println!("Lattice  {}  DOWN", info.lattice.url),
+            None => println!("Index    {} {}  UNAVAILABLE", info.lattice.mode, info.lattice.url),
         }
     }
     // Always print the report, then fail with exit 2 if the lattice is down.
@@ -200,7 +211,7 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
         mmr: args.mmr,
         include_archives: args.include_archives,
     };
-    let mut result = ctx.client()?.search(&params).await?;
+    let mut result = ctx.backend()?.search(&params).await?;
     // The lattice has no offset; ask for offset+limit and drop the head. Ranks stay absolute.
     let total = result.hits.len();
     result.hits = result.hits.into_iter().skip(offset as usize).collect();
@@ -311,7 +322,7 @@ async fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
 async fn reindex(ctx: &Ctx, args: ReindexArgs) -> Result<()> {
     // Validate locally first so an escape is exit 3 before any HTTP.
     let (rel, _abs) = notes::resolve(&ctx.vault.root, &args.path)?;
-    let r = ctx.client()?.reindex(&rel).await?;
+    let r = ctx.backend()?.reindex(&rel).await?;
     if ctx.json {
         return emit_json(&r);
     }
@@ -550,7 +561,7 @@ async fn task_toggle(ctx: &Ctx, args: TaskToggleArgs) -> Result<()> {
 // ---------------------------------------------------------- analytics / tree
 
 async fn analytics(ctx: &Ctx, args: AnalyticsArgs) -> Result<()> {
-    let a = ctx.client()?.analytics(&args.query).await?;
+    let a = ctx.backend()?.analytics(&args.query).await?;
     if ctx.json {
         let meta = Meta { truncated: a.truncated, count: Some(a.count), ..Meta::default() };
         return emit_with(&a, meta);
@@ -586,7 +597,7 @@ async fn tree_retrieve(ctx: &Ctx, args: TreeArgs) -> Result<()> {
         }
         None => None,
     };
-    let t = ctx.client()?.tree(rel.as_deref(), args.query.as_deref(), args.depth, args.max_nodes).await?;
+    let t = ctx.backend()?.tree(rel.as_deref(), args.query.as_deref(), args.depth, args.max_nodes).await?;
     if ctx.json {
         let meta = Meta { truncated: t.truncated, count: Some(t.count), ..Meta::default() };
         return emit_with(&t, meta);
@@ -605,13 +616,148 @@ async fn tree_retrieve(ctx: &Ctx, args: TreeArgs) -> Result<()> {
 
 fn init_vault_cmd(json: bool, args: cli::InitArgs) -> Result<()> {
     let w = write::init_vault(args.path.as_deref())?;
+    // B2: a vault with no index is a vault whose first search fails. Build it
+    // here so `init` then `search` works with no daemon and no second command.
+    let indexed = lapis_lattice::Engine::open(&w.path).ok().and_then(|mut e| e.reindex().ok());
     if json {
-        return emit_json(&w);
+        return emit_json(&json!({
+            "path": w.path,
+            "created": w.created,
+            "indexed": indexed.as_ref().map(|r| json!({
+                "documents": r.documents, "chunks": r.chunks, "edges": r.edges
+            })),
+        }));
     }
     let verb = if w.created { "created" } else { "already exists" };
     println!("vault {verb}: {}", w.path);
+    match &indexed {
+        Some(r) => println!("indexed: {} documents, {} chunks, {} links", r.documents, r.chunks, r.edges),
+        None => println!("indexed: skipped (could not open the index)"),
+    }
     println!("next: lapis --vault {}   or   export LAPIS_VAULT={}", w.path, w.path);
     Ok(())
+}
+
+// --------------------------------------------------------------------- doctor
+
+/// `lapis doctor`: is this install usable? Per-check rows so CI can assert one
+/// thing (`schema/v0.2/doctor.schema.json`), plus notes for a human. A missing
+/// embedder is a warning, never a failure — BM25 still answers.
+async fn doctor(ctx: &Ctx) -> Result<()> {
+    let mut checks: Vec<serde_json::Value> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+    let mut ok = true;
+    macro_rules! check {
+        ($name:expr, $state:expr, $detail:expr) => {{
+            let state: &str = $state;
+            if state == "fail" {
+                ok = false;
+            }
+            checks.push(json!({ "name": $name, "state": state, "detail": $detail }));
+        }};
+    }
+
+    let root = ctx.vault.root.clone();
+    let vault_ok = root.is_dir();
+    check!(
+        "vault",
+        if vault_ok { "ok" } else { "fail" },
+        format!("{} ({})", root.display(), ctx.vault.source)
+    );
+    let writable = vault_ok && std::fs::create_dir_all(root.join(".lapis")).is_ok();
+    check!(
+        "vault_writable",
+        if writable { "ok" } else { "fail" },
+        if writable { ".lapis is writable" } else { "cannot create .lapis" }
+    );
+    check!("backend", "ok", ctx.cfg.lattice.mode.clone());
+
+    let health = ctx.backend()?.health().await;
+    let (embedder, health_val) = match &health {
+        Ok(h) => {
+            check!(
+                "index",
+                if h.graph.built { "ok" } else { "warn" },
+                format!(
+                    "{} documents, {} links, {} dangling at {}",
+                    h.documents_indexed, h.graph.edges, h.graph.dangling_links, h.db_path
+                )
+            );
+            if !h.graph.built {
+                notes.push("index is empty; run `lapis init <vault>` to build it".into());
+            }
+            (h.embedder.clone(), serde_json::to_value(h).unwrap_or(serde_json::Value::Null))
+        }
+        Err(e) => {
+            check!("index", "fail", e.to_string());
+            ("none".to_string(), serde_json::Value::Null)
+        }
+    };
+    check!(
+        "embedder",
+        if embedder == "none" { "warn" } else { "ok" },
+        if embedder == "none" {
+            "none - keyword search only; vectors land in a later slice".to_string()
+        } else {
+            embedder.clone()
+        }
+    );
+
+    // A probe that returns nothing is fine. A probe that errors is not.
+    let probe = ctx
+        .backend()?
+        .search(&SearchParams {
+            query: "lapis".into(),
+            top_k: 1,
+            domain: None,
+            mode: lattice::Mode::Bm25,
+            per_doc: true,
+            mmr: false,
+            include_archives: false,
+        })
+        .await;
+    match &probe {
+        Ok(r) => check!("search", "ok", format!("{} hit(s) for a probe query", r.count)),
+        Err(e) => check!("search", "fail", e.to_string()),
+    }
+
+    let path_ok = notes::clean_rel("../escape").is_err();
+    check!("path_sandbox", if path_ok { "ok" } else { "fail" }, "`..` is rejected");
+
+    let report = json!({
+        "ok": ok,
+        "version": env!("CARGO_PKG_VERSION"),
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "vault": root.display().to_string(),
+        "lattice": ctx.cfg.lattice.mode,
+        "embedder": embedder,
+        "path_ok": path_ok,
+        "checks": checks,
+        "health": health_val,
+        "notes": notes,
+    });
+    if ctx.json {
+        emit_json(&report)?;
+    } else {
+        for c in report["checks"].as_array().into_iter().flatten() {
+            let mark = match c["state"].as_str() {
+                Some("ok") => "ok  ",
+                Some("warn") => "warn",
+                _ => "FAIL",
+            };
+            println!(
+                "{mark}  {:<16} {}",
+                c["name"].as_str().unwrap_or(""),
+                c["detail"].as_str().unwrap_or("")
+            );
+        }
+        for n in &notes {
+            println!("      note: {n}");
+        }
+        println!("{}", if ok { "doctor: ok" } else { "doctor: FAILED" });
+    }
+    if ok { Ok(()) } else { Err(LapisError::LatticeDown("doctor found a failing check".into())) }
 }
 
 // -------------------------------------------------------------------- desktop
@@ -668,7 +814,7 @@ async fn neighbors(ctx: &Ctx, args: NeighborsArgs) -> Result<()> {
     let rel = if std::path::Path::new(&rel).extension().is_none() { format!("{rel}.md") } else { rel };
     let dir = args.direction.clone().unwrap_or_else(|| ctx.cfg.agent.direction().to_string());
     if args.hop == 2 {
-        let e = ctx.client()?.ego(&rel, 2, &dir, !args.dangling).await?;
+        let e = ctx.backend()?.ego(&rel, 2, &dir, !args.dangling).await?;
         if ctx.json {
             let meta = Meta { truncated: e.truncated, count: Some(e.count), ..Meta::default() };
             return emit_with(&e, meta);
@@ -693,7 +839,7 @@ async fn neighbors(ctx: &Ctx, args: NeighborsArgs) -> Result<()> {
         }
         return Ok(());
     }
-    let n = ctx.client()?.neighbors(&rel, &dir, !args.dangling).await?;
+    let n = ctx.backend()?.neighbors(&rel, &dir, !args.dangling).await?;
     if ctx.json {
         return emit_json(&n);
     }

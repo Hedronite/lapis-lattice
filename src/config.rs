@@ -102,10 +102,24 @@ pub struct OperatorConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct LatticeConfig {
+    /// `embedded` (default) or `http`. Embedded needs no daemon.
+    #[serde(default = "default_mode")]
+    pub mode: String,
     #[serde(default = "default_url")]
     pub url: String,
     #[serde(default = "default_timeout")]
     pub timeout_ms: u64,
+}
+
+fn default_mode() -> String {
+    "embedded".to_string()
+}
+
+impl LatticeConfig {
+    /// True unless the operator explicitly asked for the HTTP lattice.
+    pub fn is_embedded(&self) -> bool {
+        !self.mode.eq_ignore_ascii_case("http")
+    }
 }
 
 fn default_url() -> String {
@@ -117,7 +131,7 @@ fn default_timeout() -> u64 {
 
 impl Default for LatticeConfig {
     fn default() -> Self {
-        Self { url: default_url(), timeout_ms: default_timeout() }
+        Self { mode: default_mode(), url: default_url(), timeout_ms: default_timeout() }
     }
 }
 
@@ -174,6 +188,8 @@ mod tests {
         let c: Config = toml::from_str("").unwrap();
         assert_eq!(c.lattice.url, DEFAULT_LATTICE_URL);
         assert_eq!(c.lattice.timeout_ms, DEFAULT_TIMEOUT_MS);
+        assert_eq!(c.lattice.mode, "embedded", "embedded is the default backend");
+        assert!(c.lattice.is_embedded());
         assert!(c.vault.is_none());
         assert_eq!(c.agent, AgentConfig::default());
         assert!(c.agent.per_doc);
@@ -221,6 +237,8 @@ mod tests {
         .unwrap();
         assert_eq!(c.lattice.url, "http://localhost:9999");
         assert_eq!(c.lattice.timeout_ms, 250);
+        let c: Config = toml::from_str("[lattice]\nmode = \"http\"\n").unwrap();
+        assert!(!c.lattice.is_embedded());
     }
 
     #[test]

@@ -336,6 +336,10 @@ pub struct Document {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtime: Option<f64>,
+    /// Content fingerprint from the embedded index, so an agent can plan
+    /// `--if-hash` writes from one `list` call. `None` over HTTP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]

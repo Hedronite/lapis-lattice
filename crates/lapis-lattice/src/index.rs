@@ -13,8 +13,9 @@ const SKIP: &[&str] = &[".lapis", ".git", ".obsidian", "node_modules", ".venv", 
 
 pub fn reindex(conn: &Connection, vault: &Path) -> Result<IndexReport> {
     conn.execute_batch("DELETE FROM edges; DELETE FROM chunks; DELETE FROM documents;")?;
-    // FTS5 content-sync: rebuild from chunks after insert via triggers we skip;
-    // drop+recreate the fts table to stay simple.
+    // chunks_fts is an external-content table; the cheapest way to clear it in
+    // bulk is to drop and recreate. Single-path updates use the 'delete'
+    // command instead (see `forget_path`), which is O(chunks in that file).
     conn.execute_batch("DROP TABLE IF EXISTS chunks_fts;")?;
     conn.execute_batch(
         r#"CREATE VIRTUAL TABLE chunks_fts USING fts5(
@@ -26,51 +27,105 @@ pub fn reindex(conn: &Connection, vault: &Path) -> Result<IndexReport> {
     let files = walk(vault)?;
     let mut chunks_n = 0u64;
     for rel in &files {
-        let abs = vault.join(rel);
-        let meta = fs::metadata(&abs)?;
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        let text = read_lossy(&abs);
-        let (fm, body) = split_frontmatter(&text);
-        let title = fm.get("name").or_else(|| fm.get("title")).cloned().or_else(|| h1(&body));
-        let domain = rel.split('/').next().filter(|s| *s != rel).map(str::to_string);
-        let doc_type = fm.get("type").cloned().or_else(|| fm.get("doc_type").cloned());
-        let status = fm.get("status").cloned();
-        let priority = fm.get("priority").cloned();
-        let tags_json = tags_json(fm.get("tags"));
-        conn.execute(
-            "INSERT INTO documents(path,title,domain,doc_type,status,priority,tags_json,mtime,hash,kind)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'markdown')",
-            params![rel, title, domain, doc_type, status, priority, tags_json, mtime, hash(&text)],
-        )?;
-        for (i, (heading, chunk)) in chunk_body(&body).into_iter().enumerate() {
-            conn.execute(
-                "INSERT INTO chunks(path, chunk_index, heading, text) VALUES(?1,?2,?3,?4)",
-                params![rel, i as i64, heading, chunk],
-            )?;
-            chunks_n += 1;
-        }
-        for link in parse_wikilinks(&body) {
-            conn.execute(
-                "INSERT INTO edges(src, dst_raw, dst_path, alias, anchor, resolved) VALUES(?1,?2,NULL,?3,?4,0)",
-                params![rel, link.target, link.alias, link.anchor],
-            )?;
-        }
+        chunks_n += index_one(conn, vault, rel)?;
     }
     resolve_edges(conn, &files)?;
-    conn.execute_batch(
-        "INSERT INTO chunks_fts(rowid, text, path, heading)
-         SELECT chunk_id, text, path, heading FROM chunks;",
-    )?;
+    crate::sqlite::meta_set(conn, "graph_built", "1")?;
     let documents: u64 =
         conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get::<_, i64>(0)).map(|n| n as u64)?;
     let edges: u64 =
         conn.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get::<_, i64>(0)).map(|n| n as u64)?;
     Ok(IndexReport { documents, chunks: chunks_n, edges })
+}
+
+/// Reindex exactly one vault-relative path. A file that no longer exists is
+/// dropped from the index. Edge resolution reruns across the vault file list so
+/// a new note can satisfy someone else's dangling link, but nothing else is
+/// re-read or re-chunked.
+pub fn reindex_path(conn: &Connection, vault: &Path, rel: &str) -> Result<IndexReport> {
+    let rel = rel.trim_start_matches("./").replace('\\', "/");
+    forget_path(conn, &rel)?;
+    let abs = vault.join(&rel);
+    let mut documents = 0u64;
+    let mut chunks_n = 0u64;
+    if abs.is_file() {
+        chunks_n = index_one(conn, vault, &rel)?;
+        documents = 1;
+    }
+    let files = walk(vault)?;
+    resolve_edges(conn, &files)?;
+    crate::sqlite::meta_set(conn, "graph_built", "1")?;
+    let edges: u64 = conn
+        .query_row("SELECT COUNT(*) FROM edges WHERE src = ?1", params![rel], |r| r.get::<_, i64>(0))
+        .map(|n| n as u64)?;
+    Ok(IndexReport { documents, chunks: chunks_n, edges })
+}
+
+/// Remove one path from documents, chunks, chunks_fts and edges. The FTS rows
+/// must be retired with the external-content 'delete' command *before* the
+/// chunk rows go, or the index keeps stale postings.
+fn forget_path(conn: &Connection, rel: &str) -> Result<()> {
+    let mut stmt = conn.prepare("SELECT chunk_id, text, path, heading FROM chunks WHERE path = ?1")?;
+    let rows: Vec<(i64, String, String, Option<String>)> = stmt
+        .query_map(params![rel], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    for (id, text, path, heading) in rows {
+        conn.execute(
+            "INSERT INTO chunks_fts(chunks_fts, rowid, text, path, heading) VALUES('delete',?1,?2,?3,?4)",
+            params![id, text, path, heading],
+        )?;
+    }
+    conn.execute("DELETE FROM chunks WHERE path = ?1", params![rel])?;
+    conn.execute("DELETE FROM edges WHERE src = ?1", params![rel])?;
+    conn.execute("DELETE FROM documents WHERE path = ?1", params![rel])?;
+    Ok(())
+}
+
+/// Index one file: document row, chunk rows, matching FTS rows, outbound edges.
+/// Returns the number of chunks written.
+fn index_one(conn: &Connection, vault: &Path, rel: &str) -> Result<u64> {
+    let abs = vault.join(rel);
+    let meta = fs::metadata(&abs)?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let text = read_lossy(&abs);
+    let (fm, body) = split_frontmatter(&text);
+    let title = fm.get("name").or_else(|| fm.get("title")).cloned().or_else(|| h1(&body));
+    let domain = rel.split('/').next().filter(|s| *s != rel).map(str::to_string);
+    let doc_type = fm.get("type").cloned().or_else(|| fm.get("doc_type").cloned());
+    let status = fm.get("status").cloned();
+    let priority = fm.get("priority").cloned();
+    let tags_json = tags_json(fm.get("tags"));
+    conn.execute(
+        "INSERT OR REPLACE INTO documents(path,title,domain,doc_type,status,priority,tags_json,mtime,hash,kind)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'markdown')",
+        params![rel, title, domain, doc_type, status, priority, tags_json, mtime, hash(&text)],
+    )?;
+    let mut n = 0u64;
+    for (i, (heading, chunk)) in chunk_body(&body).into_iter().enumerate() {
+        conn.execute(
+            "INSERT INTO chunks(path, chunk_index, heading, text) VALUES(?1,?2,?3,?4)",
+            params![rel, i as i64, heading, chunk],
+        )?;
+        let id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO chunks_fts(rowid, text, path, heading) VALUES(?1,?2,?3,?4)",
+            params![id, chunk, rel, heading],
+        )?;
+        n += 1;
+    }
+    for link in parse_wikilinks(&body) {
+        conn.execute(
+            "INSERT INTO edges(src, dst_raw, dst_path, alias, anchor, resolved) VALUES(?1,?2,NULL,?3,?4,0)",
+            params![rel, link.target, link.alias, link.anchor],
+        )?;
+    }
+    Ok(n)
 }
 
 fn walk(root: &Path) -> Result<Vec<String>> {

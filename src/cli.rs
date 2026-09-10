@@ -122,6 +122,9 @@ pub enum Command {
     /// Move a note to the trash bucket (`.lapis/trash/`), keeping its path for restore.
     Trash(TrashArgs),
 
+    /// Check this install: vault, index, embedder, search, path sandbox. Exit non-zero if a check fails.
+    Doctor,
+
     /// Terminal UI: sidebar tree, editor, lattice search palette (Ctrl+P), HAL inspector.
     Tui,
 
@@ -672,6 +675,12 @@ mod tests {
             panic!("init path")
         };
         assert_eq!(i.path.as_deref(), Some("~/Notes"));
+    }
+
+    /// B6: `lapis doctor` parses with no arguments.
+    #[test]
+    fn doctor_subcommand() {
+        assert!(matches!(Cli::try_parse_from(["lapis", "doctor"]).unwrap().command(), Command::Doctor));
     }
 
     /// N23: `lapis desktop` parses with and without a build that has GPUI.

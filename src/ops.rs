@@ -4,20 +4,38 @@
 
 use serde::Serialize;
 
-use crate::error::Result;
+use crate::backend::Backend;
+use crate::error::{LapisError, Result};
 use crate::lattice::{Client, Document, ListParams, Reindex};
-use crate::{config, lattice, notes, overlay, tasks, vault, write};
+use crate::{config, notes, overlay, tasks, vault, write};
 
 pub struct Ctx {
     pub json: bool,
     pub vault: vault::Vault,
     pub cfg: config::Config,
     pub lattice_url: String,
+    /// `--lattice <url>` on the command line means the operator wants HTTP.
+    pub force_http: bool,
 }
 
 impl Ctx {
     pub fn client(&self) -> Result<Client> {
         Client::new(&self.lattice_url, self.cfg.lattice.timeout())
+    }
+
+    /// The read path. Embedded by default (D-V02-BACKEND); HTTP only when the
+    /// operator asked for it in config or passed `--lattice`.
+    pub fn backend(&self) -> Result<Backend> {
+        if self.cfg.lattice.is_embedded() && !self.force_http {
+            let engine = lapis_lattice::Engine::open(&self.vault.root).map_err(|e| match e {
+                lapis_lattice::Error::Usage(m) => LapisError::Usage(m),
+                lapis_lattice::Error::Io(io) => LapisError::from(io),
+                lapis_lattice::Error::Sqlite(s) => LapisError::LatticeDown(format!("index: {s}")),
+            })?;
+            Ok(Backend::Embedded(std::sync::Arc::new(std::sync::Mutex::new(engine))))
+        } else {
+            Ok(Backend::Http(self.client()?))
+        }
     }
     pub fn inbox(&self) -> Result<String> {
         Ok(overlay::load(&self.vault.root)?.0.buckets.inbox)
@@ -44,10 +62,13 @@ pub struct OverlayInfo {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LatticeInfo {
+    /// `embedded` or `http` — which read path answered.
+    pub mode: &'static str,
+    /// sqlite file when embedded, base URL when http.
     pub url: String,
     pub reachable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub health: Option<lattice::Health>,
+    pub health: Option<crate::backend::Health>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -56,18 +77,13 @@ pub struct LatticeInfo {
 /// after printing, and MCP can report `reachable: false` without failing.
 pub async fn vault_info(ctx: &Ctx) -> Result<(VaultInfo, Option<crate::error::LapisError>)> {
     let (ov, ov_src) = overlay::load(&ctx.vault.root)?;
-    let client = ctx.client()?;
-    let (lattice, err) = match client.health().await {
-        Ok(h) => {
-            (LatticeInfo { url: client.base().into(), reachable: true, health: Some(h), error: None }, None)
-        }
+    let backend = ctx.backend()?;
+    let source = backend.source();
+    let mode = backend.mode();
+    let (lattice, err) = match backend.health().await {
+        Ok(h) => (LatticeInfo { mode, url: source, reachable: true, health: Some(h), error: None }, None),
         Err(e) => (
-            LatticeInfo {
-                url: client.base().into(),
-                reachable: false,
-                health: None,
-                error: Some(e.to_string()),
-            },
+            LatticeInfo { mode, url: source, reachable: false, health: None, error: Some(e.to_string()) },
             Some(e),
         ),
     };
@@ -99,6 +115,9 @@ pub struct ListRow {
     pub tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<u64>,
+    /// Content fingerprint (embedded backend only), for `--if-hash` planning.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
 }
 
 impl From<Document> for ListRow {
@@ -115,6 +134,7 @@ impl From<Document> for ListRow {
             priority: d.priority,
             tags: d.tags,
             updated_at: d.mtime.map(|m| (m * 1000.0) as u64),
+            hash: d.hash,
             path: d.path,
         }
     }
@@ -134,7 +154,7 @@ pub fn clean_prefix(prefix: Option<&str>) -> Result<Option<String>> {
 
 pub async fn list(ctx: &Ctx, mut params: ListParams) -> Result<Vec<ListRow>> {
     params.prefix = clean_prefix(params.prefix.as_deref())?;
-    Ok(ctx.client()?.documents(&params).await?.into_iter().map(ListRow::from).collect())
+    Ok(ctx.backend()?.documents(&params).await?.into_iter().map(ListRow::from).collect())
 }
 
 #[derive(Serialize)]
@@ -148,14 +168,15 @@ pub struct WriteReport {
     pub reindex_error: Option<String>,
 }
 
-/// Kick the index after a successful write. The file is already the source
-/// of truth on disk, so a failed kick is reported, not fatal; nightly
-/// reconcile catches it.
+/// Index the path after a successful write. Embedded does it in-process, so a
+/// note is searchable the moment it is written; HTTP kicks serve.py. The file
+/// is already the source of truth on disk either way, so a failed index is
+/// reported, not fatal.
 pub async fn kick(ctx: &Ctx, written: write::Written, no_reindex: bool) -> Result<WriteReport> {
     let (reindex, reindex_error) = if no_reindex || written.dry_run {
         (None, None)
     } else {
-        match ctx.client()?.reindex(&written.path).await {
+        match ctx.backend()?.reindex(&written.path).await {
             Ok(r) => (Some(r), None),
             Err(e) => (None, Some(e.to_string())),
         }
@@ -184,7 +205,7 @@ pub async fn toggle_task_with(
     let (reindex, reindex_error) = if no_reindex || guard.dry_run {
         (None, None)
     } else {
-        match ctx.client()?.reindex(&task.source_path).await {
+        match ctx.backend()?.reindex(&task.source_path).await {
             Ok(r) => (Some(r), None),
             Err(e) => (None, Some(e.to_string())),
         }
@@ -212,7 +233,7 @@ pub async fn periodic(
     let (reindex, reindex_error) = if no_reindex || !d.created {
         (None, None)
     } else {
-        match ctx.client()?.reindex(&d.path).await {
+        match ctx.backend()?.reindex(&d.path).await {
             Ok(r) => (Some(r), None),
             Err(e) => (None, Some(e.to_string())),
         }
@@ -242,7 +263,7 @@ pub async fn restore(
     let (reindex, err) = if no_reindex {
         (None, None)
     } else {
-        match ctx.client()?.reindex(&t.path).await {
+        match ctx.backend()?.reindex(&t.path).await {
             Ok(r) => (Some(r), None),
             Err(e) => (None, Some(e.to_string())),
         }
