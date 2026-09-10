@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fail if a public clone still leaks operator topology.
 # Exception: docs/internal-history.md (not linked from README).
-# "Hedronite" is allowed only in CREDITS.md.
+# "Hedronite" is allowed in CREDITS.md and any LICENSE file.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -25,7 +25,7 @@ pats = [
 ]
 skip_dirs = {".git", "target", "testdata"}
 skip_files = {"docs/internal-history.md", "scripts/scrub-gate.sh"}
-allow_hedronite = {"CREDITS.md", "LICENSE"}
+allow_hedronite = {"CREDITS.md"}
 hits = []
 for dirpath, dirs, fnames in os.walk("."):
     dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
@@ -38,7 +38,9 @@ for dirpath, dirs, fnames in os.walk("."):
         except Exception:
             continue
         for pat in pats:
-            if pat == r"Hedronite" and rel in allow_hedronite:
+            if pat == r"Hedronite" and (
+                rel in allow_hedronite or os.path.basename(rel) == "LICENSE"
+            ):
                 continue
             for i, line in enumerate(text.splitlines(), 1):
                 if re.search(pat, line):
