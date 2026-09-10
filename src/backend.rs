@@ -85,10 +85,15 @@ impl Backend {
         match self {
             Backend::Http(c) => c.search(p).await,
             Backend::Embedded(e) => {
-                let mode = match p.mode {
-                    Mode::Bm25 => lapis_lattice::Mode::Bm25,
-                    Mode::Vector => lapis_lattice::Mode::Vector,
-                    Mode::Hybrid => lapis_lattice::Mode::Hybrid,
+                let mode = if p.embedder.as_deref() == Some("none") {
+                    // BM25 only: do not invoke the stored embedder (no Ollama TCP).
+                    lapis_lattice::Mode::Bm25
+                } else {
+                    match p.mode {
+                        Mode::Bm25 => lapis_lattice::Mode::Bm25,
+                        Mode::Vector => lapis_lattice::Mode::Vector,
+                        Mode::Hybrid => lapis_lattice::Mode::Hybrid,
+                    }
                 };
                 let q = lapis_lattice::SearchParams {
                     query: p.query.clone(),

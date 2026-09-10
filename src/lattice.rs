@@ -71,6 +71,8 @@ pub struct SearchParams {
     pub per_doc: bool,
     pub mmr: bool,
     pub include_archives: bool,
+    /// `none` skips the vector arm for this query (no Ollama connect).
+    pub embedder: Option<String>,
 }
 
 /// One raw chunk row from `/search`. Field names are serve.py's.
@@ -465,8 +467,9 @@ impl Client {
             return Err(LapisError::Usage("search requires a query".into()));
         }
         let top_k = p.top_k.clamp(1, 50);
+        let mode_wire = if p.embedder.as_deref() == Some("none") { Mode::Bm25.wire() } else { p.mode.wire() };
         let mut query: Vec<(&str, String)> =
-            vec![("q", q.to_string()), ("top_k", top_k.to_string()), ("mode", p.mode.wire().to_string())];
+            vec![("q", q.to_string()), ("top_k", top_k.to_string()), ("mode", mode_wire.to_string())];
         if let Some(d) = &p.domain {
             query.push(("domain", d.clone()));
         }

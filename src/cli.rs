@@ -418,6 +418,12 @@ pub struct SearchArgs {
     /// Include `_archives/` and `*.DRAFT-*` documents.
     #[arg(long)]
     pub include_archives: bool,
+
+    /// Override the vault embedder for this query. `none` = BM25 only: no vector
+    /// arm and no connect to Ollama. `auto`/`ollama`/`onnx` use the index as stored
+    /// (`auto` is resolved at open, not per search).
+    #[arg(long, value_name = "PROVIDER", value_parser = ["none", "auto", "ollama", "onnx"])]
+    pub embedder: Option<String>,
 }
 
 impl SearchArgs {
@@ -746,6 +752,25 @@ mod tests {
             panic!()
         };
         assert_eq!((t.depth, t.max_nodes), (2, 60));
+    }
+
+    #[test]
+    fn search_embedder_none_parses() {
+        let Command::Search(s) =
+            Cli::try_parse_from(["lapis", "search", "welcome", "--embedder", "none"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert_eq!(s.embedder.as_deref(), Some("none"));
+        assert!(Cli::try_parse_from(["lapis", "search", "welcome", "--embedder", "bogus"]).is_err());
+        let Command::Search(s) =
+            Cli::try_parse_from(["lapis", "--json", "search", "welcome", "--embedder", "none"])
+                .unwrap()
+                .command()
+        else {
+            panic!()
+        };
+        assert_eq!(s.embedder.as_deref(), Some("none"));
     }
 
     /// N8 / N11 / N12 / N13: new flags parse and defaults hold.

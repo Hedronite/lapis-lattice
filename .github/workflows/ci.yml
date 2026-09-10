@@ -45,7 +45,7 @@ jobs:
         run: |
           tmp=$(mktemp -d)
           ./target/release/lapis init "$tmp"
-          ./target/release/lapis --vault "$tmp" --json search welcome | grep -q '"ok": true'
+          ./target/release/lapis --vault "$tmp" --json search welcome --embedder none | grep -q '"ok": true'
           ./target/release/lapis --vault "$tmp" --json list | grep -q '"hash"'
           ./target/release/lapis --vault "$tmp" doctor
       - name: hop-2 is honest, not silently empty (B11)

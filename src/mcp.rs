@@ -300,6 +300,7 @@ pub fn search_params(
             per_doc: a.per_doc.unwrap_or(default_per_doc),
             mmr: false,
             include_archives: false,
+            embedder: None,
         },
         limit,
         offset,
@@ -462,6 +463,7 @@ impl LapisServer {
             per_doc: true,
             mmr: false,
             include_archives: false,
+            embedder: None,
         };
         let r = self.ctx.client().map_err(fail)?.search(&p).await.map_err(fail)?;
         let max = a.snippet_chars.unwrap_or(600);
