@@ -241,10 +241,20 @@ pub fn group_for(n: &Node, groups: &[Group]) -> Option<GroupColour> {
 /// does not hand out text metrics before layout, so the box is estimated; it is
 /// deliberately generous, because a label that claims too much space costs a
 /// neighbour's label, while one that claims too little costs an overlap.
-pub const LABEL_CHAR_PX: f32 = 7.0;
-pub const LABEL_HEIGHT_PX: f32 = 13.0;
-/// Padding added around a label box before overlap testing.
-pub const LABEL_PAD_PX: f32 = 3.0;
+///
+/// The estimate does not have to be exact, because the window draws each label
+/// inside a box of exactly [`label_width_px`] by [`LABEL_HEIGHT_PX`] and clips
+/// to it. The reservation is therefore the truth about how much room a label
+/// takes, not a guess about it.
+pub const LABEL_CHAR_PX: f32 = 8.0;
+/// Height of the drawn label box. The window sets the text's line height to
+/// this, because gpui's default line box is over two ems tall and a label
+/// reserving thirteen pixels while drawing twenty-six is how labels end up
+/// stacked on each other.
+pub const LABEL_HEIGHT_PX: f32 = 15.0;
+/// Clearance kept around every drawn label. Two labels are never merely
+/// touching; they are always this far apart.
+pub const LABEL_PAD_PX: f32 = 4.0;
 /// Below this zoom nothing is labelled: the text would be unreadable and the
 /// board would be a wall of grey.
 pub const LABEL_MIN_ZOOM: f32 = 0.12;
@@ -264,13 +274,25 @@ pub fn label_stem(text: &str) -> String {
     format!("{cut}…")
 }
 
-fn label_box(text: &str, at: [f32; 2]) -> [f32; 4] {
-    let w = (text.chars().count() as f32 * LABEL_CHAR_PX).max(LABEL_CHAR_PX) + LABEL_PAD_PX * 2.0;
-    let h = LABEL_HEIGHT_PX + LABEL_PAD_PX;
-    [at[0] - w / 2.0, at[1], at[0] + w / 2.0, at[1] + h]
+/// Width of the box the window draws this label in. The window uses the same
+/// number, so what is reserved and what is painted are the same rectangle.
+pub fn label_width_px(text: &str) -> f32 {
+    (text.chars().count() as f32 * LABEL_CHAR_PX).max(LABEL_CHAR_PX)
 }
 
-fn overlaps(a: &[f32; 4], b: &[f32; 4]) -> bool {
+/// The space a label claims: the drawn box plus clearance on every side.
+pub fn label_box(text: &str, at: [f32; 2]) -> [f32; 4] {
+    let w = label_width_px(text) + LABEL_PAD_PX * 2.0;
+    [at[0] - w / 2.0, at[1] - LABEL_PAD_PX, at[0] + w / 2.0, at[1] + LABEL_HEIGHT_PX + LABEL_PAD_PX]
+}
+
+/// The rectangle the window actually paints, strictly inside [`label_box`].
+pub fn label_drawn(text: &str, at: [f32; 2]) -> [f32; 4] {
+    let w = label_width_px(text);
+    [at[0] - w / 2.0, at[1], at[0] + w / 2.0, at[1] + LABEL_HEIGHT_PX]
+}
+
+pub fn overlaps(a: &[f32; 4], b: &[f32; 4]) -> bool {
     a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
 }
 
@@ -762,26 +784,78 @@ mod tests {
         assert!(long.ends_with('…'), "an over-long name is elided, not wrapped");
     }
 
+    /// Every rectangle the window paints, given a camera.
+    fn drawn_label_boxes(s: &Scene, cam: &Camera) -> Vec<[f32; 4]> {
+        paint(s, cam, BOARD, &Highlight::default(), &|_| false, &[])
+            .iter()
+            .filter_map(|p| match p {
+                Prim::Label { x, y, text, .. } => Some(label_drawn(text, [*x, *y])),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn gap(a: &[f32; 4], b: &[f32; 4]) -> f32 {
+        let dx = (b[0] - a[2]).max(a[0] - b[2]);
+        let dy = (b[1] - a[3]).max(a[1] - b[3]);
+        dx.max(dy)
+    }
+
     #[test]
     fn no_two_labels_overlap_at_rest() {
         let s = crowded(400);
         let mut cam = Camera::default();
         cam.fit(&s, BOARD);
-        let prims = paint(&s, &cam, BOARD, &Highlight::default(), &|_| false, &[]);
-
-        let boxes: Vec<[f32; 4]> = prims
-            .iter()
-            .filter_map(|p| match p {
-                Prim::Label { x, y, text, .. } => Some(label_box(text, [*x, *y])),
-                _ => None,
-            })
-            .collect();
+        let boxes = drawn_label_boxes(&s, &cam);
         assert!(!boxes.is_empty(), "some labels survive at rest zoom");
         assert!(boxes.len() < s.nodes.len(), "a crowded board drops the ones it cannot fit");
         for (i, a) in boxes.iter().enumerate() {
             for b in &boxes[i + 1..] {
                 assert!(!overlaps(a, b), "labels {a:?} and {b:?} overlap at rest");
+                assert!(
+                    gap(a, b) >= LABEL_PAD_PX - 1e-3,
+                    "labels {a:?} and {b:?} are only {} apart",
+                    gap(a, b)
+                );
             }
+        }
+    }
+
+    /// The lathe shot that failed was a small vault at 238%, not the fit zoom,
+    /// so the guarantee is checked across the range a reader actually uses.
+    #[test]
+    fn no_two_labels_overlap_at_any_zoom() {
+        for n in [40usize, 68, 400] {
+            let s = crowded(n);
+            let mut base = Camera::default();
+            base.fit(&s, BOARD);
+            for factor in [0.5f32, 1.0, 1.7, 2.38, 4.0, 8.0] {
+                let mut cam = base;
+                cam.zoom_about(factor, [BOARD[0] / 2.0, BOARD[1] / 2.0], BOARD);
+                let boxes = drawn_label_boxes(&s, &cam);
+                for (i, a) in boxes.iter().enumerate() {
+                    for b in &boxes[i + 1..] {
+                        assert!(!overlaps(a, b), "{n} nodes at zoom {:.2}: {a:?} overlaps {b:?}", cam.zoom);
+                    }
+                }
+            }
+        }
+    }
+
+    /// What the window paints must sit inside what the placer reserved, or the
+    /// no-overlap guarantee is about rectangles nobody draws.
+    #[test]
+    fn the_drawn_label_is_inside_the_reserved_one() {
+        for text in ["a", "Beacon-41", "Cinder-22", "a-name-of-some-length"] {
+            let at = [200.0f32, 100.0];
+            let (res, drawn) = (label_box(text, at), label_drawn(text, at));
+            assert!(res[0] < drawn[0] && res[1] < drawn[1], "{text}: reservation starts earlier");
+            assert!(res[2] > drawn[2] && res[3] > drawn[3], "{text}: reservation ends later");
+            assert!((drawn[3] - drawn[1] - LABEL_HEIGHT_PX).abs() < 1e-4, "{text}: drawn height is pinned");
+            assert!(
+                (drawn[2] - drawn[0] - label_width_px(text)).abs() < 1e-4,
+                "{text}: drawn width is the shared estimate"
+            );
         }
     }
 

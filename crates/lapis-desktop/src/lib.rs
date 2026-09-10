@@ -116,6 +116,8 @@ mod window {
     /// constants, the lines would not meet the discs.
     const BOARD_W: f32 = 760.0;
     const BOARD_H: f32 = 520.0;
+    /// Drawn height of a label box, shared with the placer that reserves it.
+    const LABEL_H: f32 = super::view::LABEL_HEIGHT_PX;
 
     /// `LAPIS_GRAPH_DEBUG=1` puts a frame-time overlay on the board. It is the
     /// only way to answer "is this 60 fps" with a number instead of a feeling.
@@ -677,20 +679,35 @@ mod window {
 
             // Labels stay elements so they use the theme's text stack; they are
             // placed from the same paint list as the discs, so they cannot drift.
+            // Each label is drawn in exactly the rectangle the placer reserved
+            // for it: same width, same height, clipped, with the line height
+            // pinned. gpui's default line box is over two ems tall, so a label
+            // that reserved thirteen pixels and drew twenty-six is how they
+            // ended up stacked. Nothing here is free to grow past its box.
             for l in labels {
                 let Prim::Label { x, y, text, alpha } = l else { continue };
-                if x < -80.0 || y < -20.0 || x > BOARD_W + 80.0 || y > BOARD_H + 20.0 {
+                let w = super::view::label_width_px(&text);
+                if x + w < 0.0 || y + LABEL_H < 0.0 || x - w > BOARD_W || y > BOARD_H {
                     continue;
                 }
                 board = board.child(
                     div()
                         .absolute()
-                        .left(px(x - 40.0))
+                        .left(px(x - w / 2.0))
                         .top(px(y))
-                        .w(px(80.0))
+                        .w(px(w))
+                        .h(px(LABEL_H))
+                        .overflow_hidden()
                         .flex()
                         .justify_center()
-                        .child(div().text_xs().text_color(with_alpha(label_c, alpha)).child(text)),
+                        .child(
+                            div()
+                                .text_xs()
+                                .line_height(px(LABEL_H))
+                                .whitespace_nowrap()
+                                .text_color(with_alpha(label_c, alpha))
+                                .child(text),
+                        ),
                 );
             }
 
@@ -927,6 +944,10 @@ mod tests {
         assert!(src.contains("camera.fit"), "reset frames the whole graph");
         assert!(src.contains("theme.background"), "the void is the Omarchy background");
         assert!(src.contains("f-theme"), "the live theme name is on screen");
+        // A label is drawn in exactly the box the placer reserved for it.
+        assert!(src.contains("view::label_width_px"), "the drawn width is the reserved width");
+        assert!(src.contains("line_height(px(LABEL_H))"), "the line box is pinned, not gpui's default");
+        assert!(src.contains("overflow_hidden"), "a label cannot grow past its box");
         // Every colour on the board comes from the live Omarchy palette, so a
         // theme swap restyles the graph with no restart. The only literal is a
         // group's opt-in hex.
