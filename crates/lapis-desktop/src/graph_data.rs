@@ -66,6 +66,7 @@ pub fn layout(snap: &lapis_lattice::GraphSnapshot, seed: &str, ticks: usize) -> 
             depth: depth[i],
             x: xy[i][0],
             y: xy[i][1],
+            degree: n.degree,
             dangling: n.dangling,
             is_seed: n.id == seed,
         })
@@ -159,7 +160,7 @@ pub fn peek(vault: &Path, rel: &str, max_chars: usize) -> Result<String, String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::draw;
+    use crate::view::{Camera, Highlight, Prim, paint};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -177,6 +178,16 @@ mod tests {
         let mut e = lapis_lattice::Engine::open(&d).unwrap();
         e.reindex().unwrap();
         d
+    }
+
+    #[test]
+    fn snapshot_degree_reaches_the_canvas() {
+        let d = vault();
+        let s = global_scene(&d, "Welcome.md", SETTLE_TICKS).unwrap();
+        let by = |id: &str| s.nodes.iter().find(|n| n.id == id).unwrap().degree;
+        assert_eq!(by("Welcome.md"), 2);
+        assert_eq!(by("Orphan.md"), 0);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -230,11 +241,11 @@ mod tests {
 
         let hop2 = scene_for(&d, "Welcome.md", 2, false).unwrap();
         assert!(hop2.nodes.iter().any(|n| n.id == "notes/Beta.md" && n.depth == 2));
-        let prims = draw(&hop2);
-        let discs = prims.iter().filter(|p| matches!(p, crate::scene::Prim::Disc { .. })).count();
-        let lines = prims.iter().filter(|p| matches!(p, crate::scene::Prim::Line { .. })).count();
+        let prims = paint(&hop2, &Camera::default(), [800.0, 600.0], &Highlight::default(), &|_| false);
+        let discs = prims.iter().filter(|p| matches!(p, Prim::Disc { .. })).count();
+        let strokes = prims.iter().filter(|p| matches!(p, Prim::Stroke { .. })).count();
         assert_eq!(discs, hop2.nodes.len());
-        assert_eq!(lines, hop2.edges.len());
+        assert!(strokes > 0 && strokes <= hop2.edges.len(), "rim-trimmed strokes, no dotted quads");
 
         let resolved = scene_for(&d, "Welcome.md", 2, true).unwrap();
         assert!(!resolved.nodes.iter().any(|n| n.dangling));

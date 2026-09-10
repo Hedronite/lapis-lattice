@@ -1,9 +1,10 @@
-//! Graph canvas data layer: `/graph/ego` JSON → a scene the renderer can draw.
+//! Graph canvas data layer: nodes, edges and world positions.
 //!
-//! Layout is deterministic and dependency-free: the seed at the origin, depth-1
-//! nodes on a ring, depth-2 nodes on a wider ring clustered near their `via`
-//! parent. Positions are in canvas units (the seed ring radius is 1.0), so the
-//! view scales them. `draw()` is the paint list the gpui-omarchy window consumes.
+//! A [`Scene`] is what the window draws. Two things build one: the force sim on
+//! a whole-vault snapshot ([`crate::graph_data::layout`], the default), and the
+//! `/graph/ego` ring walk below, which is the debug view. Positions are in
+//! canvas units (the ego ring radius is 1.0); [`crate::view`] owns the camera
+//! that turns them into pixels and the paint list itself.
 
 use std::collections::BTreeMap;
 
@@ -55,6 +56,8 @@ pub struct Node {
     pub depth: u32,
     pub x: f32,
     pub y: f32,
+    /// In + out wikilinks across the whole vault. The disc radius reads it.
+    pub degree: u32,
     pub dangling: bool,
     pub is_seed: bool,
 }
@@ -135,6 +138,34 @@ impl Scene {
             .collect();
         Scene { nodes, edges, truncated: self.truncated }
     }
+
+    /// Count each node's edges in this scene. The snapshot already knows a
+    /// vault-wide degree; the ego walk does not, so it counts what it has.
+    pub fn recompute_degrees(&mut self) {
+        for n in self.nodes.iter_mut() {
+            n.degree = 0;
+        }
+        for e in &self.edges {
+            if let Some(n) = self.nodes.get_mut(e.from) {
+                n.degree += 1;
+            }
+            if let Some(n) = self.nodes.get_mut(e.to) {
+                n.degree += 1;
+            }
+        }
+    }
+
+    /// Move nodes the operator has dropped somewhere to where they were
+    /// dropped. Pins survive a rebuild, which is what "pinned until unpin"
+    /// means when the scene is rebuilt on every filter change.
+    pub fn apply_pins(&mut self, pins: &BTreeMap<String, [f32; 2]>) {
+        for n in self.nodes.iter_mut() {
+            if let Some(p) = pins.get(&n.id) {
+                n.x = p[0];
+                n.y = p[1];
+            }
+        }
+    }
 }
 
 /// Build a scene from ego JSON. Duplicate targets collapse to one node; edges
@@ -148,6 +179,7 @@ pub fn build(ego: &Ego) -> Scene {
         depth: 0,
         x: 0.0,
         y: 0.0,
+        degree: 0,
         dangling: false,
         is_seed: true,
     });
@@ -176,6 +208,7 @@ pub fn build(ego: &Ego) -> Scene {
                 depth: 1,
                 x: a.cos(),
                 y: a.sin(),
+                degree: 0,
                 dangling: !r.resolved,
                 is_seed: false,
             });
@@ -205,6 +238,7 @@ pub fn build(ego: &Ego) -> Scene {
                     depth: 2,
                     x: 2.0 * a.cos(),
                     y: 2.0 * a.sin(),
+                    degree: 0,
                     dangling: !r.resolved,
                     is_seed: false,
                 });
@@ -212,6 +246,7 @@ pub fn build(ego: &Ego) -> Scene {
             scene.edges.push(Edge { from: pi, to: index[&id], dir: r.dir.clone() });
         }
     }
+    scene.recompute_degrees();
     scene
 }
 
@@ -221,34 +256,6 @@ pub fn from_json(json: &str) -> Result<Scene, serde_json::Error> {
     let inner = if v.get("rows").is_some() { v } else { v.get("data").cloned().unwrap_or(v) };
     let ego: Ego = serde_json::from_value(inner)?;
     Ok(build(&ego))
-}
-
-/// Draw primitives the window paints: straight `Line`s (dashed when dangling),
-/// `Disc`s, and stem `Label`s.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub enum Prim {
-    Line { x0: f32, y0: f32, x1: f32, y1: f32, dashed: bool },
-    Disc { x: f32, y: f32, r: f32, seed: bool, dangling: bool },
-    Label { x: f32, y: f32, text: String },
-}
-
-pub fn draw(scene: &Scene) -> Vec<Prim> {
-    let mut out = Vec::with_capacity(scene.edges.len() + scene.nodes.len() * 2);
-    for e in &scene.edges {
-        let (a, b) = (&scene.nodes[e.from], &scene.nodes[e.to]);
-        out.push(Prim::Line { x0: a.x, y0: a.y, x1: b.x, y1: b.y, dashed: b.dangling || a.dangling });
-    }
-    for n in &scene.nodes {
-        out.push(Prim::Disc {
-            x: n.x,
-            y: n.y,
-            r: if n.is_seed { 0.12 } else { 0.07 },
-            seed: n.is_seed,
-            dangling: n.dangling,
-        });
-        out.push(Prim::Label { x: n.x, y: n.y + 0.14, text: n.label.clone() });
-    }
-    out
 }
 
 #[cfg(test)]
@@ -289,16 +296,7 @@ mod tests {
             assert!(((n.x * n.x + n.y * n.y).sqrt() - 2.0).abs() < 1e-4, "depth-2 on radius 2");
         }
         assert!(s.edges.iter().any(|e| e.dir == "in"));
-        let prims = draw(&s);
-        let discs = prims.iter().filter(|p| matches!(p, Prim::Disc { .. })).count();
-        let lines = prims.iter().filter(|p| matches!(p, Prim::Line { .. })).count();
-        let labels = prims.iter().filter(|p| matches!(p, Prim::Label { .. })).count();
-        assert_eq!(discs, s.nodes.len(), "one Disc per node");
-        assert_eq!(lines, s.edges.len(), "one Line per edge");
-        assert_eq!(labels, s.nodes.len(), "one Label per node");
-        assert_eq!(prims.len(), 5 + 6 * 2);
-        assert!(prims.iter().any(|p| matches!(p, Prim::Line { dashed: true, .. })));
-        assert!(prims.iter().any(|p| matches!(p, Prim::Disc { seed: true, .. })));
+        assert_eq!(seed.degree, 3, "the ego walk counts the edges it has");
         // Lapis envelope wrapping is accepted too
         let wrapped = format!(r#"{{"ok":true,"data":{FIXTURE},"error":null,"meta":{{}}}}"#);
         assert_eq!(from_json(&wrapped).unwrap().nodes.len(), 6);
@@ -311,12 +309,23 @@ mod tests {
         let no_dang = s.filtered(false, None);
         assert_eq!(no_dang.nodes.len(), 5, "seed + 4 resolved; dangling dropped");
         assert!(!no_dang.nodes.iter().any(|n| n.dangling));
-        assert_eq!(draw(&no_dang).iter().filter(|p| matches!(p, Prim::Line { dashed: true, .. })).count(), 0);
 
         let ideas = s.filtered(true, Some("ideas"));
         assert!(ideas.seed().is_some(), "seed stays under a domain filter");
         assert!(ideas.nodes.iter().all(|n| n.is_seed || n.domain() == Some("ideas")));
         assert_eq!(ideas.nodes.iter().filter(|n| n.depth == 2).count(), 2);
+    }
+
+    #[test]
+    fn pins_survive_a_rebuild() {
+        let mut s = from_json(FIXTURE).unwrap();
+        let pins = BTreeMap::from([("briefs/b.md".to_string(), [1.25f32, -0.5])]);
+        s.apply_pins(&pins);
+        let pinned = s.nodes.iter().find(|n| n.id == "briefs/b.md").unwrap();
+        assert_eq!((pinned.x, pinned.y), (1.25, -0.5));
+        let after = s.filtered(true, None);
+        let still = after.nodes.iter().find(|n| n.id == "briefs/b.md").unwrap();
+        assert_eq!((still.x, still.y), (1.25, -0.5), "a filter does not unpin");
     }
 
     #[test]

@@ -9,6 +9,8 @@
 //! * [`sim`]: the 2D force tick (center, repel, link, distance) that lays out
 //!   the whole-vault snapshot. The default canvas positions come from here;
 //!   the hop rings in [`scene::build`] are a debug view.
+//! * [`view`]: the camera (pan, zoom), hit testing, hover neighbourhoods and
+//!   the paint list of rim-terminated strokes and discs.
 //! * [`gitnexus`]: optional sidecar client. No vendored code; no-op when there
 //!   is no `.gitnexus` in the vault.
 //! * [`run`]: opens the GPUI window when built with the `gpui` feature, else
@@ -19,6 +21,7 @@ pub mod graph_data;
 pub mod html;
 pub mod scene;
 pub mod sim;
+pub mod view;
 
 use std::path::PathBuf;
 
@@ -84,29 +87,36 @@ pub fn run(opts: Options) -> Result<(), DesktopError> {
 
 #[cfg(feature = "gpui")]
 mod window {
+    use std::cell::Cell;
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
+    use std::rc::Rc;
 
     use gpui_kit::{
-        AppContext, Bounds, Context, Corners, Edges, Hsla, InteractiveElement, IntoElement, PaintQuad,
-        ParentElement, Pixels, Point, Render, Size, StatefulInteractiveElement, Styled, Window,
-        WindowOptions, canvas, div, px,
+        App, AppContext, Bounds, Context, Corners, Edges, FocusHandle, Hsla, InteractiveElement, IntoElement,
+        KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, ParentElement,
+        PathBuilder, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, Size, StatefulInteractiveElement,
+        Styled, Window, WindowOptions, canvas, div, point, px,
     };
     use gpui_omarchy::{ActiveTheme, panel};
 
-    use super::scene::{Prim, Scene};
+    use super::scene::Scene;
+    use super::view::{CLICK_SLOP_PX, Camera, Prim, ZOOM_STEP, highlight, hit_test, paint};
     use super::{DesktopError, Options, graph_data};
 
-    // The board is a fixed size so the painted edges and the positioned nodes
-    // can share one mapping. If the canvas mapped by its live bounds while the
-    // nodes used constants, the lines would not meet the discs.
-    const BOARD_W: f32 = 680.0;
-    const BOARD_H: f32 = 460.0;
-    /// Scene units (roughly -2..2) to pixels.
-    const UNIT: f32 = 120.0;
+    /// The board is a fixed size so the painted strokes and the camera share one
+    /// mapping. If the canvas mapped by its live bounds while the labels used
+    /// constants, the lines would not meet the discs.
+    const BOARD_W: f32 = 760.0;
+    const BOARD_H: f32 = 520.0;
 
-    /// Scene coordinates to an offset inside the board.
-    fn map(x: f32, y: f32) -> (f32, f32) {
-        (BOARD_W / 2.0 + x * UNIT, BOARD_H / 2.0 + y * UNIT)
+    /// A press in flight: which node it started on (none = empty space, so it
+    /// pans) and whether it has travelled far enough to be a drag.
+    struct Press {
+        node: Option<String>,
+        from: [f32; 2],
+        last: [f32; 2],
+        moved: bool,
     }
 
     struct Root {
@@ -127,6 +137,16 @@ mod window {
         /// False is the shipped default: the whole vault at force-sim positions.
         /// True brings back the v0.2 hop rings as a debug overlay.
         rings: bool,
+        camera: Camera,
+        hover: Option<String>,
+        press: Option<Press>,
+        /// Where the operator dropped a node. Survives filter and layout
+        /// rebuilds; cleared per node with a right-click, or all at once.
+        pins: BTreeMap<String, [f32; 2]>,
+        /// The board's top-left in window coordinates, written by the canvas as
+        /// it paints and read by the mouse handlers. Both run on the UI thread.
+        origin: Rc<Cell<(f32, f32)>>,
+        focus: FocusHandle,
     }
 
     impl Root {
@@ -139,12 +159,141 @@ mod window {
                 graph_data::global_scene(&self.vault, &self.seed, graph_data::SETTLE_TICKS)
             };
             match built {
-                Ok(s) => {
+                Ok(mut s) => {
+                    s.apply_pins(&self.pins);
                     self.scene = s;
                     self.error = None;
                 }
                 Err(e) => self.error = Some(e),
             }
+        }
+
+        fn board(&self) -> [f32; 2] {
+            [BOARD_W, BOARD_H]
+        }
+
+        /// Window coordinates to board-local pixels.
+        fn local(&self, at: Point<Pixels>) -> [f32; 2] {
+            let (ox, oy) = self.origin.get();
+            [f32::from(at.x) - ox, f32::from(at.y) - oy]
+        }
+
+        /// The scene as drawn: filters applied, pins honoured.
+        fn visible(&self) -> Scene {
+            self.scene.filtered(self.show_dangling, self.domain.as_deref())
+        }
+
+        fn open_note(&mut self, id: &str) {
+            self.selected = Some(id.to_string());
+            self.peek = if id.starts_with("dangling:") {
+                Some(format!("{id} — this link resolves to nothing"))
+            } else {
+                Some(graph_data::peek(&self.vault, id, 600).unwrap_or_else(|e| e))
+            };
+        }
+
+        /// The node under a board-local point, honouring the visible filters.
+        fn node_at(&self, at: [f32; 2]) -> Option<String> {
+            let (dangling, domain) = (self.show_dangling, self.domain.clone());
+            hit_test(&self.scene, &self.camera, self.board(), at, &|n| n.passes(dangling, domain.as_deref()))
+                .map(|i| self.scene.nodes[i].id.clone())
+        }
+
+        fn on_down(&mut self, ev: &MouseDownEvent, cx: &mut Context<Self>) {
+            let at = self.local(ev.position);
+            let node = self.node_at(at);
+            if ev.button == MouseButton::Right {
+                // Right-click a pinned node releases it; the force layout is
+                // free to place it again on the next rebuild.
+                if let Some(id) = node
+                    && self.pins.remove(&id).is_some()
+                {
+                    self.reload();
+                    cx.notify();
+                }
+                return;
+            }
+            self.press = Some(Press { node, from: at, last: at, moved: false });
+        }
+
+        fn on_move(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
+            let at = self.local(ev.position);
+            let board = self.board();
+
+            if self.press.is_none() {
+                // No button down: this is hover.
+                let over = self.node_at(at);
+                if over != self.hover {
+                    self.hover = over;
+                    cx.notify();
+                }
+                return;
+            }
+            let Some(press) = self.press.as_mut() else { return };
+            let (dx, dy) = (at[0] - press.last[0], at[1] - press.last[1]);
+            let travelled = ((at[0] - press.from[0]).powi(2) + (at[1] - press.from[1]).powi(2)).sqrt();
+            if travelled > CLICK_SLOP_PX {
+                press.moved = true;
+            }
+            press.last = at;
+            if !press.moved {
+                return;
+            }
+            match press.node.clone() {
+                // Drag a node: it follows the cursor in world space and stays
+                // where it is dropped.
+                Some(id) => {
+                    let w = self.camera.to_world(at, board);
+                    self.pins.insert(id.clone(), w);
+                    if let Some(n) = self.scene.nodes.iter_mut().find(|n| n.id == id) {
+                        n.x = w[0];
+                        n.y = w[1];
+                    }
+                }
+                // Drag empty space: pan the camera. The layout does not move.
+                None => self.camera.pan_by(dx, dy),
+            }
+            cx.notify();
+        }
+
+        fn on_up(&mut self, _: &MouseUpEvent, cx: &mut Context<Self>) {
+            let Some(press) = self.press.take() else { return };
+            // A short press is still a click, even on a node you could have
+            // dragged.
+            if !press.moved
+                && let Some(id) = press.node
+            {
+                self.open_note(&id);
+            }
+            cx.notify();
+        }
+
+        fn on_wheel(&mut self, ev: &ScrollWheelEvent, cx: &mut Context<Self>) {
+            let lines = match ev.delta {
+                ScrollDelta::Lines(p) => p.y,
+                ScrollDelta::Pixels(p) => f32::from(p.y) / 40.0,
+            };
+            if lines.abs() < f32::EPSILON {
+                return;
+            }
+            let at = self.local(ev.position);
+            self.camera.zoom_about(ZOOM_STEP.powf(lines), at, self.board());
+            cx.notify();
+        }
+
+        fn on_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+            let board = self.board();
+            match ev.keystroke.key.as_str() {
+                "+" | "=" => self.camera.zoom_by(ZOOM_STEP, board),
+                "-" | "_" => self.camera.zoom_by(1.0 / ZOOM_STEP, board),
+                "0" => self.camera.reset(),
+                "left" => self.camera.pan_by(40.0, 0.0),
+                "right" => self.camera.pan_by(-40.0, 0.0),
+                "up" => self.camera.pan_by(0.0, 40.0),
+                "down" => self.camera.pan_by(0.0, -40.0),
+                _ => return,
+            }
+            cx.notify();
         }
     }
 
@@ -163,33 +312,68 @@ mod window {
         }
     }
 
+    fn with_alpha(mut c: Hsla, a: f32) -> Hsla {
+        c.a *= a;
+        c
+    }
+
     impl Render for Root {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = cx.omarchy();
-            let (edge, node, seed_c, dangling_c, label_c) =
+            let (edge_c, node_c, seed_c, dangling_c, label_c) =
                 (theme.border, theme.foreground, theme.accent, theme.danger, theme.secondary);
-            let visible = self.scene.filtered(self.show_dangling, self.domain.as_deref());
-            let prims = super::scene::draw(&visible);
-            let scene_nodes = visible.nodes.clone();
+            let seen = self.visible();
+            let focus = self.hover.as_deref().and_then(|id| seen.index_of(id));
+            let hi = highlight(&seen, focus);
+            let pins = self.pins.clone();
+            let prims = paint(&seen, &self.camera, self.board(), &hi, &move |id| pins.contains_key(id));
+            let labels: Vec<Prim> =
+                prims.iter().filter(|p| matches!(p, Prim::Label { .. })).cloned().collect();
+            let origin = self.origin.clone();
 
-            // Edges are painted: no element can draw a line at an arbitrary
-            // angle, so they are laid down as a run of dots along each segment —
-            // sparse for a dangling link, which is what "dashed" means here.
+            // Strokes are real hairlines built with PathBuilder and dashed by
+            // the tessellator: the v0.2 run-of-dots is gone.
             let painted = canvas(
                 move |_, _, _| {},
                 move |bounds, _, window, _| {
+                    origin.set((f32::from(bounds.origin.x), f32::from(bounds.origin.y)));
+                    let at = |x: f32, y: f32| point(bounds.origin.x + px(x), bounds.origin.y + px(y));
                     for p in &prims {
-                        if let Prim::Line { x0, y0, x1, y1, dashed } = p {
-                            let (ax, ay) = map(*x0, *y0);
-                            let (bx, by) = map(*x1, *y1);
-                            let a = Point { x: bounds.origin.x + px(ax), y: bounds.origin.y + px(ay) };
-                            let b = Point { x: bounds.origin.x + px(bx), y: bounds.origin.y + px(by) };
-                            let steps = if *dashed { 9 } else { 28 };
-                            for i in 0..=steps {
-                                let t = i as f32 / steps as f32;
-                                let at = Point { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
-                                window.paint_quad(dot(at, 1.2, edge));
+                        match p {
+                            Prim::Stroke { x0, y0, x1, y1, width, dashed, alpha } => {
+                                let mut b = PathBuilder::stroke(px(*width));
+                                if *dashed {
+                                    b = b.dash_array(&[
+                                        px(super::view::DASH_PX[0]),
+                                        px(super::view::DASH_PX[1]),
+                                    ]);
+                                }
+                                b.move_to(at(*x0, *y0));
+                                b.line_to(at(*x1, *y1));
+                                if let Ok(path) = b.build() {
+                                    window.paint_path(path, with_alpha(edge_c, *alpha));
+                                }
                             }
+                            Prim::Disc { x, y, r, seed, dangling, pinned, alpha } => {
+                                let colour = if *dangling {
+                                    dangling_c
+                                } else if *seed {
+                                    seed_c
+                                } else {
+                                    node_c
+                                };
+                                window.paint_quad(dot(at(*x, *y), *r, with_alpha(colour, *alpha)));
+                                if *pinned {
+                                    // A ring around a pinned disc, so a held
+                                    // node is legible without a tooltip.
+                                    window.paint_quad(dot(
+                                        at(*x, *y),
+                                        r + 3.0,
+                                        with_alpha(seed_c, *alpha * 0.35),
+                                    ));
+                                }
+                            }
+                            Prim::Label { .. } => {}
                         }
                     }
                 },
@@ -197,52 +381,39 @@ mod window {
             .absolute()
             .size_full();
 
-            let mut board = div().relative().w(px(BOARD_W)).h(px(BOARD_H)).child(painted);
+            let mut board = div()
+                .id("graph-board")
+                .track_focus(&self.focus)
+                .relative()
+                .w(px(BOARD_W))
+                .h(px(BOARD_H))
+                .overflow_hidden()
+                .bg(theme.background)
+                .child(painted)
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, ev, _, cx| this.on_down(ev, cx)))
+                .on_mouse_down(MouseButton::Right, cx.listener(|this, ev, _, cx| this.on_down(ev, cx)))
+                .on_mouse_move(cx.listener(|this, ev, _, cx| this.on_move(ev, cx)))
+                .on_mouse_up(MouseButton::Left, cx.listener(|this, ev, _, cx| this.on_up(ev, cx)))
+                .on_mouse_up_out(MouseButton::Left, cx.listener(|this, ev, _, cx| this.on_up(ev, cx)))
+                .on_scroll_wheel(cx.listener(|this, ev, _, cx| this.on_wheel(ev, cx)))
+                .on_key_down(cx.listener(|this, ev, _, cx| this.on_key(ev, cx)));
 
-            for n in scene_nodes {
-                let id = n.id.clone();
-                let label = n.label.clone();
-                let is_seed = n.is_seed;
-                let dangling = n.dangling;
-                let selected = self.selected.as_deref() == Some(id.as_str());
-                let r = if is_seed { 11.0 } else { 7.0 };
-                let colour = if dangling {
-                    dangling_c
-                } else if is_seed {
-                    seed_c
-                } else {
-                    node
-                };
-                // Nodes are elements rather than paint so they can carry a label
-                // and a click without hit-testing pixels by hand.
-                let mut knob = div()
-                    .id(gpui_kit::SharedString::from(id.clone()))
-                    .w(px(r * 2.0))
-                    .h(px(r * 2.0))
-                    .rounded_full()
-                    .bg(colour);
-                if selected {
-                    knob = knob.border_2().border_color(seed_c);
+            // Labels stay elements so they use the theme's text stack; they are
+            // placed from the same paint list as the discs, so they cannot drift.
+            for l in labels {
+                let Prim::Label { x, y, text, alpha } = l else { continue };
+                if x < -80.0 || y < -20.0 || x > BOARD_W + 80.0 || y > BOARD_H + 20.0 {
+                    continue;
                 }
-                let (mx, my) = map(n.x, n.y);
                 board = board.child(
                     div()
                         .absolute()
-                        .left(px(mx - r))
-                        .top(px(my - r))
+                        .left(px(x - 40.0))
+                        .top(px(y))
+                        .w(px(80.0))
                         .flex()
-                        .flex_col()
-                        .items_center()
-                        .child(knob.on_click(cx.listener(move |this, _, _, cx| {
-                            this.selected = Some(id.clone());
-                            this.peek = if id.starts_with("dangling:") {
-                                Some(format!("{id} — this link resolves to nothing"))
-                            } else {
-                                Some(graph_data::peek(&this.vault, &id, 600).unwrap_or_else(|e| e))
-                            };
-                            cx.notify();
-                        })))
-                        .child(div().text_xs().text_color(label_c).child(label)),
+                        .justify_center()
+                        .child(div().text_xs().text_color(with_alpha(label_c, alpha)).child(text)),
                 );
             }
 
@@ -250,6 +421,8 @@ mod window {
             let domain_label = format!("domain: {}", self.domain.clone().unwrap_or_else(|| "all".into()));
             let hop_label = format!("hop-{}", self.hops);
             let layout_label = format!("layout: {}", if self.rings { "rings (debug)" } else { "sim" });
+            let zoom_label = format!("zoom {:.0}%", self.camera.zoom * 100.0);
+            let pin_label = format!("unpin {}", self.pins.len());
             let controls = div()
                 .flex()
                 .gap_2()
@@ -286,6 +459,19 @@ mod window {
                         this.reload();
                         cx.notify();
                     }),
+                ))
+                .child(div().id("f-zoom").text_sm().text_color(label_c).child(zoom_label).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.camera.reset();
+                        cx.notify();
+                    }),
+                ))
+                .child(div().id("f-unpin").text_sm().text_color(label_c).child(pin_label).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.pins.clear();
+                        this.reload();
+                        cx.notify();
+                    }),
                 ));
 
             panel(self.title.as_str(), cx)
@@ -297,7 +483,7 @@ mod window {
                     (Some(e), _) => e.clone(),
                     (None, Some(p)) => p.clone(),
                     (None, None) => format!(
-                        "{}  ·  {} nodes, {} links  ·  {}",
+                        "{}  ·  {} nodes, {} links  ·  {}  ·  drag to pan, wheel or +/- to zoom",
                         self.seed,
                         self.scene.nodes.len(),
                         self.scene.edges.len(),
@@ -318,9 +504,11 @@ mod window {
             Ok(s) => (s, None),
             Err(e) => (Scene::default(), Some(e)),
         };
-        gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx| {
+        gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx: &mut App| {
             gpui_omarchy::init(cx);
-            let opened = cx.open_window(WindowOptions::default(), |_, cx| {
+            let focus = cx.focus_handle();
+            let opened = cx.open_window(WindowOptions::default(), |window, cx| {
+                window.focus(&focus, cx);
                 cx.new(|_| Root {
                     title: title.clone(),
                     vault: vault.clone(),
@@ -333,6 +521,12 @@ mod window {
                     domain: None,
                     hops,
                     rings: false,
+                    camera: Camera::default(),
+                    hover: None,
+                    press: None,
+                    pins: BTreeMap::new(),
+                    origin: Rc::new(Cell::new((0.0, 0.0))),
+                    focus: focus.clone(),
                 })
             });
             match opened {
@@ -370,10 +564,18 @@ mod tests {
     #[test]
     fn window_paints_shipped_draw_on_gpui_omarchy() {
         let src = include_str!("lib.rs");
-        assert!(src.contains("super::scene::draw"), "window consumes scene::draw");
+        assert!(src.contains("view::paint"), "window consumes the view paint list");
         assert!(src.contains("gpui_omarchy::init"), "window is gpui-omarchy, not Zed-gpui");
-        assert!(src.contains("Prim::Line"), "edges come from draw prims");
-        assert!(src.contains("on_click"), "click a node opens that note");
+        assert!(src.contains("Prim::Stroke"), "edges are strokes, not dot runs");
+        assert!(src.contains("PathBuilder::stroke"), "hairlines, not dotted quads");
+        assert!(src.contains("dash_array"), "a dangling link is dashed by the tessellator");
+        assert!(src.contains("on_scroll_wheel"), "wheel zooms");
+        assert!(src.contains("on_key_down"), "+/- zoom and arrows pan");
+        assert!(src.contains("pan_by"), "drag on empty space pans the camera");
+        assert!(src.contains("open_note"), "a short press still opens the note");
+        assert!(src.contains("this.pins.insert"), "a dragged node pins where it is dropped");
+        assert!(src.contains("f-unpin"), "pins can be released");
+        assert!(src.contains("highlight"), "hover lights the neighbourhood");
         assert!(src.contains("show_dangling"), "dangling filter");
         assert!(src.contains("f-domain"), "domain filter");
         assert!(src.contains("graph_data::global_scene"), "default layout is the whole-vault snapshot");
