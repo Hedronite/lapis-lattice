@@ -1,8 +1,8 @@
-//! `lapis` — one Rust binary: CLI, MCP (`lapis mcp`), Ratatui TUI (L5).
+//! `lapis` — one Rust binary: CLI, MCP (`lapis mcp`), Ratatui TUI.
 //!
-//! Read law: `foundry/lapis/SPEC.md`, `SHIP.md`, `CRATES.md`. Files are the
-//! write source of truth, the lattice is the read source of truth, and this
-//! binary never writes `lattice.db`.
+//! Files on disk are the write source of truth. Search, list, and graph
+//! currently read an HTTP lattice; an embedded index is the 0.2 path.
+//! This binary never writes `lattice.db`.
 
 mod cli;
 mod config;
@@ -84,16 +84,25 @@ fn report_error(e: &LapisError, json: bool) {
 
 async fn run(cli: Cli) -> Result<()> {
     let cfg = config::load()?;
-    let vault = vault::resolve(cli.global.vault.as_deref(), &cfg)?;
-    let lattice_url = cli
-        .global
-        .lattice
-        .clone()
-        .or_else(|| std::env::var("LAPIS_LATTICE_URL").ok().filter(|s| !s.trim().is_empty()))
-        .unwrap_or_else(|| cfg.lattice.url.clone());
-    let ctx = Ctx { json: cli.global.json, vault, cfg, lattice_url };
-
+    let vault_flag = cli.global.vault.clone();
+    let lattice_flag = cli.global.lattice.clone();
+    let json = cli.global.json;
     match cli.command() {
+        Command::Init(args) => init_vault_cmd(json, args),
+        cmd => {
+            let vault = vault::resolve(vault_flag.as_deref(), &cfg)?;
+            let lattice_url = lattice_flag
+                .or_else(|| std::env::var("LAPIS_LATTICE_URL").ok().filter(|s| !s.trim().is_empty()))
+                .unwrap_or_else(|| cfg.lattice.url.clone());
+            let ctx = Ctx { json, vault, cfg, lattice_url };
+            dispatch(ctx, cmd).await
+        }
+    }
+}
+
+async fn dispatch(ctx: Ctx, cmd: Command) -> Result<()> {
+    match cmd {
+        Command::Init(_) => unreachable!("init is handled before vault resolve"),
         Command::Vault { command: VaultCommand::Info } => vault_info(&ctx).await,
         Command::Search(args) => search(&ctx, args).await,
         Command::Read(args) => read(&ctx, args),
@@ -591,6 +600,17 @@ async fn tree_retrieve(ctx: &Ctx, args: TreeArgs) -> Result<()> {
     if t.truncated {
         eprintln!("lapis: tree truncated at {} nodes (--max-nodes)", t.count);
     }
+    Ok(())
+}
+
+fn init_vault_cmd(json: bool, args: cli::InitArgs) -> Result<()> {
+    let w = write::init_vault(args.path.as_deref())?;
+    if json {
+        return emit_json(&w);
+    }
+    let verb = if w.created { "created" } else { "already exists" };
+    println!("vault {verb}: {}", w.path);
+    println!("next: lapis --vault {}   or   export LAPIS_VAULT={}", w.path, w.path);
     Ok(())
 }
 

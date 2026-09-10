@@ -25,7 +25,7 @@ use crate::ops::{self, Ctx};
 use crate::{notes, resolve, tasks, write};
 
 pub const INSTRUCTIONS: &str = "\
-Lapis: an Atrium notes vault with Lapis Lattice retrieval.
+Lapis: a local Markdown notes vault with Lapis Lattice retrieval.
 1. Call vault_info once per session; it reports the vault root and lattice health.
 2. Trust `path` values returned by other tools. They are vault-relative; never prefix inbox/ yourself.
 3. Prefer `search` (hybrid lattice retrieval) over constructing greps or reading many files.
@@ -104,7 +104,7 @@ fn ok_meta<T: serde::Serialize>(
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ReadArg {
-    /// Vault-relative note path, e.g. `foundry/lapis/SPEC.md`.
+    /// Vault-relative note path, e.g. `notes/SPEC.md`.
     pub path: String,
     /// Only the section under this heading (case-insensitive; nested sub-sections included).
     pub heading: Option<String>,
@@ -148,7 +148,7 @@ pub struct SearchReadArg {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ListArg {
-    /// Vault-relative folder prefix, e.g. `foundry/lapis/`.
+    /// Vault-relative folder prefix, e.g. `notes/`.
     pub prefix: Option<String>,
     pub domain: Option<String>,
     pub doc_type: Option<String>,
@@ -198,7 +198,7 @@ pub struct ResolveArg {
 pub struct CreateArg {
     /// Title; becomes HAL `name` and the slugged filename.
     pub title: String,
-    /// Folder (`foundry/lapis/`) or file path. Default: the inbox bucket.
+    /// Folder (`notes/`) or file path. Default: the inbox bucket.
     pub path: Option<String>,
     /// Template name from `.lapis/templates/`.
     pub template: Option<String>,
@@ -769,7 +769,7 @@ mod tests {
         assert_eq!(n.direction.unwrap_or_else(|| "both".into()), "both");
         let t: ListTasksArg = serde_json::from_str(r#"{}"#).unwrap();
         assert!(tasks::wants_summary(t.path.as_deref(), t.full.unwrap_or(false)));
-        let t: ListTasksArg = serde_json::from_str(r#"{"path":"foundry/lapis"}"#).unwrap();
+        let t: ListTasksArg = serde_json::from_str(r#"{"path":"notes"}"#).unwrap();
         assert!(!tasks::wants_summary(t.path.as_deref(), t.full.unwrap_or(false)));
         let t: ListTasksArg = serde_json::from_str(r#"{"full":true}"#).unwrap();
         assert!(!tasks::wants_summary(t.path.as_deref(), t.full.unwrap_or(false)));
@@ -811,9 +811,9 @@ mod tests {
     /// N15: note URIs round-trip, with percent-encoding for spaces and unicode.
     #[test]
     fn note_uri_roundtrip() {
-        let rel = "Cross-References/Hedronite Capital · v2.md";
+        let rel = "notes/My Note.md";
         let uri = rel_to_note_uri(rel);
-        assert!(uri.starts_with("lapis://note/Cross-References/Hedronite%20Capital"));
+        assert_eq!(uri, "lapis://note/notes/My%20Note.md");
         assert_eq!(note_uri_to_rel(&uri).as_deref(), Some(rel));
         assert_eq!(note_uri_to_rel("lapis://note/a/b.md").as_deref(), Some("a/b.md"));
         assert_eq!(note_uri_to_rel("lapis://note/"), None);

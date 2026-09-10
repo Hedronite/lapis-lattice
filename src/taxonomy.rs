@@ -66,8 +66,8 @@ mod tests {
 
     #[test]
     fn fallback_uses_first_segment() {
-        let c = fallback("foundry/lapis/x.md", None);
-        assert_eq!(c.domain.as_deref(), Some("foundry"));
+        let c = fallback("notes/x.md", None);
+        assert_eq!(c.domain.as_deref(), Some("notes"));
         assert_eq!(c.doc_type, None);
         let c = fallback("ROOT.md", Some("note"));
         assert_eq!(c.domain, None);

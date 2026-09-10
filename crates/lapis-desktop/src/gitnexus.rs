@@ -96,15 +96,10 @@ mod tests {
         let d = tmp();
         let s = Sidecar::discover(&d);
         assert!(!s.is_configured() && s.config_path().is_none() && s.url().is_none());
-        let o = s.overlay("foundry/lapis/SPEC.md").unwrap();
+        let o = s.overlay("notes/SPEC.md").unwrap();
         assert_eq!(
             o,
-            Overlay {
-                path: "foundry/lapis/SPEC.md".into(),
-                commits: vec![],
-                branches: vec![],
-                available: false
-            }
+            Overlay { path: "notes/SPEC.md".into(), commits: vec![], branches: vec![], available: false }
         );
         let _ = std::fs::remove_dir_all(&d);
     }

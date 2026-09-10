@@ -66,7 +66,7 @@ pub fn resolve_in(link: &str, files: &[String], vault_name: Option<&str>) -> Res
     if target.is_empty() {
         return out;
     }
-    // Some indexers prefix the vault folder name (`Atrium/Cross-References/X`).
+    // Some indexers prefix the vault folder name (`Vault/notes/X`).
     let mut targets = vec![target.clone()];
     if let Some(v) = vault_name
         && let Some(rest) = target.strip_prefix(&format!("{v}/"))
@@ -126,7 +126,7 @@ mod tests {
     use super::*;
 
     fn files() -> Vec<String> {
-        ["Cross-References/Hedronite-Capital.md", "foundry/lapis/SPEC.md", "notes/SPEC.md", "index.md"]
+        ["notes/Capital.md", "notes/SPEC.md", "notes/SPEC.md", "index.md"]
             .iter()
             .map(|s| s.to_string())
             .collect()
@@ -145,21 +145,18 @@ mod tests {
     #[test]
     fn exact_basename_collision_dangling() {
         let f = files();
-        let r = resolve_in("[[Cross-References/Hedronite-Capital]]", &f, Some("Atrium"));
-        assert_eq!(
-            (r.resolved, r.how, r.path.as_deref()),
-            (true, "exact", Some("Cross-References/Hedronite-Capital.md"))
-        );
+        let r = resolve_in("[[notes/Capital]]", &f, Some("Vault"));
+        assert_eq!((r.resolved, r.how, r.path.as_deref()), (true, "exact", Some("notes/Capital.md")));
         // vault-name prefix as emitted in some dst_raw values
-        let r = resolve_in("Atrium/Cross-References/Hedronite-Capital", &f, Some("Atrium"));
-        assert_eq!((r.how, r.path.as_deref()), ("exact", Some("Cross-References/Hedronite-Capital.md")));
-        let r = resolve_in("[[hedronite-capital|Cap]]", &f, None);
+        let r = resolve_in("Vault/notes/Capital", &f, Some("Vault"));
+        assert_eq!((r.how, r.path.as_deref()), ("exact", Some("notes/Capital.md")));
+        let r = resolve_in("[[capital|Cap]]", &f, None);
         assert_eq!((r.how, r.alias.as_deref()), ("basename", Some("Cap")));
         let r = resolve_in("[[SPEC]]", &f, None);
         assert!(!r.resolved);
         assert_eq!(r.how, "collision");
         // shallowest path first, like Obsidian's shortest-path rule
-        assert_eq!(r.candidates, ["notes/SPEC.md", "foundry/lapis/SPEC.md"]);
+        assert_eq!(r.candidates, ["notes/SPEC.md", "notes/SPEC.md"]);
         let r = resolve_in("aes_schema_genesis_canon", &f, None);
         let j = serde_json::to_value(&r).unwrap();
         assert_eq!((r.resolved, r.how, r.path), (false, "dangling", None));

@@ -11,8 +11,8 @@ Exit codes:
   2  lattice down (HTTP unreachable, timeout, or 5xx)
   3  path escape or not found
 
-Vault precedence: --vault, $LAPIS_VAULT, config `vault`, then ~/Obsidian/Atrium/Atrium.
-Lattice precedence: --lattice, $LAPIS_LATTICE_URL, config [lattice].url, then http://127.0.0.1:8080.
+Vault: --vault, $LAPIS_VAULT, or config `vault`. No implicit default; `lapis init ~/Notes` creates one.
+Lattice: --lattice, $LAPIS_LATTICE_URL, or config [lattice].url (default http://127.0.0.1:8080).
 Config: ~/.config/lapis/config.toml (or $XDG_CONFIG_HOME/lapis/config.toml).";
 
 #[derive(Debug, Parser)]
@@ -113,7 +113,7 @@ pub enum Command {
     /// Restore a trashed note (path under `.lapis/trash/`) to where it came from.
     Restore(TrashArgs),
 
-    /// Templates: built-ins (`builtin.daily`, `builtin.mail_drop`, …) and `.lapis/templates/`.
+    /// Templates: built-ins (`builtin.daily`, `builtin.adr`, …) and `.lapis/templates/`.
     Template {
         #[command(subcommand)]
         command: TemplateCommand,
@@ -124,6 +124,9 @@ pub enum Command {
 
     /// Terminal UI: sidebar tree, editor, lattice search palette (Ctrl+P), HAL inspector.
     Tui,
+
+    /// Create a vault directory (Welcome.md, Daily/, `.lapis/` gitignore). Does not start an index.
+    Init(InitArgs),
 
     /// Desktop shell (GPUI). Needs a build with `--features desktop`; `--check` reports what is available.
     Desktop(DesktopArgs),
@@ -213,7 +216,7 @@ impl TaskListArgs {
 
 #[derive(Debug, Args)]
 pub struct TaskToggleArgs {
-    /// Task id from `task list`, e.g. `foundry/lapis/plan.md#0`.
+    /// Task id from `task list`, e.g. `notes/plan.md#0`.
     #[arg(value_name = "ID")]
     pub id: String,
 
@@ -253,7 +256,7 @@ pub struct CreateArgs {
     #[arg(long, value_name = "TITLE")]
     pub title: String,
 
-    /// Vault-relative target: a folder (`foundry/lapis/`) or a file (`foundry/lapis/x.md`). Default: inbox bucket.
+    /// Vault-relative target: a folder (`notes/`) or a file (`notes/x.md`). Default: inbox bucket.
     #[arg(long, value_name = "PATH")]
     pub path: Option<String>,
 
@@ -277,7 +280,7 @@ pub struct CreateArgs {
     #[arg(long, value_name = "TEXT", conflicts_with = "stdin")]
     pub body: Option<String>,
 
-    /// `{{director}}` for mail-room templates (default: config operator).
+    /// Optional template placeholder (default: config operator).
     #[arg(long, value_name = "NAME")]
     pub director: Option<String>,
 
@@ -329,14 +332,14 @@ pub struct CaptureArgs {
 
 #[derive(Debug, Args)]
 pub struct ReindexArgs {
-    /// Vault-relative markdown path, e.g. `foundry/lapis/STATUS.md`.
+    /// Vault-relative markdown path, e.g. `notes/STATUS.md`.
     #[arg(value_name = "PATH")]
     pub path: String,
 }
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
-    /// Only paths under this vault-relative prefix, e.g. `foundry/lapis/`.
+    /// Only paths under this vault-relative prefix, e.g. `notes/`.
     #[arg(value_name = "PREFIX")]
     pub prefix: Option<String>,
 
@@ -426,7 +429,7 @@ impl SearchArgs {
 
 #[derive(Debug, Args)]
 pub struct ReadArgs {
-    /// Vault-relative path, e.g. `foundry/lapis/SPEC.md` (`.md` may be omitted).
+    /// Vault-relative path, e.g. `notes/SPEC.md` (`.md` may be omitted).
     #[arg(value_name = "PATH")]
     pub path: String,
 
@@ -449,6 +452,13 @@ pub struct ReadArgs {
     /// Clip the body to this many chars; `meta.truncated` says when it happened.
     #[arg(long, value_name = "N")]
     pub max_chars: Option<usize>,
+}
+
+#[derive(Debug, Args)]
+pub struct InitArgs {
+    /// Directory to create. Default: `~/Notes`.
+    #[arg(value_name = "PATH")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -520,12 +530,12 @@ mod tests {
 
     #[test]
     fn parses_search_with_globals_anywhere() {
-        let c = Cli::try_parse_from(["lapis", "search", "--json", "Hedronite", "--vault", "/tmp"]).unwrap();
+        let c = Cli::try_parse_from(["lapis", "search", "--json", "welcome", "--vault", "/tmp"]).unwrap();
         assert!(c.global.json);
         assert_eq!(c.global.vault.as_deref(), Some("/tmp"));
         match c.command() {
             Command::Search(s) => {
-                assert_eq!(s.query_text(), "Hedronite");
+                assert_eq!(s.query_text(), "welcome");
                 assert_eq!(s.limit, 10);
                 assert_eq!(s.mode, Mode::Hybrid);
             }
@@ -549,21 +559,20 @@ mod tests {
         let c = Cli::try_parse_from(["lapis", "vault", "info", "--json"]).unwrap();
         assert!(c.global.json);
         assert!(matches!(c.command(), Command::Vault { command: VaultCommand::Info }));
-        let c = Cli::try_parse_from(["lapis", "read", "foundry/lapis/SPEC.md"]).unwrap();
+        let c = Cli::try_parse_from(["lapis", "read", "notes/SPEC.md"]).unwrap();
         match c.command() {
-            Command::Read(r) => assert_eq!(r.path, "foundry/lapis/SPEC.md"),
+            Command::Read(r) => assert_eq!(r.path, "notes/SPEC.md"),
             _ => panic!("expected read"),
         }
     }
 
     #[test]
     fn parses_list() {
-        let c =
-            Cli::try_parse_from(["lapis", "list", "--json", "foundry/lapis/", "--status", "live", "-n", "5"])
-                .unwrap();
+        let c = Cli::try_parse_from(["lapis", "list", "--json", "notes/", "--status", "live", "-n", "5"])
+            .unwrap();
         match c.command() {
             Command::List(l) => {
-                assert_eq!(l.prefix.as_deref(), Some("foundry/lapis/"));
+                assert_eq!(l.prefix.as_deref(), Some("notes/"));
                 assert_eq!(l.status.as_deref(), Some("live"));
                 assert_eq!(l.limit, 5);
                 assert_eq!(l.offset, 0);
@@ -651,6 +660,18 @@ mod tests {
         let Command::Neighbors(n) = c.command() else { panic!("neighbors") };
         assert_eq!(n.direction.as_deref(), Some("in"));
         assert!(n.dangling);
+    }
+
+    #[test]
+    fn init_subcommand() {
+        let Command::Init(i) = Cli::try_parse_from(["lapis", "init"]).unwrap().command() else {
+            panic!("init")
+        };
+        assert!(i.path.is_none());
+        let Command::Init(i) = Cli::try_parse_from(["lapis", "init", "~/Notes"]).unwrap().command() else {
+            panic!("init path")
+        };
+        assert_eq!(i.path.as_deref(), Some("~/Notes"));
     }
 
     /// N23: `lapis desktop` parses with and without a build that has GPUI.
@@ -803,13 +824,10 @@ mod tests {
         let l = list(&["lapis", "task", "list", "--json"]);
         assert_eq!(l.scope(), None);
         assert!(!l.full);
+        assert_eq!(list(&["lapis", "task", "list", "notes"]).scope().as_deref(), Some("notes"));
         assert_eq!(
-            list(&["lapis", "task", "list", "foundry/lapis"]).scope().as_deref(),
-            Some("foundry/lapis")
-        );
-        assert_eq!(
-            list(&["lapis", "task", "list", "--json", "--path", "foundry/lapis"]).scope().as_deref(),
-            Some("foundry/lapis")
+            list(&["lapis", "task", "list", "--json", "--path", "notes"]).scope().as_deref(),
+            Some("notes")
         );
         assert!(list(&["lapis", "task", "list", "--full"]).full);
         assert!(Cli::try_parse_from(["lapis", "task", "list", "a", "--path", "b"]).is_err());

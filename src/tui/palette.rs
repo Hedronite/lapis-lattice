@@ -100,7 +100,7 @@ mod tests {
     #[test]
     fn lattice_hit_becomes_note_item() {
         let hit = Hit {
-            path: "foundry/lapis/SPEC.md".into(),
+            path: "notes/SPEC.md".into(),
             kind: crate::notes::Kind::Markdown,
             title: "Lapis · SPEC".into(),
             heading: Some("Goals".into()),
@@ -121,7 +121,7 @@ mod tests {
         assert_eq!(
             p.selected(),
             Some(&Item::Note {
-                path: "foundry/lapis/SPEC.md".into(),
+                path: "notes/SPEC.md".into(),
                 title: "Lapis · SPEC".into(),
                 snippet: Some("Goals".into()),
             })

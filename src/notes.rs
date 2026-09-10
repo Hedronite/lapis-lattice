@@ -71,7 +71,7 @@ pub fn clean_rel(rel: &str) -> Result<String> {
 
 /// Resolve a vault-relative path to an absolute one inside `root`.
 /// If the exact file is missing and the path has no extension, `.md` is tried
-/// (so `foundry/lapis/SPEC` reads `foundry/lapis/SPEC.md`).
+/// (so `notes/SPEC` reads `notes/SPEC.md`).
 /// Errors with exit-3 semantics on escape or not-found.
 pub fn resolve(root: &Path, rel: &str) -> Result<(String, PathBuf)> {
     let clean = clean_rel(rel)?;
@@ -325,16 +325,16 @@ mod tests {
 
     fn tmp_vault() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("lapis-notes-{}-{}", std::process::id(), rand_suffix()));
-        std::fs::create_dir_all(dir.join("foundry/lapis")).unwrap();
+        std::fs::create_dir_all(dir.join("notes")).unwrap();
         std::fs::write(
-            dir.join("foundry/lapis/SPEC.md"),
+            dir.join("notes/SPEC.md"),
             "---\nname: Lapis · SPEC\ntags: [a]\n---\n<!--hal:authoritative:yaml-->\n\n# SPEC.md\n\nbody\n",
         )
         .unwrap();
-        std::fs::write(dir.join("foundry/lapis/plain.md"), "# Plain Title\n\ntext\n").unwrap();
-        std::fs::write(dir.join("foundry/lapis/bad.md"), "---\nname: [oops\n---\nstill here\n").unwrap();
-        std::fs::write(dir.join("foundry/lapis/notes.txt"), "just text").unwrap();
-        std::fs::write(dir.join("foundry/lapis/tome.pdf"), b"%PDF-1.4").unwrap();
+        std::fs::write(dir.join("notes/plain.md"), "# Plain Title\n\ntext\n").unwrap();
+        std::fs::write(dir.join("notes/bad.md"), "---\nname: [oops\n---\nstill here\n").unwrap();
+        std::fs::write(dir.join("notes/notes.txt"), "just text").unwrap();
+        std::fs::write(dir.join("notes/tome.pdf"), b"%PDF-1.4").unwrap();
         dir
     }
 
@@ -365,16 +365,16 @@ mod tests {
     #[test]
     fn resolve_adds_md_when_missing_extension() {
         let v = tmp_vault();
-        let (rel, abs) = resolve(&v, "foundry/lapis/SPEC").unwrap();
-        assert_eq!(rel, "foundry/lapis/SPEC.md");
-        assert!(abs.ends_with("foundry/lapis/SPEC.md"));
+        let (rel, abs) = resolve(&v, "notes/SPEC").unwrap();
+        assert_eq!(rel, "notes/SPEC.md");
+        assert!(abs.ends_with("notes/SPEC.md"));
         let _ = std::fs::remove_dir_all(&v);
     }
 
     #[test]
     fn read_returns_hal_and_body() {
         let v = tmp_vault();
-        let n = read(&v, "foundry/lapis/SPEC.md").unwrap();
+        let n = read(&v, "notes/SPEC.md").unwrap();
         assert_eq!(n.title, "Lapis · SPEC");
         assert!(n.hal_valid);
         assert_eq!(n.hal["name"], "Lapis · SPEC");
@@ -389,8 +389,8 @@ mod tests {
     #[test]
     fn read_falls_back_to_h1_then_stem() {
         let v = tmp_vault();
-        assert_eq!(read(&v, "foundry/lapis/plain.md").unwrap().title, "Plain Title");
-        let n = read(&v, "foundry/lapis/notes.txt").unwrap();
+        assert_eq!(read(&v, "notes/plain.md").unwrap().title, "Plain Title");
+        let n = read(&v, "notes/notes.txt").unwrap();
         assert_eq!(n.title, "notes");
         assert_eq!(n.kind, Kind::Source);
         assert_eq!(n.body, "just text");
@@ -400,7 +400,7 @@ mod tests {
     #[test]
     fn read_bad_yaml_is_hal_invalid_with_body() {
         let v = tmp_vault();
-        let n = read(&v, "foundry/lapis/bad.md").unwrap();
+        let n = read(&v, "notes/bad.md").unwrap();
         assert!(!n.hal_valid);
         assert!(n.hal_error.is_some());
         assert_eq!(n.body, "still here");
@@ -439,8 +439,8 @@ mod tests {
     #[test]
     fn read_pdf_extracts_text() {
         let v = tmp_vault();
-        std::fs::write(v.join("foundry/lapis/real.pdf"), tiny_pdf("Hello Lapis")).unwrap();
-        let n = read(&v, "foundry/lapis/real.pdf").unwrap();
+        std::fs::write(v.join("notes/real.pdf"), tiny_pdf("Hello Lapis")).unwrap();
+        let n = read(&v, "notes/real.pdf").unwrap();
         assert_eq!(n.kind, Kind::Pdf);
         assert_eq!(n.title, "real");
         assert_eq!(n.pages, Some(1));
@@ -452,7 +452,7 @@ mod tests {
     #[test]
     fn read_garbage_pdf_is_a_clean_error() {
         let v = tmp_vault();
-        let e = read(&v, "foundry/lapis/tome.pdf").unwrap_err();
+        let e = read(&v, "notes/tome.pdf").unwrap_err();
         assert_eq!(e.exit_code(), 1);
         assert!(e.to_string().contains("pdf"));
         let _ = std::fs::remove_dir_all(&v);

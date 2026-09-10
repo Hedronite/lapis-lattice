@@ -26,3 +26,23 @@ jobs:
       - run: cargo test
       - run: cargo build --release
       - run: ./target/release/lapis --help
+      - name: no vault configured is usage (exit 1), not lattice-down
+        run: |
+          unset LAPIS_VAULT
+          set +e
+          ./target/release/lapis --json vault info
+          code=$?
+          set -e
+          test "$code" -eq 1
+      - name: init then read without HTTP
+        run: |
+          tmp=$(mktemp -d)
+          ./target/release/lapis init "$tmp"
+          ./target/release/lapis --vault "$tmp" --json read Welcome.md | grep -q '"ok": true'
+
+  scrub:
+    name: operator-topology grep gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/scrub-gate.sh
