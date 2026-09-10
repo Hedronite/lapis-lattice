@@ -8,15 +8,13 @@ license = "MIT"
 [features]
 default = []
 # Real window via gpui-omarchy (not Zed gpui 0.2). Heavy; everything else compiles without it.
-gpui = ["dep:gpui-omarchy", "dep:gpui-kit", "dep:gpui", "dep:lapis-lattice"]
+# Painting primitives (`canvas`, `paint_quad`) come through gpui-kit's `gpui` re-export.
+gpui = ["dep:gpui-omarchy", "dep:gpui-kit"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 gpui-omarchy = { version = "0.1.2", optional = true }
 gpui-kit = { version = "=0.6.1", optional = true, default-features = false, features = ["assets"] }
-# The painting primitives (canvas, paint_quad) live in the gpui fork that
-# gpui-kit is built on, which it depends on under the name `gpui`.
-gpui = { package = "gpui-pre", version = "0.3.1", optional = true }
 # Graph data comes from the vault's own index — no daemon, same as the CLI.
-lapis-lattice = { path = "../lapis-lattice", version = "0.1.0", optional = true }
+lapis-lattice = { path = "../lapis-lattice", version = "0.1.0" }

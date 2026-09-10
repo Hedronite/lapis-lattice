@@ -5,14 +5,13 @@
 //!   engine, no network. It exists so notes and captured pages render inside
 //!   the app's own surface.
 //! * [`scene`]: the graph-canvas **data** layer — `/graph/ego` JSON → nodes,
-//!   edges, positions. The GPU draw is a stub until the window lands.
+//!   edges, positions. [`scene::draw`] is the paint list the window consumes.
 //! * [`gitnexus`]: optional sidecar client. No vendored code; no-op when there
 //!   is no `.gitnexus` in the vault.
 //! * [`run`]: opens the GPUI window when built with the `gpui` feature, else
 //!   returns [`DesktopError::NotBuilt`].
 
 pub mod gitnexus;
-#[cfg(feature = "gpui")]
 pub mod graph_data;
 pub mod html;
 pub mod scene;
@@ -83,10 +82,10 @@ pub fn run(opts: Options) -> Result<(), DesktopError> {
 mod window {
     use std::path::PathBuf;
 
-    use gpui::{Bounds, Corners, Edges, Hsla, PaintQuad, Pixels, Point, Size, canvas, px};
     use gpui_kit::{
-        AppContext, Context, InteractiveElement, IntoElement, ParentElement, Render,
-        StatefulInteractiveElement, Styled, Window, WindowOptions, div,
+        AppContext, Bounds, Context, Corners, Edges, Hsla, InteractiveElement, IntoElement, PaintQuad,
+        ParentElement, Pixels, Point, Render, Size, StatefulInteractiveElement, Styled, Window,
+        WindowOptions, canvas, div, px,
     };
     use gpui_omarchy::{ActiveTheme, panel};
 
@@ -123,37 +122,12 @@ mod window {
 
     impl Root {
         fn reload(&mut self) {
-            match graph_data::scene_for(&self.vault, &self.seed, self.hops, !self.show_dangling) {
+            match graph_data::scene_for(&self.vault, &self.seed, self.hops, false) {
                 Ok(s) => {
                     self.scene = s;
                     self.error = None;
                 }
                 Err(e) => self.error = Some(e),
-            }
-        }
-
-        /// Domains present in the current scene, for the filter to cycle.
-        fn domains(&self) -> Vec<String> {
-            let mut d: Vec<String> = self
-                .scene
-                .nodes
-                .iter()
-                .filter_map(|n| n.id.split('/').next().filter(|s| *s != n.id).map(str::to_string))
-                .collect();
-            d.sort();
-            d.dedup();
-            d
-        }
-
-        /// Gate C filters: one domain at a time, and dangling on or off.
-        fn passes(&self, id: &str, dangling: bool) -> bool {
-            if dangling && !self.show_dangling {
-                return false;
-            }
-            match &self.domain {
-                None => true,
-                // a dangling node has no path, so it belongs to no domain
-                Some(d) => id.split('/').next().filter(|s| *s != id) == Some(d.as_str()),
             }
         }
     }
@@ -178,19 +152,9 @@ mod window {
             let theme = cx.omarchy();
             let (edge, node, seed_c, dangling_c, label_c) =
                 (theme.border, theme.foreground, theme.accent, theme.danger, theme.secondary);
-            let prims = super::scene::draw(&self.scene);
-            let scene_nodes = self.scene.nodes.clone();
-            // Edges are drawn only between nodes that survive the filters.
-            let kept: std::collections::HashSet<String> =
-                scene_nodes.iter().filter(|n| self.passes(&n.id, n.dangling)).map(|n| n.id.clone()).collect();
-            let edge_ok: Vec<bool> = self
-                .scene
-                .edges
-                .iter()
-                .map(|e| {
-                    kept.contains(&self.scene.nodes[e.from].id) && kept.contains(&self.scene.nodes[e.to].id)
-                })
-                .collect();
+            let visible = self.scene.filtered(self.show_dangling, self.domain.as_deref());
+            let prims = super::scene::draw(&visible);
+            let scene_nodes = visible.nodes.clone();
 
             // Edges are painted: no element can draw a line at an arbitrary
             // angle, so they are laid down as a run of dots along each segment —
@@ -198,14 +162,8 @@ mod window {
             let painted = canvas(
                 move |_, _, _| {},
                 move |bounds, _, window, _| {
-                    let mut line_i = 0usize;
                     for p in &prims {
                         if let Prim::Line { x0, y0, x1, y1, dashed } = p {
-                            let keep = edge_ok.get(line_i).copied().unwrap_or(true);
-                            line_i += 1;
-                            if !keep {
-                                continue;
-                            }
                             let (ax, ay) = map(*x0, *y0);
                             let (bx, by) = map(*x1, *y1);
                             let a = Point { x: bounds.origin.x + px(ax), y: bounds.origin.y + px(ay) };
@@ -226,9 +184,6 @@ mod window {
             let mut board = div().relative().w(px(BOARD_W)).h(px(BOARD_H)).child(painted);
 
             for n in scene_nodes {
-                if !self.passes(&n.id, n.dangling) {
-                    continue;
-                }
                 let id = n.id.clone();
                 let label = n.label.clone();
                 let is_seed = n.is_seed;
@@ -284,14 +239,13 @@ mod window {
                 .child(div().id("f-dangling").text_sm().text_color(label_c).child(dangling_label).on_click(
                     cx.listener(|this, _, _, cx| {
                         this.show_dangling = !this.show_dangling;
-                        this.reload();
                         cx.notify();
                     }),
                 ))
                 .child(div().id("f-domain").text_sm().text_color(label_c).child(domain_label).on_click(
                     cx.listener(|this, _, _, cx| {
                         // cycle: all -> each domain -> all
-                        let all = this.domains();
+                        let all = this.scene.domains();
                         this.domain = match &this.domain {
                             None => all.first().cloned(),
                             Some(cur) => {
@@ -333,7 +287,9 @@ mod window {
         let seed = opts.seed.clone().unwrap_or_else(|| "Welcome.md".to_string());
         let vault = opts.vault_root.clone();
         let title = opts.title.clone();
-        let (scene, error) = match graph_data::scene_for(&vault, &seed, 2, true) {
+        let show_dangling = true;
+        let hops = 2u32;
+        let (scene, error) = match graph_data::scene_for(&vault, &seed, hops, false) {
             Ok(s) => (s, None),
             Err(e) => (Scene::default(), Some(e)),
         };
@@ -348,9 +304,9 @@ mod window {
                     error: error.clone(),
                     selected: None,
                     peek: None,
-                    show_dangling: true,
+                    show_dangling,
                     domain: None,
-                    hops: 2,
+                    hops,
                 })
             });
             match opened {
@@ -383,5 +339,19 @@ mod tests {
                 other => panic!("expected NotBuilt, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn window_paints_shipped_draw_on_gpui_omarchy() {
+        let src = include_str!("lib.rs");
+        assert!(src.contains("super::scene::draw"), "window consumes scene::draw");
+        assert!(src.contains("gpui_omarchy::init"), "window is gpui-omarchy, not Zed-gpui");
+        assert!(src.contains("Prim::Line"), "edges come from draw prims");
+        assert!(src.contains("on_click"), "click a node opens that note");
+        assert!(src.contains("show_dangling"), "dangling filter");
+        assert!(src.contains("f-domain"), "domain filter");
+        let toml = include_str!("../Cargo.toml");
+        assert!(toml.contains("gpui-omarchy"));
+        assert!(!toml.contains("gpui = \"0.2"));
     }
 }

@@ -62,14 +62,10 @@ jobs:
           name: lapis-${{ matrix.triple }}
           path: dist/*
 
-  # Provisional. The `desktop` feature still builds the Zed-gpui shell, which
-  # D-V02-DESKTOP says is NOT the 0.2 desktop — sequence 5b replaces it with
-  # gpui-omarchy and throws that module away. So a green asset here is not yet
-  # "the Lapis desktop", and a red one must not hold up the CLI release.
-  # Revisit the moment 5b lands.
+  # Linux desktop asset: gpui-omarchy window (5b/5c). CLI release does not wait
+  # on this job (`needs: [cli]` below).
   desktop:
-    name: desktop ${{ matrix.triple }} (provisional, pre-5b)
-    continue-on-error: true
+    name: desktop ${{ matrix.triple }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

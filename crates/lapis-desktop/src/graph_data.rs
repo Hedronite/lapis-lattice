@@ -71,3 +71,51 @@ pub fn peek(vault: &Path, rel: &str, max_chars: usize) -> Result<String, String>
     let text = std::fs::read_to_string(&abs).map_err(|e| format!("{rel}: {e}"))?;
     Ok(text.chars().take(max_chars).collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene::draw;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    fn vault() -> PathBuf {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("lapis-desktop-graph-{}-{n}-{seq}", std::process::id()));
+        std::fs::create_dir_all(d.join("notes")).unwrap();
+        std::fs::write(d.join("Welcome.md"), "# Welcome\n\nSee [[Alpha]] and [[ghost]].\n").unwrap();
+        std::fs::write(d.join("notes/Alpha.md"), "# Alpha\n\nOn to [[Beta]].\n").unwrap();
+        std::fs::write(d.join("notes/Beta.md"), "# Beta\n\nLeaf.\n").unwrap();
+        let mut e = lapis_lattice::Engine::open(&d).unwrap();
+        e.reindex().unwrap();
+        d
+    }
+
+    #[test]
+    fn hop1_and_hop2_from_embedded_index() {
+        let d = vault();
+        let hop1 = scene_for(&d, "Welcome.md", 1, false).unwrap();
+        assert_eq!(hop1.nodes.iter().filter(|n| n.depth == 1).count(), 2, "Alpha + dangling ghost");
+        assert!(hop1.nodes.iter().any(|n| n.dangling && n.label == "ghost"));
+        assert!(hop1.nodes.iter().all(|n| n.depth <= 1));
+
+        let hop2 = scene_for(&d, "Welcome.md", 2, false).unwrap();
+        assert!(hop2.nodes.iter().any(|n| n.id == "notes/Beta.md" && n.depth == 2));
+        let prims = draw(&hop2);
+        let discs = prims.iter().filter(|p| matches!(p, crate::scene::Prim::Disc { .. })).count();
+        let lines = prims.iter().filter(|p| matches!(p, crate::scene::Prim::Line { .. })).count();
+        assert_eq!(discs, hop2.nodes.len());
+        assert_eq!(lines, hop2.edges.len());
+
+        let resolved = scene_for(&d, "Welcome.md", 2, true).unwrap();
+        assert!(!resolved.nodes.iter().any(|n| n.dangling));
+        assert!(resolved.nodes.iter().any(|n| n.id == "notes/Beta.md"));
+
+        let text = peek(&d, "notes/Alpha.md", 20).unwrap();
+        assert!(text.starts_with("# Alpha"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
