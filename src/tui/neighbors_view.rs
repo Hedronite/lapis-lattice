@@ -65,19 +65,19 @@ mod tests {
 
     #[test]
     fn neighbor_struct_to_rows() {
-        let mut out = n("foundry/lapis/SPEC.md", "out");
+        let mut out = n("notes/SPEC.md", "out");
         out.alias = Some("the spec".into());
         out.anchor = Some("goals".into());
         let mut inn = n("notes/link.md", "in");
         inn.resolved = false;
         let rows = rows(&[out, inn]);
         assert_eq!(rows[0].arrow, "▶ ");
-        assert_eq!(rows[0].path, "foundry/lapis/SPEC.md");
+        assert_eq!(rows[0].path, "notes/SPEC.md");
         assert_eq!(rows[0].detail, "as the spec · #goals");
         assert_eq!(rows[1].arrow, "◀ ");
         assert_eq!(rows[1].detail, "unresolved");
         assert!(!rows[1].resolved);
-        assert_eq!(line(&rows[0]).to_string(), "▶ foundry/lapis/SPEC.md  as the spec · #goals");
+        assert_eq!(line(&rows[0]).to_string(), "▶ notes/SPEC.md  as the spec · #goals");
     }
 
     #[test]

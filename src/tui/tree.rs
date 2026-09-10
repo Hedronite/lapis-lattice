@@ -93,21 +93,21 @@ mod tests {
     fn tree_lists_lazily_and_skips_excluded() {
         let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let v = std::env::temp_dir().join(format!("lapis-tui-{}-{n}", std::process::id()));
-        for d in ["foundry/lapis", "agents", "Aeon/notes/media", ".obsidian", "_archives"] {
+        for d in ["notes", "agents", "Aeon/notes/media", ".obsidian", "_archives"] {
             std::fs::create_dir_all(v.join(d)).unwrap();
         }
-        std::fs::write(v.join("foundry/lapis/SPEC.md"), "x").unwrap();
-        std::fs::write(v.join("foundry/lapis/pic.png"), "x").unwrap();
+        std::fs::write(v.join("notes/SPEC.md"), "x").unwrap();
+        std::fs::write(v.join("notes/pic.png"), "x").unwrap();
         std::fs::write(v.join("Aeon/notes/media/a.md"), "x").unwrap();
         std::fs::write(v.join("README.md"), "x").unwrap();
         let mut t = Tree::default();
         t.load(&v, "");
         let names: Vec<String> = t.visible().iter().map(|(_, e)| e.name.clone()).collect();
-        assert_eq!(names, ["Aeon", "agents", "foundry", "README.md"]);
-        let pos = t.reveal(&v, "foundry/lapis/SPEC.md").unwrap();
+        assert_eq!(names, ["Aeon", "agents", "notes", "README.md"]);
+        let pos = t.reveal(&v, "notes/SPEC.md").unwrap();
         let rows = t.visible();
         assert_eq!(rows[pos].1.name, "SPEC.md");
-        assert_eq!(rows[pos].0, 2);
+        assert_eq!(rows[pos].0, 1);
         assert!(!rows.iter().any(|(_, e)| e.name == "pic.png"));
         assert!(list_dir(&v, "Aeon/notes/media").is_empty(), "media never listed");
         let _ = std::fs::remove_dir_all(&v);

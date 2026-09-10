@@ -1,9 +1,7 @@
 //! Per-vault operator overlay: `.lapis/vault.json`.
 //!
-//! SPEC.md § "Atrium tree vs operator overlay". The four zn buckets are an
-//! overlay on existing Atrium directories, never a rewrite of the tree.
-//! Schema: `foundry/lapis/schema/vault-overlay.schema.json`. L0 only reads
-//! it; writes come with L2.
+//! Inbox / quick / archive / trash are overlays on existing directories,
+//! never a rewrite of the vault tree.
 
 use std::path::Path;
 
@@ -32,7 +30,7 @@ fn d_quick() -> String {
     "quick".into()
 }
 fn d_archive() -> String {
-    "_archives".into()
+    "archive".into()
 }
 fn d_trash() -> String {
     ".lapis/trash".into()
@@ -115,7 +113,7 @@ mod tests {
     fn defaults_match_schema() {
         let o = Overlay::default();
         assert_eq!(o.buckets.inbox, "inbox");
-        assert_eq!(o.buckets.archive, "_archives");
+        assert_eq!(o.buckets.archive, "archive");
         assert_eq!(o.buckets.trash, ".lapis/trash");
         assert!(o.attachments.is_empty(), "assets/ must not be reserved by default");
         assert!(!o.corpus.source);

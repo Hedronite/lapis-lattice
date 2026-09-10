@@ -538,13 +538,13 @@ mod tests {
 
     #[test]
     fn summary_counts_by_status_and_folder() {
-        let mut ts = parse("foundry/lapis/plan.md", NOTE);
+        let mut ts = parse("notes/plan.md", NOTE);
         ts.extend(parse("agents/FLEET.md", "- [ ] a\n- [x] b\n- [x] c\n"));
         ts.extend(parse("ROOT.md", "- [ ] root task\n"));
         let s = summarize(&ts);
         assert_eq!(s.n, ts.len());
         // NOTE: open, done, in-progress, cancelled, forwarded (fenced one skipped)
-        assert_eq!(s.by_folder["foundry"], 5);
+        assert_eq!(s.by_folder["notes"], 5);
         assert_eq!(s.by_folder["agents"], 3);
         assert_eq!(s.by_folder["."], 1);
         assert_eq!(s.by_status["done"], 1 + 2);
@@ -560,44 +560,40 @@ mod tests {
     fn toggle_on_disk_and_scan_respects_exclusions() {
         let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let v = std::env::temp_dir().join(format!("lapis-tasks-{}-{n}", std::process::id()));
-        for d in ["foundry/lapis", "Aeon/notes/media", "_archives", ".lapis/trash", ".obsidian", "inbox"] {
+        for d in ["notes", "Aeon/notes/media", "_archives", ".lapis/trash", ".obsidian", "inbox"] {
             std::fs::create_dir_all(v.join(d)).unwrap();
         }
-        std::fs::write(v.join("foundry/lapis/plan.md"), NOTE).unwrap();
+        std::fs::write(v.join("notes/plan.md"), NOTE).unwrap();
         std::fs::write(v.join("inbox/q.md"), "- [ ] quick one due:2020-01-01\n").unwrap();
         std::fs::write(v.join("Aeon/notes/media/x.md"), "- [ ] hidden\n").unwrap();
         std::fs::write(v.join("_archives/x.md"), "- [ ] hidden\n").unwrap();
         std::fs::write(v.join(".lapis/trash/x.md"), "- [ ] hidden\n").unwrap();
         std::fs::write(v.join(".obsidian/x.md"), "- [ ] hidden\n").unwrap();
-        std::fs::write(v.join("foundry/lapis/file.md"), "---\nname: F\ntasks: note\n---\nbody\n").unwrap();
+        std::fs::write(v.join("notes/file.md"), "---\nname: F\ntasks: note\n---\nbody\n").unwrap();
 
-        assert_eq!(
-            scan_files(&v, None).unwrap(),
-            ["foundry/lapis/file.md", "foundry/lapis/plan.md", "inbox/q.md"]
-        );
+        assert_eq!(scan_files(&v, None).unwrap(), ["inbox/q.md", "notes/file.md", "notes/plan.md"]);
         assert_eq!(scan_files(&v, Some("inbox")).unwrap(), ["inbox/q.md"]);
         let all = list(&v, &Filter::default()).unwrap();
         assert_eq!(all.len(), 7);
         // N4: unscoped → summary; scoped or --full → rows
         assert!(wants_summary(None, false));
         assert!(wants_summary(Some(""), false));
-        assert!(!wants_summary(Some("foundry/lapis"), false));
+        assert!(!wants_summary(Some("notes"), false));
         assert!(!wants_summary(None, true));
         let s = summarize(&all);
         assert_eq!(s.n, 7);
-        assert_eq!(s.by_folder.get("foundry"), Some(&6));
+        assert_eq!(s.by_folder.get("notes"), Some(&6));
         assert_eq!(s.by_folder.get("inbox"), Some(&1));
         assert_eq!(s.by_status.values().sum::<usize>(), 7);
-        let scoped =
-            list(&v, &Filter { prefix: Some("foundry/lapis".into()), ..Default::default() }).unwrap();
+        let scoped = list(&v, &Filter { prefix: Some("notes".into()), ..Default::default() }).unwrap();
         assert_eq!(scoped.len(), 6);
-        assert!(scoped.iter().all(|t| t.source_path.starts_with("foundry/lapis/")));
+        assert!(scoped.iter().all(|t| t.source_path.starts_with("notes/")));
         // N22: configured exclude prefixes are honoured (with or without a trailing slash)
-        let ex = list(&v, &Filter { exclude: vec!["foundry/".into()], ..Default::default() }).unwrap();
+        let ex = list(&v, &Filter { exclude: vec!["notes/".into()], ..Default::default() }).unwrap();
         assert_eq!(ex.len(), 1);
         assert_eq!(ex[0].source_path, "inbox/q.md");
         let f = Filter { exclude: vec!["inbox".into()], ..Default::default() };
-        assert!(f.excluded("inbox/q.md") && !f.excluded("inboxes/q.md") && !f.excluded("foundry/x.md"));
+        assert!(f.excluded("inbox/q.md") && !f.excluded("inboxes/q.md") && !f.excluded("notes/x.md"));
         assert_eq!(list(&v, &f).unwrap().len(), 6);
         let open = list(&v, &Filter { status: Some("open".into()), ..Default::default() }).unwrap();
         assert_eq!(open.len(), 3);
@@ -605,30 +601,27 @@ mod tests {
         assert_eq!(overdue.len(), 1);
         assert_eq!(overdue[0].id, "inbox/q.md#0");
 
-        let t = toggle(&v, "foundry/lapis/plan.md#0").unwrap();
+        let t = toggle(&v, "notes/plan.md#0").unwrap();
         assert!(t.checked);
-        let on_disk = std::fs::read_to_string(v.join("foundry/lapis/plan.md")).unwrap();
+        let on_disk = std::fs::read_to_string(v.join("notes/plan.md")).unwrap();
         assert!(on_disk.contains("- [x] Write spec"));
         assert!(on_disk.contains(&format!("updated: {}", crate::write::today())));
         assert!(on_disk.contains("- [ ] not a task (fenced)"));
-        let f = toggle(&v, "foundry/lapis/file.md#task").unwrap();
+        let f = toggle(&v, "notes/file.md#task").unwrap();
         assert!(f.checked && f.status == "done");
-        let f = toggle(&v, "foundry/lapis/file.md#task").unwrap();
+        let f = toggle(&v, "notes/file.md#task").unwrap();
         assert!(!f.checked);
-        assert_eq!(toggle(&v, "foundry/lapis/plan.md#99").unwrap_err().exit_code(), 3);
-        assert_eq!(toggle(&v, "foundry/lapis/plan.md#task").unwrap_err().exit_code(), 1);
+        assert_eq!(toggle(&v, "notes/plan.md#99").unwrap_err().exit_code(), 3);
+        assert_eq!(toggle(&v, "notes/plan.md#task").unwrap_err().exit_code(), 1);
         // N13: dry run reports the flipped task without touching the file
-        let before = std::fs::read_to_string(v.join("foundry/lapis/plan.md")).unwrap();
-        let dry = toggle_with(
-            &v,
-            "foundry/lapis/plan.md#0",
-            &crate::write::Guard { dry_run: true, ..Default::default() },
-        )
-        .unwrap();
+        let before = std::fs::read_to_string(v.join("notes/plan.md")).unwrap();
+        let dry =
+            toggle_with(&v, "notes/plan.md#0", &crate::write::Guard { dry_run: true, ..Default::default() })
+                .unwrap();
         assert!(!dry.checked, "was toggled to done above; dry run flips back in the report only");
-        assert_eq!(std::fs::read_to_string(v.join("foundry/lapis/plan.md")).unwrap(), before);
+        assert_eq!(std::fs::read_to_string(v.join("notes/plan.md")).unwrap(), before);
         let stale = crate::write::Guard { if_hash: Some("fnv1a64:0".into()), ..Default::default() };
-        assert_eq!(toggle_with(&v, "foundry/lapis/plan.md#0", &stale).unwrap_err().exit_code(), 1);
+        assert_eq!(toggle_with(&v, "notes/plan.md#0", &stale).unwrap_err().exit_code(), 1);
         let _ = std::fs::remove_dir_all(&v);
     }
 }

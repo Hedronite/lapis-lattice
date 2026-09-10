@@ -1,8 +1,7 @@
 //! User config: `~/.config/lapis/config.toml`.
 //!
-//! Only the `[lattice]` section is read in L0. The full schema is
-//! `foundry/lapis/schema/lapis-config.schema.json`; unknown sections are
-//! ignored so later slices can add theirs without breaking this parser.
+//! Unknown sections are ignored so later slices can add theirs without
+//! breaking this parser.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -13,8 +12,6 @@ use crate::error::{LapisError, Result};
 
 pub const DEFAULT_LATTICE_URL: &str = "http://127.0.0.1:8080";
 pub const DEFAULT_TIMEOUT_MS: u64 = 8000;
-/// SHIP.md § J: the dogfood vault.
-pub const DEFAULT_VAULT: &str = "~/Obsidian/Atrium/Atrium";
 
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {

@@ -736,7 +736,7 @@ mod tests {
     fn neighbors_null_path_is_a_dangling_row() {
         let n: Neighbors = serde_json::from_str(
             r#"{"path":"Cross-References/Manual.md","direction":"both","hop":1,"neighbors":[
-                {"path":"Cross-References/Hedronite-Capital.md","dst_raw":"Hedronite-Capital","alias":null,"anchor":null,"resolved":1,"dir":"out"},
+                {"path":"notes/Capital.md","dst_raw":"Capital","alias":null,"anchor":null,"resolved":1,"dir":"out"},
                 {"path":null,"dst_raw":"aes_schema_genesis_canon","alias":null,"anchor":null,"resolved":0,"dir":"out"}]}"#,
         )
         .expect("null path must decode");
@@ -745,7 +745,7 @@ mod tests {
         assert!(d.path.is_none());
         assert!(!d.resolved);
         assert_eq!(d.label(), "aes_schema_genesis_canon");
-        assert_eq!(n.neighbors[0].label(), "Cross-References/Hedronite-Capital.md");
+        assert_eq!(n.neighbors[0].label(), "notes/Capital.md");
         // round-trips with an explicit null so agents can tell dangling from resolved
         let out = serde_json::to_value(d).unwrap();
         assert!(out["path"].is_null());
@@ -850,7 +850,7 @@ mod tests {
     #[test]
     fn reindex_body_parses() {
         let r: Reindex = serde_json::from_str(
-            r#"{"ok":true,"path":"foundry/lapis/STATUS.md","changed":true,"chunks":7,"indexer_exit":0,"elapsed_ms":900.5,"indexer":"x","stdout_tail":["a"],"stderr_tail":[]}"#,
+            r#"{"ok":true,"path":"notes/STATUS.md","changed":true,"chunks":7,"indexer_exit":0,"elapsed_ms":900.5,"indexer":"x","stdout_tail":["a"],"stderr_tail":[]}"#,
         )
         .unwrap();
         assert!(r.ok);

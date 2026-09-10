@@ -417,20 +417,20 @@ mod tests {
     fn unscoped_is_summary_then_scopes() {
         let mut v = TasksView::new(View::List);
         let mut all = sample();
-        all.extend(tasks::parse("foundry/lapis/plan.md", "- [ ] f1\n- [x] f2\n"));
+        all.extend(tasks::parse("notes/plan.md", "- [ ] f1\n- [x] f2\n"));
         all.extend(tasks::parse("agents/a.md", "- [ ] g1\n"));
         v.set_tasks(all);
         assert!(v.is_summary());
         assert_eq!(v.summary.n, 8);
         assert_eq!(
             v.summary_folders(),
-            [(".".to_string(), 5), ("foundry".to_string(), 2), ("agents".to_string(), 1)]
+            [(".".to_string(), 5), ("notes".to_string(), 2), ("agents".to_string(), 1)]
         );
         assert_eq!(v.current_len(), 3);
         v.down();
-        assert_eq!(v.selected_folder().as_deref(), Some("foundry"));
+        assert_eq!(v.selected_folder().as_deref(), Some("notes"));
         assert!(v.scope_to_selected());
-        assert_eq!(v.scope.as_deref(), Some("foundry"));
+        assert_eq!(v.scope.as_deref(), Some("notes"));
         assert!(!v.is_summary(), "a scope means rows");
         v.unscope();
         assert!(v.is_summary() && v.scope.is_none());

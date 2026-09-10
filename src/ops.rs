@@ -120,7 +120,7 @@ impl From<Document> for ListRow {
     }
 }
 
-/// `prefix` accepts a folder (`foundry/lapis/`) with the same escape rules as `read`.
+/// `prefix` accepts a folder (`notes/`) with the same escape rules as `read`.
 pub fn clean_prefix(prefix: Option<&str>) -> Result<Option<String>> {
     Ok(match prefix {
         Some(p) => {

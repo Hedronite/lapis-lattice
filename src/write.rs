@@ -37,7 +37,7 @@ pub struct CreateOpts {
     pub operator: Option<String>,
     /// Default bucket when `path` is absent (overlay `buckets.inbox`).
     pub inbox: String,
-    /// `{{director}}` for mail-room templates (default: operator).
+    /// Optional `{{name}}` placeholder for templates (default: operator).
     pub director: Option<String>,
     /// Date the template placeholders refer to (`{{date}}`, `{{week}}`,
     /// `{{month}}`); default today. `created`/`updated` are always today.
@@ -80,6 +80,38 @@ pub fn slug(s: &str) -> String {
     }
     let out = out.trim_end_matches('-').to_string();
     if out.is_empty() { "note".to_string() } else { out }
+}
+
+pub const DEFAULT_INIT_VAULT: &str = "~/Notes";
+const VAULT_GITIGNORE: &str = ".lapis/\nlattice.sqlite*\n*.duckdb\n";
+const WELCOME_MD: &str = "---\nname: Welcome\nstatus: draft\ntags: []\n---\n# Welcome\n\nThis is your vault. Notes are ordinary Markdown files.\n\n- Open the TUI: `lapis --vault .`\n- Search (needs a lattice): `lapis search --json welcome`\n- MCP: `lapis mcp`\n";
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InitResult {
+    pub path: String,
+    pub created: bool,
+}
+
+/// Create a vault directory. Idempotent: existing files are left alone.
+pub fn init_vault(raw: Option<&str>) -> Result<InitResult> {
+    let raw = raw.unwrap_or(DEFAULT_INIT_VAULT);
+    let root = crate::config::expand_tilde(raw);
+    if root.exists() && !root.is_dir() {
+        return Err(LapisError::Usage(format!("{} exists and is not a directory", root.display())));
+    }
+    let created = !root.exists();
+    std::fs::create_dir_all(root.join("Daily"))?;
+    std::fs::create_dir_all(root.join("inbox"))?;
+    std::fs::create_dir_all(root.join(".lapis"))?;
+    let gi = root.join(".gitignore");
+    if !gi.exists() {
+        std::fs::write(&gi, VAULT_GITIGNORE)?;
+    }
+    let welcome = root.join("Welcome.md");
+    if !welcome.exists() {
+        std::fs::write(&welcome, WELCOME_MD)?;
+    }
+    Ok(InitResult { path: root.display().to_string(), created })
 }
 
 /// Decide the vault-relative file path for a new note. Never overwrites.
@@ -540,18 +572,14 @@ mod tests {
     }
 
     #[test]
-    fn mail_drop_template_targets_director() {
+    fn adr_template_wraps_hal() {
         let v = vault();
-        std::fs::create_dir_all(v.join("agents/mail_room/Marci")).unwrap();
-        let mut o = opts("Brandmark greenlit");
-        o.path = Some("agents/mail_room/Marci/".into());
-        o.template = Some("builtin.mail_drop".into());
-        o.director = Some("Marci".into());
+        let mut o = opts("Use SQLite");
+        o.template = Some("builtin.adr".into());
         let w = create(&v, &o).unwrap();
         let n = notes::read(&v, &w.path).unwrap();
-        assert_eq!(n.hal["type"], "mail-drop");
-        assert_eq!(n.hal["to"], "Marci");
-        assert!(n.body.contains("**To:** Marci"));
+        assert_eq!(n.hal["type"], "adr");
+        assert!(n.body.contains("# ADR: Use SQLite"));
         let _ = std::fs::remove_dir_all(&v);
     }
 
@@ -577,40 +605,35 @@ mod tests {
     #[test]
     fn dry_run_and_stale_guards() {
         let v = vault();
-        std::fs::write(v.join("foundry/lapis/g.md"), "---\nname: G\n---\nbody\n").unwrap();
-        let before = std::fs::read_to_string(v.join("foundry/lapis/g.md")).unwrap();
-        let w = append_with(&v, "foundry/lapis/g.md", "more", &Guard { dry_run: true, ..Default::default() })
-            .unwrap();
+        std::fs::write(v.join("notes/g.md"), "---\nname: G\n---\nbody\n").unwrap();
+        let before = std::fs::read_to_string(v.join("notes/g.md")).unwrap();
+        let w =
+            append_with(&v, "notes/g.md", "more", &Guard { dry_run: true, ..Default::default() }).unwrap();
         assert!(w.dry_run);
         assert!(w.text.as_deref().unwrap().ends_with("more\n"));
-        assert_eq!(
-            std::fs::read_to_string(v.join("foundry/lapis/g.md")).unwrap(),
-            before,
-            "dry run must not write"
-        );
+        assert_eq!(std::fs::read_to_string(v.join("notes/g.md")).unwrap(), before, "dry run must not write");
         let j = serde_json::to_value(&w).unwrap();
         assert_eq!(j["dryRun"], true);
 
-        let n = notes::read(&v, "foundry/lapis/g.md").unwrap();
+        let n = notes::read(&v, "notes/g.md").unwrap();
         let ok = Guard { if_hash: Some(n.hash.clone()), if_mtime: n.updated_at, dry_run: false };
-        append_with(&v, "foundry/lapis/g.md", "real", &ok).unwrap();
-        assert!(std::fs::read_to_string(v.join("foundry/lapis/g.md")).unwrap().contains("real"));
+        append_with(&v, "notes/g.md", "real", &ok).unwrap();
+        assert!(std::fs::read_to_string(v.join("notes/g.md")).unwrap().contains("real"));
         // the file changed: the old hash is now stale
-        let e = append_with(&v, "foundry/lapis/g.md", "again", &ok).unwrap_err();
+        let e = append_with(&v, "notes/g.md", "again", &ok).unwrap_err();
         assert_eq!(e.exit_code(), 1);
         assert!(e.to_string().contains("stale"));
-        let e =
-            append_with(&v, "foundry/lapis/g.md", "x", &Guard { if_mtime: Some(1), ..Default::default() })
-                .unwrap_err();
+        let e = append_with(&v, "notes/g.md", "x", &Guard { if_mtime: Some(1), ..Default::default() })
+            .unwrap_err();
         assert!(e.to_string().contains("mtime"));
         // wire shape without a dry run has neither key
-        let w = append_with(&v, "foundry/lapis/g.md", "z", &Guard::default()).unwrap();
+        let w = append_with(&v, "notes/g.md", "z", &Guard::default()).unwrap();
         let j = serde_json::to_value(&w).unwrap();
         assert!(j.get("dryRun").is_none() && j.get("text").is_none());
 
         let mut o = CreateOpts {
             title: "Dry".into(),
-            path: Some("foundry/lapis/".into()),
+            path: Some("notes/".into()),
             template: None,
             doc_type: None,
             domain: None,
@@ -623,8 +646,8 @@ mod tests {
             dry_run: true,
         };
         let w = create(&v, &o).unwrap();
-        assert_eq!(w.path, "foundry/lapis/dry.md");
-        assert!(w.dry_run && !v.join("foundry/lapis/dry.md").exists());
+        assert_eq!(w.path, "notes/dry.md");
+        assert!(w.dry_run && !v.join("notes/dry.md").exists());
         assert!(w.text.as_deref().unwrap().starts_with("---\n"));
         o.dry_run = false;
         assert!(v.join(create(&v, &o).unwrap().path).exists());
@@ -634,16 +657,16 @@ mod tests {
     #[test]
     fn trash_moves_under_bucket_and_never_overwrites() {
         let v = vault();
-        std::fs::write(v.join("foundry/lapis/x.md"), "one").unwrap();
-        let t = trash(&v, "foundry/lapis/x.md", ".lapis/trash").unwrap();
-        assert_eq!(t.trashed_to, ".lapis/trash/foundry/lapis/x.md");
-        assert!(!v.join("foundry/lapis/x.md").exists());
+        std::fs::write(v.join("notes/x.md"), "one").unwrap();
+        let t = trash(&v, "notes/x.md", ".lapis/trash").unwrap();
+        assert_eq!(t.trashed_to, ".lapis/trash/notes/x.md");
+        assert!(!v.join("notes/x.md").exists());
         assert_eq!(std::fs::read_to_string(v.join(&t.trashed_to)).unwrap(), "one");
-        std::fs::write(v.join("foundry/lapis/x.md"), "two").unwrap();
-        let t2 = trash(&v, "foundry/lapis/x.md", ".lapis/trash").unwrap();
+        std::fs::write(v.join("notes/x.md"), "two").unwrap();
+        let t2 = trash(&v, "notes/x.md", ".lapis/trash").unwrap();
         assert_ne!(t2.trashed_to, t.trashed_to);
-        assert!(t2.trashed_to.starts_with(".lapis/trash/foundry/lapis/x."));
-        assert_eq!(trash(&v, "foundry/lapis/missing.md", ".lapis/trash").unwrap_err().exit_code(), 3);
+        assert!(t2.trashed_to.starts_with(".lapis/trash/notes/x."));
+        assert_eq!(trash(&v, "notes/missing.md", ".lapis/trash").unwrap_err().exit_code(), 3);
         assert!(matches!(trash(&v, &t.trashed_to, ".lapis/trash"), Err(LapisError::Usage(_))));
         let _ = std::fs::remove_dir_all(&v);
     }
@@ -651,11 +674,27 @@ mod tests {
     fn vault() -> PathBuf {
         let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let d = std::env::temp_dir().join(format!("lapis-write-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(d.join("foundry/lapis")).unwrap();
+        std::fs::create_dir_all(d.join("notes")).unwrap();
         d
     }
     fn opts(title: &str) -> CreateOpts {
         CreateOpts { title: title.into(), inbox: "inbox".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn init_vault_writes_welcome_and_gitignore() {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let d = std::env::temp_dir().join(format!("lapis-init-{}-{n}", std::process::id()));
+        let w = init_vault(Some(d.to_str().unwrap())).unwrap();
+        assert!(w.created);
+        assert!(d.join("Welcome.md").is_file());
+        assert!(d.join(".gitignore").is_file());
+        assert!(d.join("Daily").is_dir());
+        let gi = std::fs::read_to_string(d.join(".gitignore")).unwrap();
+        assert!(gi.contains(".lapis/"));
+        let again = init_vault(Some(d.to_str().unwrap())).unwrap();
+        assert!(!again.created);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -689,15 +728,15 @@ mod tests {
     fn create_canon_type_gets_marker_and_refuses_overwrite() {
         let v = vault();
         let mut o = opts("Lapis status");
-        o.path = Some("foundry/lapis/".into());
+        o.path = Some("notes/".into());
         o.doc_type = Some("status".into());
         o.operator = Some("Halo".into());
         o.tags = vec!["lapis".into()];
         let w = create(&v, &o).unwrap();
-        assert_eq!(w.path, "foundry/lapis/lapis-status.md");
+        assert_eq!(w.path, "notes/lapis-status.md");
         let raw = std::fs::read_to_string(v.join(&w.path)).unwrap();
         assert!(
-            raw.starts_with("---\nname: Lapis status\ntype: status\ndoc_type: status\ndomain: foundry\n"),
+            raw.starts_with("---\nname: Lapis status\ntype: status\ndoc_type: status\ndomain: notes\n"),
             "{raw}"
         );
         assert!(raw.contains("hal_version: '1.0'") || raw.contains("hal_version: \"1.0\""), "{raw}");
@@ -728,7 +767,7 @@ mod tests {
         )
         .unwrap();
         let mut o = opts("Use Rust");
-        o.path = Some("foundry/lapis/".into());
+        o.path = Some("notes/".into());
         o.template = Some("adr".into());
         let w = create(&v, &o).unwrap();
         let n = notes::read(&v, &w.path).unwrap();
@@ -748,18 +787,15 @@ mod tests {
     fn append_bumps_updated_and_preserves_unknown_keys() {
         let v = vault();
         let raw = "---\nname: X\n# a comment\nweird-key: [1, 2]\nupdated: 2020-01-01\n---\n<!--hal:authoritative:yaml-->\n\nbody\n";
-        std::fs::write(v.join("foundry/lapis/x.md"), raw).unwrap();
-        let w = append_with(&v, "foundry/lapis/x", "more text", &Guard::default()).unwrap();
-        assert_eq!(w.path, "foundry/lapis/x.md");
-        let out = std::fs::read_to_string(v.join("foundry/lapis/x.md")).unwrap();
+        std::fs::write(v.join("notes/x.md"), raw).unwrap();
+        let w = append_with(&v, "notes/x", "more text", &Guard::default()).unwrap();
+        assert_eq!(w.path, "notes/x.md");
+        let out = std::fs::read_to_string(v.join("notes/x.md")).unwrap();
         assert!(out.contains("# a comment\nweird-key: [1, 2]\n"));
         assert!(out.contains(&format!("updated: {}\n---\n<!--hal:authoritative:yaml-->", today())), "{out}");
         assert!(out.ends_with("body\n\nmore text\n"), "{out}");
         assert_eq!(w.hal["weird-key"], serde_json::json!([1, 2]));
-        assert_eq!(
-            append_with(&v, "foundry/lapis/missing.md", "x", &Guard::default()).unwrap_err().exit_code(),
-            3
-        );
+        assert_eq!(append_with(&v, "notes/missing.md", "x", &Guard::default()).unwrap_err().exit_code(), 3);
         let _ = std::fs::remove_dir_all(&v);
     }
 

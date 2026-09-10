@@ -11,6 +11,9 @@ vendor/
 /tmp/
 .env
 .lapis-local/
+.lapis/
+lattice.sqlite*
+*.duckdb
 
 # Rust
 /target

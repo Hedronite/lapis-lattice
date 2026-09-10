@@ -2,7 +2,7 @@
 //!
 //! Every built-in starts with a HAL create-set overlay (SPEC.md § Templates).
 //! Placeholders: `{{title}}`, `{{date}}`, `{{date:YYYY-MM-DD}}`, `{{week}}`,
-//! `{{month}}`, `{{slug}}`, `{{director}}`, `{{cursor}}`.
+//! `{{month}}`, `{{slug}}`, `{{operator}}`, `{{cursor}}`.
 
 use std::path::Path;
 
@@ -42,18 +42,6 @@ const BUILTINS: &[(&str, &str, &str, &str)] = &[
         "Monthly note",
         "Monthly/{{month}}.md",
         "---\ntype: monthly-note\ndomain: vault-operation\n---\n# {{month}}\n\n## Goals\n\n- [ ] {{cursor}}\n\n## Retro\n",
-    ),
-    (
-        "builtin.mail_drop",
-        "Mail-room drop",
-        "agents/mail_room/{{director}}/{{date}}-{{slug}}.md",
-        "---\ntype: mail-drop\ndoc_type: mail-drop\ndomain: mail-room\nstatus: dropped\nto: {{director}}\n---\n# {{title}}\n\n**To:** {{director}}  \n**Date:** {{date}}\n\n{{cursor}}\n",
-    ),
-    (
-        "builtin.foundry_status",
-        "Foundry status",
-        "foundry/<product>/STATUS.md",
-        "---\ntype: status\nartifact_class: status\nstatus: live\n---\n# {{title}} — status {{date}}\n\n## Plate\n\n| Surface | State |\n|---|---|\n| | |\n\n## Decisions\n\n{{cursor}}\n",
     ),
     (
         "builtin.adr",
@@ -134,7 +122,7 @@ pub fn substitute(text: &str, v: &Vars) -> String {
         .replace("{{week}}", &v.week)
         .replace("{{month}}", &v.month)
         .replace("{{slug}}", &crate::write::slug(&v.title))
-        .replace("{{director}}", &v.director)
+        .replace("{{operator}}", &v.director)
         .replace("{{cursor}}", "")
 }
 
@@ -144,7 +132,7 @@ mod tests {
 
     #[test]
     fn builtins_present_and_hal_wrapped() {
-        for id in ["builtin.daily", "builtin.mail_drop", "builtin.weekly", "builtin.monthly"] {
+        for id in ["builtin.daily", "builtin.adr", "builtin.weekly", "builtin.monthly"] {
             let t = builtins().into_iter().find(|t| t.id == id).expect(id);
             let p = hal::parse(&t.text);
             assert!(p.hal_valid && p.hal.contains_key("type"), "{id} must start with a HAL overlay");
@@ -158,13 +146,13 @@ mod tests {
         std::fs::write(dir.join(".lapis/templates/rfc.md"), "---\nname: RFC\ntype: rfc\n---\n# {{title}}\n")
             .unwrap();
         assert_eq!(find(&dir, "daily").unwrap().id, "builtin.daily");
-        assert_eq!(find(&dir, "builtin.mail_drop").unwrap().id, "builtin.mail_drop");
+        assert_eq!(find(&dir, "builtin.adr").unwrap().id, "builtin.adr");
         let c = find(&dir, "rfc").unwrap();
         assert!(!c.builtin);
         assert!(find(&dir, "nope").is_err());
         let all = list(&dir);
         assert!(all.iter().any(|t| t.id == "rfc" && t.name == "RFC"));
-        assert!(all.iter().filter(|t| t.builtin).count() >= 6);
+        assert_eq!(all.iter().filter(|t| t.builtin).count(), 5);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -177,7 +165,7 @@ mod tests {
             month: "2026-09".into(),
             director: "Marci".into(),
         };
-        let s = substitute("{{director}}/{{date}}-{{slug}} {{week}} {{month}} {{title}}{{cursor}}", &v);
+        let s = substitute("{{operator}}/{{date}}-{{slug}} {{week}} {{month}} {{title}}{{cursor}}", &v);
         assert_eq!(s, "Marci/2026-09-09-hello-world 2026-W37 2026-09 Hello World");
     }
 }
