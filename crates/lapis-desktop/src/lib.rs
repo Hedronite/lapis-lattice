@@ -106,8 +106,8 @@ mod window {
     use super::scene::{Filters, Scene};
     use super::sim::ForceSim;
     use super::view::{
-        CLICK_SLOP_PX, Camera, Group, GroupColour, KeyAction, Prim, ZOOM_STEP, highlight, hit_test,
-        key_action, paint,
+        CLICK_SLOP_PX, Camera, DIM_ALPHA, FULL_ALPHA, Group, GroupColour, KeyAction, Prim, ZOOM_STEP,
+        highlight, hit_test, key_action, paint,
     };
     use super::{DesktopError, Options, graph_data};
 
@@ -309,9 +309,14 @@ mod window {
             [f32::from(at.x) - ox, f32::from(at.y) - oy]
         }
 
-        /// The scene as drawn: filters applied, pins honoured.
-        fn visible(&self) -> Scene {
-            self.scene.filtered(&self.filters)
+        /// The scene as drawn. With no filter set this borrows: cloning two
+        /// thousand nodes every frame to change nothing is a real cost.
+        fn visible(&self) -> std::borrow::Cow<'_, Scene> {
+            if self.filters.is_open() {
+                std::borrow::Cow::Borrowed(&self.scene)
+            } else {
+                std::borrow::Cow::Owned(self.scene.filtered(&self.filters))
+            }
         }
 
         fn open_note(&mut self, id: &str) {
@@ -567,9 +572,17 @@ mod window {
                 move |bounds, _, window, _| {
                     origin.set((f32::from(bounds.origin.x), f32::from(bounds.origin.y)));
                     let at = |x: f32, y: f32| point(bounds.origin.x + px(x), bounds.origin.y + px(y));
+
+                    // Every stroke of one colour goes into one path. Tessellating
+                    // four thousand separate hairlines per frame was the whole
+                    // frame budget; four subpath batches is a rounding error.
+                    // The buckets are (solid|dashed) x (lit|dimmed), which is
+                    // every distinct colour a stroke can have.
+                    let mut batch: [Option<PathBuilder>; 4] = [None, None, None, None];
                     for p in &prims {
-                        match p {
-                            Prim::Stroke { x0, y0, x1, y1, width, dashed, alpha } => {
+                        if let Prim::Stroke { x0, y0, x1, y1, width, dashed, alpha } = p {
+                            let slot = usize::from(*dashed) | (usize::from(*alpha < FULL_ALPHA) << 1);
+                            let b = batch[slot].get_or_insert_with(|| {
                                 let mut b = PathBuilder::stroke(px(*width));
                                 if *dashed {
                                     b = b.dash_array(&[
@@ -577,33 +590,40 @@ mod window {
                                         px(super::view::DASH_PX[1]),
                                     ]);
                                 }
-                                b.move_to(at(*x0, *y0));
-                                b.line_to(at(*x1, *y1));
-                                if let Ok(path) = b.build() {
-                                    window.paint_path(path, with_alpha(edge_c, *alpha));
-                                }
+                                b
+                            });
+                            b.move_to(at(*x0, *y0));
+                            b.line_to(at(*x1, *y1));
+                        }
+                    }
+                    for (slot, b) in batch.into_iter().enumerate() {
+                        let Some(b) = b else { continue };
+                        let alpha = if slot & 2 != 0 { DIM_ALPHA } else { FULL_ALPHA };
+                        if let Ok(path) = b.build() {
+                            window.paint_path(path, with_alpha(edge_c, alpha));
+                        }
+                    }
+
+                    for p in &prims {
+                        if let Prim::Disc { x, y, r, seed, dangling, pinned, alpha, group } = p {
+                            // A group wins over the default roles: the operator
+                            // asked for that colour by query.
+                            let colour = match group {
+                                Some(g) => group_of(*g),
+                                None if *dangling => dangling_c,
+                                None if *seed => seed_c,
+                                None => node_c,
+                            };
+                            if *pinned {
+                                // A ring around a pinned disc, so a held node is
+                                // legible without a tooltip.
+                                window.paint_quad(dot(
+                                    at(*x, *y),
+                                    r + 3.0,
+                                    with_alpha(seed_c, *alpha * 0.35),
+                                ));
                             }
-                            Prim::Disc { x, y, r, seed, dangling, pinned, alpha, group } => {
-                                // A group wins over the default roles: the
-                                // operator asked for that colour by query.
-                                let colour = match group {
-                                    Some(g) => group_of(*g),
-                                    None if *dangling => dangling_c,
-                                    None if *seed => seed_c,
-                                    None => node_c,
-                                };
-                                window.paint_quad(dot(at(*x, *y), *r, with_alpha(colour, *alpha)));
-                                if *pinned {
-                                    // A ring around a pinned disc, so a held
-                                    // node is legible without a tooltip.
-                                    window.paint_quad(dot(
-                                        at(*x, *y),
-                                        r + 3.0,
-                                        with_alpha(seed_c, *alpha * 0.35),
-                                    ));
-                                }
-                            }
-                            Prim::Label { .. } => {}
+                            window.paint_quad(dot(at(*x, *y), *r, with_alpha(colour, *alpha)));
                         }
                     }
                 },

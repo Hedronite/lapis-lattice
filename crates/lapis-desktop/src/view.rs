@@ -36,6 +36,9 @@ pub const GRAB_MARGIN_PX: f32 = 4.0;
 pub const STROKE_PX: f32 = 1.0;
 /// Dash pattern for a link that resolves to nothing.
 pub const DASH_PX: [f32; 2] = [4.0, 3.0];
+/// A stroke shorter than this is inside the discs it joins; drawing it costs a
+/// tessellated path and shows nothing.
+pub const MIN_STROKE_PX: f32 = 1.5;
 
 /// Pan and zoom over a fixed layout.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -125,7 +128,9 @@ impl Camera {
 pub fn node_radius_px(n: &Node, zoom: f32) -> f32 {
     let base = 2.0 + (n.degree as f32).sqrt();
     let base = if n.is_seed { base * 1.5 } else { base };
-    (base * 1.6 * zoom.clamp(0.5, 2.0)).clamp(3.0, 44.0)
+    // The zoom contribution is damped but it has to keep shrinking discs on the
+    // way out, or a two-thousand-node vault paints itself into a solid blob.
+    (base * 1.6 * zoom.clamp(0.2, 2.0)).clamp(1.5, 44.0)
 }
 
 /// The node under `at` (board-local pixels), or none for empty space — which is
@@ -236,7 +241,7 @@ pub fn group_for(n: &Node, groups: &[Group]) -> Option<GroupColour> {
 /// does not hand out text metrics before layout, so the box is estimated; it is
 /// deliberately generous, because a label that claims too much space costs a
 /// neighbour's label, while one that claims too little costs an overlap.
-pub const LABEL_CHAR_PX: f32 = 5.2;
+pub const LABEL_CHAR_PX: f32 = 7.0;
 pub const LABEL_HEIGHT_PX: f32 = 13.0;
 /// Padding added around a label box before overlap testing.
 pub const LABEL_PAD_PX: f32 = 3.0;
@@ -332,6 +337,9 @@ pub fn paint(
     for e in &scene.edges {
         let (Some(&a), Some(&b)) = (pos.get(e.from), pos.get(e.to)) else { continue };
         let Some((p, q)) = rim_segment(a, rad[e.from], b, rad[e.to]) else { continue };
+        if (q[0] - p[0]).hypot(q[1] - p[1]) < MIN_STROKE_PX {
+            continue;
+        }
         let dashed = scene.nodes[e.from].dangling || scene.nodes[e.to].dangling;
         out.push(Prim::Stroke {
             x0: p[0],
