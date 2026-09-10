@@ -331,6 +331,12 @@ impl ForceSim {
         self.energy = self.energy.max(self.params.alpha_min * 50.0);
     }
 
+    /// True while the sim still has energy to spend, so a caller can tell
+    /// whether the next frame is already scheduled.
+    pub fn is_running(&self) -> bool {
+        !self.pos.is_empty() && self.energy >= self.params.alpha_min
+    }
+
     /// Bounding box of the current positions, for fitting a camera to it.
     pub fn extent(&self) -> ([f32; 2], [f32; 2]) {
         let mut lo = [0.0f32; 2];

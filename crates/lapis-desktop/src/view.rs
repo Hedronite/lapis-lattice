@@ -246,15 +246,17 @@ pub fn group_for(n: &Node, groups: &[Group]) -> Option<GroupColour> {
 /// inside a box of exactly [`label_width_px`] by [`LABEL_HEIGHT_PX`] and clips
 /// to it. The reservation is therefore the truth about how much room a label
 /// takes, not a guess about it.
-pub const LABEL_CHAR_PX: f32 = 8.0;
-/// Height of the drawn label box. The window sets the text's line height to
-/// this, because gpui's default line box is over two ems tall and a label
-/// reserving thirteen pixels while drawing twenty-six is how labels end up
-/// stacked on each other.
-pub const LABEL_HEIGHT_PX: f32 = 15.0;
+pub const LABEL_CHAR_PX: f32 = 9.0;
+/// Height of the drawn label box. The window pins the text's line height to
+/// this, but the reservation is sized so that labels clear each other even if
+/// the pin were ignored: gpui's default line box is `phi` rems, about 26
+/// pixels, and a reservation of this height plus padding on both sides is
+/// taller than that. Two labels that survive placement are far enough apart
+/// whatever the text system does.
+pub const LABEL_HEIGHT_PX: f32 = 20.0;
 /// Clearance kept around every drawn label. Two labels are never merely
 /// touching; they are always this far apart.
-pub const LABEL_PAD_PX: f32 = 4.0;
+pub const LABEL_PAD_PX: f32 = 5.0;
 /// Below this zoom nothing is labelled: the text would be unreadable and the
 /// board would be a wall of grey.
 pub const LABEL_MIN_ZOOM: f32 = 0.12;
@@ -866,41 +868,50 @@ mod tests {
         cam.fit(&s, BOARD);
         // Compare labels against the nodes actually on the board, so zooming
         // in is judged on density rather than on how much fell off the edge.
-        let shown = |c: &Camera| -> (usize, usize) {
-            let on_board = s
+        let shown = |c: &Camera| -> (Vec<String>, Vec<String>) {
+            let on_board: Vec<String> = s
                 .nodes
                 .iter()
                 .filter(|n| {
                     let p = c.to_screen([n.x, n.y], BOARD);
                     (0.0..=BOARD[0]).contains(&p[0]) && (0.0..=BOARD[1]).contains(&p[1])
                 })
-                .count();
-            let labels = paint(&s, c, BOARD, &Highlight::default(), &|_| false, &[])
+                .map(|n| label_stem(&n.label))
+                .collect();
+            let named: Vec<String> = paint(&s, c, BOARD, &Highlight::default(), &|_| false, &[])
                 .iter()
-                .filter(|p| matches!(p, Prim::Label { .. }))
-                .count();
-            (labels, on_board)
+                .filter_map(|p| match p {
+                    Prim::Label { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect();
+            (named, on_board)
         };
 
-        let (rest_labels, rest_nodes) = shown(&cam);
-        assert!(rest_labels > 0, "some labels survive at rest zoom");
-        assert!(rest_labels < rest_nodes, "at rest the board is too dense to name everything");
+        let (rest_named, rest_on_board) = shown(&cam);
+        assert!(!rest_named.is_empty(), "some labels survive at rest zoom");
+        assert!(rest_named.len() < rest_on_board.len(), "at rest the board is too dense to name everything");
 
+        // Zoomed in there is room, so every node on the board carries its name.
+        // A label may also survive for a node just off the edge, so this is
+        // containment, not equality.
         let mut close = cam;
-        close.zoom_by(6.0, BOARD);
-        let (near_labels, near_nodes) = shown(&close);
-        assert_eq!(near_labels, near_nodes, "zoomed in there is room to name every node on screen");
+        close.zoom_by(12.0, BOARD);
+        let (near_named, near_on_board) = shown(&close);
+        for want in &near_on_board {
+            assert!(near_named.contains(want), "zoomed in, {want} should be named");
+        }
 
         // Pulling back thins them out, and past the readability floor there
         // are none at all rather than a grey smear.
         let mut back = cam;
         back.zoom_by(0.25, BOARD);
-        assert!(shown(&back).0 < rest_labels, "pulling back drops labels");
+        assert!(shown(&back).0.len() < rest_named.len(), "pulling back drops labels");
         let mut far = cam;
         while far.zoom >= super::LABEL_MIN_ZOOM {
             far.zoom_by(0.5, BOARD);
         }
-        assert_eq!(shown(&far).0, 0, "below the readability floor, nothing is named");
+        assert!(shown(&far).0.is_empty(), "below the readability floor, nothing is named");
     }
 
     #[test]

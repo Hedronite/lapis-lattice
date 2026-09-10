@@ -173,6 +173,9 @@ mod window {
     /// pans) and whether it has travelled far enough to be a drag.
     struct Press {
         node: Option<String>,
+        /// Index of that node, resolved once. Looking it up by id on every
+        /// pointer event is a linear scan of string comparisons.
+        index: Option<usize>,
         from: [f32; 2],
         last: [f32; 2],
         moved: bool,
@@ -362,7 +365,8 @@ mod window {
                 }
                 return;
             }
-            self.press = Some(Press { node, from: at, last: at, moved: false });
+            let index = node.as_deref().and_then(|id| self.scene.index_of(id));
+            self.press = Some(Press { node, index, from: at, last: at, moved: false });
         }
 
         fn on_move(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
@@ -388,13 +392,20 @@ mod window {
             if !press.moved {
                 return;
             }
-            match press.node.clone() {
+            let held = press.node.clone();
+            let index = press.index;
+            match held {
                 // Drag a node: it follows the cursor in world space and stays
                 // where it is dropped.
                 Some(id) => {
                     let w = self.camera.to_world(at, board);
-                    self.pins.insert(id.clone(), w);
-                    if let Some(i) = self.scene.index_of(&id) {
+                    match self.pins.get_mut(&id) {
+                        Some(slot) => *slot = w,
+                        None => {
+                            self.pins.insert(id, w);
+                        }
+                    }
+                    if let Some(i) = index {
                         self.scene.nodes[i].x = w[0];
                         self.scene.nodes[i].y = w[1];
                         // The sim holds it there and lets the rest settle
@@ -406,7 +417,12 @@ mod window {
                 // Drag empty space: pan the camera. The layout does not move.
                 None => self.camera.pan_by(dx, dy),
             }
-            cx.notify();
+            // While the graph is moving the next animation frame is already
+            // booked. Asking for a second render per pointer event on top of it
+            // is how a drag loses frames it did not need to lose.
+            if !self.sim.is_running() {
+                cx.notify();
+            }
         }
 
         fn on_up(&mut self, _: &MouseUpEvent, cx: &mut Context<Self>) {
@@ -535,6 +551,21 @@ mod window {
         }
     }
 
+    /// A hollow rectangle, for the debug overlay's label boxes.
+    fn outline(x: f32, y: f32, w: f32, h: f32, origin: Point<Pixels>, colour: Hsla) -> PaintQuad {
+        PaintQuad {
+            bounds: Bounds {
+                origin: Point { x: origin.x + px(x), y: origin.y + px(y) },
+                size: Size { width: px(w), height: px(h) },
+            },
+            corner_radii: Corners::all(px(2.0)),
+            background: gpui_kit::transparent_black().into(),
+            border_widths: Edges::all(px(1.0)),
+            border_color: colour,
+            border_style: Default::default(),
+        }
+    }
+
     fn with_alpha(mut c: Hsla, a: f32) -> Hsla {
         c.a *= a;
         c
@@ -566,6 +597,7 @@ mod window {
             let labels: Vec<Prim> =
                 prims.iter().filter(|p| matches!(p, Prim::Label { .. })).cloned().collect();
             let origin = self.origin.clone();
+            let show_boxes = debug_overlay_on();
 
             // Strokes are real hairlines built with PathBuilder and dashed by
             // the tessellator: the v0.2 run-of-dots is gone.
@@ -603,6 +635,25 @@ mod window {
                         let alpha = if slot & 2 != 0 { DIM_ALPHA } else { FULL_ALPHA };
                         if let Ok(path) = b.build() {
                             window.paint_path(path, with_alpha(edge_c, alpha));
+                        }
+                    }
+
+                    if show_boxes {
+                        // The rectangle each label reserved, so a screenshot
+                        // shows whether the drawn text stays inside its claim
+                        // instead of leaving it to be argued about.
+                        for p in &prims {
+                            if let Prim::Label { x, y, text, .. } = p {
+                                let b = super::view::label_box(text, [*x, *y]);
+                                window.paint_quad(outline(
+                                    b[0],
+                                    b[1],
+                                    b[2] - b[0],
+                                    b[3] - b[1],
+                                    bounds.origin,
+                                    with_alpha(seed_c, 0.45),
+                                ));
+                            }
                         }
                     }
 
@@ -948,6 +999,8 @@ mod tests {
         assert!(src.contains("view::label_width_px"), "the drawn width is the reserved width");
         assert!(src.contains("line_height(px(LABEL_H))"), "the line box is pinned, not gpui's default");
         assert!(src.contains("overflow_hidden"), "a label cannot grow past its box");
+        assert!(src.contains("view::label_box"), "the debug overlay draws the reserved boxes");
+        assert!(src.contains("is_running()"), "a pointer event does not book a second render");
         // Every colour on the board comes from the live Omarchy palette, so a
         // theme swap restyles the graph with no restart. The only literal is a
         // group's opt-in hex.
