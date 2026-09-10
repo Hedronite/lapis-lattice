@@ -3630,6 +3630,7 @@ dependencies = [
  "gray_matter",
  "jiff",
  "lapis-desktop",
+ "lapis-lattice",
  "notify",
  "pdf-extract",
  "pulldown-cmark",
