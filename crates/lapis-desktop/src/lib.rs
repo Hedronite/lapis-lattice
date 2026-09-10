@@ -80,62 +80,43 @@ pub fn run(opts: Options) -> Result<(), DesktopError> {
 #[cfg(feature = "gpui")]
 mod window {
     use super::{DesktopError, Options};
-    use gpui::{
-        App, Application, Bounds, Context, SharedString, TitlebarOptions, Window, WindowBounds,
-        WindowOptions, div, prelude::*, px, rgb, size,
+    use gpui_kit::{
+        AppContext, Context, IntoElement, ParentElement, Render, Styled, Window, WindowOptions,
     };
-
-    /// Brand palette, same values the TUI asserts.
-    const BLUE: u32 = 0x1F_2D68;
-    const CREAM: u32 = 0xF3_E9D2;
-    const REGENT: u32 = 0x80_9DAF;
+    use gpui_omarchy::{ActiveTheme, panel};
 
     struct Root {
-        title: SharedString,
-        vault: SharedString,
-        seed: SharedString,
+        title: String,
+        vault: String,
+        seed: String,
     }
 
     impl Render for Root {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            panel(&self.title, cx)
                 .size_full()
-                .bg(rgb(BLUE))
-                .text_color(rgb(CREAM))
-                .p_4()
-                .child(div().text_xl().child(self.title.clone()))
-                .child(div().text_color(rgb(REGENT)).child(self.vault.clone()))
-                .child(div().text_color(rgb(REGENT)).child(self.seed.clone()))
+                .bg(cx.omarchy().background)
+                .child(self.vault.clone())
+                .child(self.seed.clone())
         }
     }
 
     pub fn open(opts: Options) -> Result<(), DesktopError> {
-        Application::new().run(move |cx: &mut App| {
-            let bounds = Bounds::centered(None, size(px(1100.0), px(720.0)), cx);
-            let title: SharedString = opts.title.clone().into();
-            let vault: SharedString = opts.vault_root.display().to_string().into();
-            let seed: SharedString =
-                opts.seed.clone().unwrap_or_else(|| "no note selected".to_string()).into();
-            let opened = cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some(title.clone()),
-                        appears_transparent: false,
-                        traffic_light_position: None,
-                    }),
-                    ..Default::default()
-                },
-                |_, cx| cx.new(|_| Root { title, vault, seed }),
-            );
-            match opened {
-                Ok(_) => cx.activate(true),
-                Err(e) => eprintln!("lapis desktop: could not open a window: {e}"),
-            }
-        });
+        let title = opts.title.clone();
+        let vault = opts.vault_root.display().to_string();
+        let seed = opts.seed.clone().unwrap_or_else(|| "no note selected".into());
+        gpui_kit::application()
+            .with_assets(gpui_kit::assets::Assets)
+            .run(move |cx| {
+                gpui_omarchy::init(cx);
+                let opened = cx.open_window(WindowOptions::default(), |_, cx| {
+                    cx.new(|_| Root { title: title.clone(), vault: vault.clone(), seed: seed.clone() })
+                });
+                match opened {
+                    Ok(_) => cx.activate(true),
+                    Err(e) => eprintln!("lapis desktop: could not open a window: {e}"),
+                }
+            });
         Ok(())
     }
 }
