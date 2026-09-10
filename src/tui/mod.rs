@@ -10,6 +10,7 @@ mod help;
 mod leader;
 mod mouse;
 mod neighbors_view;
+mod omarchy;
 mod palette;
 mod preview;
 mod tags_view;
@@ -157,6 +158,8 @@ struct App {
     regions: Regions,
     pending_g: bool,
     pending_templates: Option<Vec<templates::Template>>,
+    /// Name of the live Omarchy theme, when this is an Omarchy box.
+    omarchy_theme: Option<String>,
     quit: bool,
 }
 
@@ -204,6 +207,7 @@ impl App {
             regions: Regions::default(),
             pending_g: false,
             pending_templates: None,
+            omarchy_theme: None,
             quit: false,
         };
         app.start_watcher();
@@ -255,6 +259,15 @@ impl App {
         }
         let root = self.root();
         self.watch_dir(&root);
+        // Watch the parent `current/`, not the theme directory or a link target:
+        // the swap mechanism differs per Omarchy flavour (symlink on stock, a
+        // real directory on Omahedron), and watching the parent covers all of them.
+        if self.ctx.cfg.theme.is_omarchy()
+            && let Some(state) = omarchy::state_root()
+            && state.is_dir()
+        {
+            self.watch_dir(&state);
+        }
         let top: Vec<PathBuf> = self
             .tree
             .children
@@ -607,11 +620,7 @@ impl App {
             }
             Cmd::Hal => self.show_hal = !self.show_hal,
             Cmd::Tags => self.open_tags(),
-            Cmd::Theme => {
-                let next = theme::current().next();
-                theme::install(next);
-                self.set_status(format!("theme: {}", next.name));
-            }
+            Cmd::Theme => self.next_theme(),
             Cmd::Buffers => {
                 if !self.tabs.is_empty() {
                     self.overlay = Some(Overlay::Buffers(self.active));
@@ -646,6 +655,33 @@ impl App {
                 self.set_status("refreshed");
             }
         }
+    }
+
+    /// `Space z t`. On Omarchy this hops the OS theme so every app moves
+    /// together; the watcher then restyles us. Off Omarchy — or if the Omarchy
+    /// tools are missing or unhappy — it fails open onto the brand palettes
+    /// rather than leaving the user half-styled.
+    fn next_theme(&mut self) {
+        if self.ctx.cfg.theme.is_omarchy() {
+            let current = self.omarchy_theme.clone().unwrap_or_default();
+            if let Some(next) = omarchy::next_theme(&current) {
+                match omarchy::theme_set(&next) {
+                    Ok(()) => {
+                        self.set_status(format!("omarchy theme: {next}"));
+                        return;
+                    }
+                    Err(e) => {
+                        // fail open: say why, keep the current palette, fall
+                        // through to the private palettes below
+                        self.set_status(format!("omarchy theme unchanged: {e}"));
+                        return;
+                    }
+                }
+            }
+        }
+        let next = theme::current().next();
+        theme::install(next);
+        self.set_status(format!("theme: {}", next.name));
     }
 
     fn open_tasks(&mut self, view: View) {
@@ -895,6 +931,22 @@ impl App {
                 }
                 Msg::Health(ok) => self.lattice_ok = Some(ok),
                 Msg::Fs(path) => {
+                    // A theme swap restyles in place; no restart, no reindex.
+                    if let Some(state) = omarchy::state_root()
+                        && path.starts_with(&state)
+                    {
+                        if let Some(l) = omarchy::load(&state) {
+                            theme::install(l.palette);
+                            let note = if l.fallbacks.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" ({} role(s) fell back)", l.fallbacks.len())
+                            };
+                            self.set_status(format!("theme: {}{note}", l.name));
+                            self.omarchy_theme = Some(l.name);
+                        }
+                        continue;
+                    }
                     let root = self.root();
                     if let Ok(rel) = path.strip_prefix(&root) {
                         let rel = rel.to_string_lossy().to_string();
@@ -2019,6 +2071,19 @@ pub fn palette_from_config(t: &crate::config::ThemeConfig) -> theme::Palette {
     base.with_overrides(t.custom.iter().map(|(k, v)| (k.as_str(), v.as_str())))
 }
 
+/// Startup palette. On Omarchy the active theme wins; everywhere else this
+/// falls back to the brand palettes without the caller needing to know which
+/// kind of machine it is on. Returns the Omarchy theme name when one is live.
+pub fn resolve_palette(t: &crate::config::ThemeConfig) -> (theme::Palette, Option<String>) {
+    if t.is_omarchy()
+        && let Some(root) = omarchy::state_root()
+        && let Some(l) = omarchy::load(&root)
+    {
+        return (l.palette, Some(l.name));
+    }
+    (palette_from_config(t), None)
+}
+
 fn tab_label(t: &Tab) -> String {
     let name = Path::new(&t.rel)
         .file_name()
@@ -2045,8 +2110,10 @@ pub async fn run(ctx: Ctx) -> Result<()> {
         }));
         let mut term = ratatui::init();
         let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
-        theme::install(palette_from_config(&ctx.cfg.theme));
+        let (palette, omarchy_theme) = resolve_palette(&ctx.cfg.theme);
+        theme::install(palette);
         let mut app = App::new(ctx);
+        app.omarchy_theme = omarchy_theme;
         let result = ui_loop(&mut app, &mut term);
         let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
         ratatui::restore();

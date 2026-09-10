@@ -35,7 +35,7 @@ pub fn reindex(conn: &Connection, vault: &Path) -> Result<IndexReport> {
         conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get::<_, i64>(0)).map(|n| n as u64)?;
     let edges: u64 =
         conn.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get::<_, i64>(0)).map(|n| n as u64)?;
-    Ok(IndexReport { documents, chunks: chunks_n, edges })
+    Ok(IndexReport { documents, chunks: chunks_n, edges, embedded: 0, embed_error: None })
 }
 
 /// Reindex exactly one vault-relative path. A file that no longer exists is
@@ -58,7 +58,7 @@ pub fn reindex_path(conn: &Connection, vault: &Path, rel: &str) -> Result<IndexR
     let edges: u64 = conn
         .query_row("SELECT COUNT(*) FROM edges WHERE src = ?1", params![rel], |r| r.get::<_, i64>(0))
         .map(|n| n as u64)?;
-    Ok(IndexReport { documents, chunks: chunks_n, edges })
+    Ok(IndexReport { documents, chunks: chunks_n, edges, embedded: 0, embed_error: None })
 }
 
 /// Remove one path from documents, chunks, chunks_fts and edges. The FTS rows

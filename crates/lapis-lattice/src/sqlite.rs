@@ -4,6 +4,7 @@ use rusqlite::{Connection, params};
 
 use rusqlite::types::Value as SqlValue;
 
+use crate::embed::{self, Embedder};
 use crate::{
     Document, Error, Graph, Health, Hit, ListParams, Mode, PRODUCER, Result, SearchParams, SearchResult,
 };
@@ -51,6 +52,10 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             alias TEXT,
             anchor TEXT,
             resolved INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS embeddings (
+            chunk_id INTEGER PRIMARY KEY REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+            vec BLOB NOT NULL
         );
         CREATE INDEX IF NOT EXISTS edges_src ON edges(src);
         CREATE INDEX IF NOT EXISTS edges_dst ON edges(dst_path);
@@ -105,70 +110,115 @@ fn fts_expr(q: &str) -> String {
         .join(" ")
 }
 
-pub fn search(conn: &Connection, p: &SearchParams) -> Result<SearchResult> {
+pub fn search(conn: &Connection, p: &SearchParams, embedder: Option<&dyn Embedder>) -> Result<SearchResult> {
     let q = p.query.trim();
     if q.is_empty() {
         return Err(Error::Usage("search query is required".into()));
     }
-    if p.mode == Mode::Vector {
+    if p.mode == Mode::Vector && embedder.is_none() {
         // Refuse rather than quietly returning BM25 rows and calling them vector hits.
         return Err(Error::Usage(
-            "vector mode needs an embedder; the embedded index is FTS-only. Use --mode bm25|hybrid, \
-             or lattice.mode = \"http\" against a lattice that has vectors"
+            "vector mode needs an embedder; this index has none. Use --mode bm25|hybrid, or configure \
+             [embedder] and reindex"
                 .into(),
         ));
     }
     let limit = p.limit.clamp(1, 50);
     let offset = p.offset;
-    let fts = fts_expr(q);
-    if fts.trim().is_empty() {
-        return Ok(SearchResult { hits: vec![], modalities: vec!["bm25".into()] });
+    let window = ((offset as usize + limit as usize) * 8).clamp(50, 1000);
+
+    // ---- BM25 arm (skipped only in vector-only mode)
+    let mut modalities: Vec<String> = Vec::new();
+    let mut fts_hits: std::collections::HashMap<i64, Hit> = std::collections::HashMap::new();
+    let mut fts_rank: Vec<i64> = Vec::new();
+    if p.mode != Mode::Vector {
+        let fts = fts_expr(q);
+        if !fts.trim().is_empty() {
+            let mut sql = String::from(
+                "SELECT c.chunk_id, c.path, d.title, c.heading, \
+                 snippet(chunks_fts, 0, '', '', '…', 12), bm25(chunks_fts), d.domain, d.doc_type \
+                 FROM chunks_fts JOIN chunks c ON c.chunk_id = chunks_fts.rowid \
+                 JOIN documents d ON d.path = c.path WHERE chunks_fts MATCH ?1",
+            );
+            let mut args: Vec<SqlValue> = vec![SqlValue::Text(fts)];
+            if let Some(dom) = p.domain.as_deref().filter(|d| !d.trim().is_empty()) {
+                args.push(SqlValue::Text(dom.to_string()));
+                sql.push_str(&format!(" AND d.domain = ?{}", args.len()));
+            }
+            args.push(SqlValue::Integer(window as i64));
+            sql.push_str(&format!(" ORDER BY bm25(chunks_fts) LIMIT ?{}", args.len()));
+            let mut stmt = conn.prepare(&sql)?;
+            let mut rows = stmt.query(rusqlite::params_from_iter(args.iter()))?;
+            while let Some(row) = rows.next()? {
+                let id: i64 = row.get(0)?;
+                let score: f64 = row.get::<_, f64>(5).unwrap_or(0.0);
+                fts_rank.push(id);
+                fts_hits.insert(
+                    id,
+                    Hit {
+                        path: row.get(1)?,
+                        title: row.get(2)?,
+                        heading: row.get(3)?,
+                        snippet: row.get(4)?,
+                        rank: 0,
+                        // bm25() is lower-is-better; invert for a friendlier score.
+                        score: if score == 0.0 { 0.0 } else { 1.0 / (1.0 + score.abs()) },
+                        domain: row.get(6)?,
+                        doc_type: row.get(7)?,
+                    },
+                );
+            }
+        }
+        modalities.push("bm25".into());
     }
 
-    // Fetch a generous window so per-doc collapse and offset still have rows to
-    // work with, then slice in Rust. Keeps snippet() out of a GROUP BY.
-    let window = ((offset as usize + limit as usize) * 8).clamp(50, 1000) as i64;
-    let mut sql = String::from(
-        "SELECT c.path, d.title, c.heading, snippet(chunks_fts, 0, '', '', '…', 12), \
-         bm25(chunks_fts), d.domain, d.doc_type \
-         FROM chunks_fts JOIN chunks c ON c.chunk_id = chunks_fts.rowid \
-         JOIN documents d ON d.path = c.path WHERE chunks_fts MATCH ?1",
-    );
-    let mut args: Vec<SqlValue> = vec![SqlValue::Text(fts)];
-    if let Some(dom) = p.domain.as_deref().filter(|d| !d.trim().is_empty()) {
-        args.push(SqlValue::Text(dom.to_string()));
-        sql.push_str(&format!(" AND d.domain = ?{}", args.len()));
+    // ---- Vector arm. A failure here drops the arm; it never invents a vector.
+    let mut vec_rank: Vec<i64> = Vec::new();
+    if p.mode != Mode::Bm25
+        && let Some(e) = embedder
+        && let Ok(ids) = embed::vector_rank(conn, e, q, window)
+        && !ids.is_empty()
+    {
+        vec_rank = ids;
+        modalities.push("vector".into());
     }
-    args.push(SqlValue::Integer(window));
-    sql.push_str(&format!(" ORDER BY bm25(chunks_fts) LIMIT ?{}", args.len()));
+    if p.mode == Mode::Vector && vec_rank.is_empty() {
+        // asked for vectors only, and the arm produced nothing usable
+        return Ok(SearchResult { hits: vec![], modalities });
+    }
 
-    let mut stmt = conn.prepare(&sql)?;
-    let mut rows = stmt.query(rusqlite::params_from_iter(args.iter()))?;
-    let mut scored: Vec<Hit> = Vec::new();
+    // ---- Fuse. One arm alone keeps its own order.
+    let mut rankings: Vec<Vec<i64>> = Vec::new();
+    if !fts_rank.is_empty() {
+        rankings.push(fts_rank.clone());
+    }
+    if !vec_rank.is_empty() {
+        rankings.push(vec_rank.clone());
+    }
+    let fused = embed::rrf(&rankings, 60.0);
+
+    // ---- Collapse, page, rank.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    while let Some(row) = rows.next()? {
-        let path: String = row.get(0)?;
-        if p.per_doc && !seen.insert(path.clone()) {
+    let mut hits: Vec<Hit> = Vec::new();
+    for id in fused {
+        let hit = match fts_hits.remove(&id) {
+            Some(h) => h,
+            None => match hydrate_chunk(conn, id, p.domain.as_deref())? {
+                Some(h) => h,
+                None => continue,
+            },
+        };
+        if p.per_doc && !seen.insert(hit.path.clone()) {
             continue;
         }
-        let score: f64 = row.get::<_, f64>(4).unwrap_or(0.0);
-        scored.push(Hit {
-            path,
-            title: row.get(1)?,
-            heading: row.get(2)?,
-            snippet: row.get(3)?,
-            rank: 0,
-            // bm25() is lower-is-better; invert for a friendlier score.
-            score: if score == 0.0 { 0.0 } else { 1.0 / (1.0 + score.abs()) },
-            domain: row.get(5)?,
-            doc_type: row.get(6)?,
-        });
+        hits.push(hit);
+        if hits.len() >= offset as usize + limit as usize {
+            break;
+        }
     }
-
-    let hits: Vec<Hit> = scored
+    let hits: Vec<Hit> = hits
         .into_iter()
         .skip(offset as usize)
-        .take(limit as usize)
         .enumerate()
         .map(|(i, mut h)| {
             // Ranks stay absolute across pages.
@@ -176,7 +226,36 @@ pub fn search(conn: &Connection, p: &SearchParams) -> Result<SearchResult> {
             h
         })
         .collect();
-    Ok(SearchResult { hits, modalities: vec!["bm25".into()] })
+    Ok(SearchResult { hits, modalities })
+}
+
+/// Build a hit for a chunk the BM25 arm never saw (vector-only match). The
+/// snippet is a plain text head: `snippet()` only exists inside an FTS query.
+fn hydrate_chunk(conn: &Connection, chunk_id: i64, domain: Option<&str>) -> Result<Option<Hit>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.path, d.title, c.heading, c.text, d.domain, d.doc_type \
+         FROM chunks c JOIN documents d ON d.path = c.path WHERE c.chunk_id = ?1",
+    )?;
+    let mut rows = stmt.query(params![chunk_id])?;
+    let Some(row) = rows.next()? else { return Ok(None) };
+    let dom: Option<String> = row.get(4)?;
+    if let Some(want) = domain.filter(|d| !d.trim().is_empty())
+        && dom.as_deref() != Some(want)
+    {
+        return Ok(None);
+    }
+    let text: String = row.get(3)?;
+    let snippet: String = text.chars().take(160).collect();
+    Ok(Some(Hit {
+        path: row.get(0)?,
+        title: row.get(1)?,
+        heading: row.get(2)?,
+        snippet: Some(snippet),
+        rank: 0,
+        score: 0.0,
+        domain: dom,
+        doc_type: row.get(5)?,
+    }))
 }
 
 /// `lapis list`: documents table, filtered and paged.
@@ -243,13 +322,19 @@ pub fn health(conn: &Connection, db_path: &Path) -> Result<Health> {
     // `built` distinguishes "never indexed" from "indexed, no links".
     let built = meta_get(conn, "graph_built").as_deref() == Some("1");
     let embed_model = meta_get(conn, "embed_model").filter(|m| m != "none");
+    let embedder = match meta_get(conn, "embedder").as_deref() {
+        Some("ollama") => "ollama",
+        Some("onnx") => "onnx",
+        _ => "none",
+    };
+    let embed_dim = meta_get(conn, "embed_dim").and_then(|d| d.parse::<u32>().ok());
     Ok(Health {
         status: if built { "ok".into() } else { "degraded".into() },
         documents_indexed,
         db_path: db_path.display().to_string(),
-        embedder: "none",
+        embedder,
         embed_model,
-        embed_dim: None,
+        embed_dim,
         graph: Graph { built, edges, dangling_links },
     })
 }

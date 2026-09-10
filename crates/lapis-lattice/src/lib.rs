@@ -8,6 +8,7 @@
 //! agent-memory store, say) fails loudly instead of quietly mixing corpora.
 
 mod analytics;
+mod embed;
 mod graph;
 mod index;
 mod sqlite;
@@ -18,6 +19,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 
 pub use analytics::{ANALYTICS_QUERIES, Analytics};
+pub use embed::Embedder;
 pub use graph::Neighbor;
 
 /// Written into `meta.producer` at creation; asserted on open.
@@ -39,6 +41,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Engine {
     vault: PathBuf,
     conn: Connection,
+    embedder: Option<std::sync::Arc<dyn Embedder>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -132,15 +135,37 @@ pub struct Health {
     pub graph: Graph,
 }
 
+/// The embedding space recorded in an index, read without a provider round-trip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StoredEmbedder {
+    pub provider: String,
+    pub model: String,
+    pub dim: u32,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct IndexReport {
     pub documents: u64,
     pub chunks: u64,
     pub edges: u64,
+    /// Chunks given a vector this run. Zero without an embedder.
+    pub embedded: u64,
+    /// Why the semantic arm produced nothing. Indexing still succeeded: files
+    /// are the source of truth and BM25 still answers.
+    pub embed_error: Option<String>,
 }
 
 impl Engine {
+    /// Open with no semantic arm: FTS-only, which is the first-run default.
     pub fn open(vault: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with(vault, None)
+    }
+
+    /// Open with an optional [`Embedder`]. Transport lives in the caller.
+    pub fn open_with(
+        vault: impl AsRef<Path>,
+        embedder: Option<std::sync::Arc<dyn Embedder>>,
+    ) -> Result<Self> {
         let vault = vault.as_ref().canonicalize().unwrap_or_else(|_| vault.as_ref().to_path_buf());
         if !vault.is_dir() {
             return Err(Error::Usage(format!("vault is not a directory: {}", vault.display())));
@@ -151,22 +176,39 @@ impl Engine {
         let conn = Connection::open(&db)?;
         sqlite::migrate(&conn)?;
         sqlite::assert_producer(&conn, &db)?;
-        Ok(Self { vault, conn })
+        // A change of model or dimension wipes stored vectors: keeping rows from
+        // a different embedding space would compare incomparable numbers.
+        embed::reconcile_space(&conn, embedder.as_deref())?;
+        Ok(Self { vault, conn, embedder })
     }
 
     pub fn db_path(&self) -> PathBuf {
         self.vault.join(".lapis/lattice.sqlite")
     }
 
-    /// Full-vault reindex. Use [`Engine::reindex_path`] after a single write.
+    /// Full-vault reindex, then embed anything missing a vector.
     pub fn reindex(&mut self) -> Result<IndexReport> {
-        index::reindex(&self.conn, &self.vault)
+        let mut r = index::reindex(&self.conn, &self.vault)?;
+        self.embed_into(&mut r);
+        Ok(r)
     }
 
     /// Reindex exactly one vault-relative path, in place. A removed file is
     /// dropped from the index. Costs one file read, not a vault walk.
     pub fn reindex_path(&mut self, rel: &str) -> Result<IndexReport> {
-        index::reindex_path(&self.conn, &self.vault, rel)
+        let mut r = index::reindex_path(&self.conn, &self.vault, rel)?;
+        self.embed_into(&mut r);
+        Ok(r)
+    }
+
+    /// Best-effort embedding. A dead embedder must not fail a write — the note
+    /// is already on disk and BM25 already finds it — so the error is carried
+    /// in the report instead of returned.
+    fn embed_into(&mut self, r: &mut IndexReport) {
+        match self.embed_pending() {
+            Ok(n) => r.embedded = n,
+            Err(e) => r.embed_error = Some(e.to_string()),
+        }
     }
 
     /// Convenience wrapper kept for the 0.1 API.
@@ -175,7 +217,39 @@ impl Engine {
     }
 
     pub fn search_with(&self, p: &SearchParams) -> Result<SearchResult> {
-        sqlite::search(&self.conn, p)
+        sqlite::search(&self.conn, p, self.embedder.as_deref())
+    }
+
+    /// Embed any chunk that has no vector yet. No-op without an embedder.
+    /// An embedder error surfaces here rather than storing a placeholder.
+    pub fn embed_pending(&mut self) -> Result<u64> {
+        match self.embedder.clone() {
+            Some(e) => embed::embed_missing(&self.conn, e.as_ref(), 32),
+            None => Ok(0),
+        }
+    }
+
+    /// The embedding space already recorded in a vault's index, without
+    /// opening a full engine and without contacting any provider. This is what
+    /// lets `auto` resolve once at init/doctor and stay resolved: ordinary
+    /// commands read the answer instead of probing a daemon on every search.
+    pub fn stored_embedder(vault: impl AsRef<Path>) -> Option<StoredEmbedder> {
+        let db = vault.as_ref().join(".lapis/lattice.sqlite");
+        let conn = Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+        let provider = sqlite::meta_get(&conn, "embedder")?;
+        if provider == "none" {
+            return None;
+        }
+        Some(StoredEmbedder {
+            model: sqlite::meta_get(&conn, "embed_model")?,
+            dim: sqlite::meta_get(&conn, "embed_dim")?.parse().ok()?,
+            provider,
+        })
+    }
+
+    /// Which arm is live: `none` | `ollama` | `onnx`.
+    pub fn embedder_name(&self) -> &'static str {
+        self.embedder.as_ref().map(|e| e.provider()).unwrap_or("none")
     }
 
     /// `lapis list`: the documents table, filtered and paged.
@@ -323,7 +397,7 @@ mod tests {
             mode: Mode::Vector,
             ..Default::default()
         });
-        assert!(matches!(v, Err(Error::Usage(m)) if m.contains("FTS-only")));
+        assert!(matches!(v, Err(Error::Usage(m)) if m.contains("needs an embedder")));
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -403,6 +477,147 @@ mod tests {
                 .iter()
                 .all(|x| x.path != "Missing.md")
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A test double, not a product fallback. Deterministic and content-dependent
+    /// so cosine ordering is real: different text genuinely gets a different
+    /// vector. The product never synthesises vectors — see the test below.
+    struct BagEmbedder {
+        model: &'static str,
+        dim: usize,
+    }
+
+    impl Embedder for BagEmbedder {
+        fn model(&self) -> &str {
+            self.model
+        }
+        fn dim(&self) -> usize {
+            self.dim
+        }
+        fn provider(&self) -> &'static str {
+            "onnx"
+        }
+        fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|t| bag(t, self.dim)).collect())
+        }
+        fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+            Ok(bag(text, self.dim))
+        }
+    }
+
+    fn bag(text: &str, dim: usize) -> Vec<f32> {
+        let mut v = vec![0.0f32; dim];
+        for c in text.to_lowercase().chars().filter(|c| c.is_ascii_alphabetic()) {
+            v[(c as usize - 'a' as usize) % dim] += 1.0;
+        }
+        v
+    }
+
+    /// An embedder that is present but broken — the Ollama-is-down case.
+    struct DeadEmbedder;
+
+    impl Embedder for DeadEmbedder {
+        fn model(&self) -> &str {
+            "dead-model"
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+        fn provider(&self) -> &'static str {
+            "ollama"
+        }
+        fn embed_documents(&self, _: &[String]) -> Result<Vec<Vec<f32>>> {
+            Err(Error::Usage("ollama unreachable".into()))
+        }
+        fn embed_query(&self, _: &str) -> Result<Vec<f32>> {
+            Err(Error::Usage("ollama unreachable".into()))
+        }
+    }
+
+    /// B9, the named one. A failing embedder must drop the vector arm and write
+    /// nothing. Storing a placeholder would give cosine 1.0 against every query,
+    /// so recall would look perfect and be meaningless — worse than no vectors.
+    #[test]
+    fn embedder_failure_omits_vector_arm_and_never_writes_a_dummy() {
+        let d = vault();
+        let mut e = Engine::open_with(&d, Some(std::sync::Arc::new(DeadEmbedder))).unwrap();
+
+        // Indexing still succeeds: files are the source of truth and BM25 answers.
+        let r = e.reindex().unwrap();
+        assert_eq!(r.documents, 2);
+        assert_eq!(r.embedded, 0, "nothing was embedded");
+        assert!(r.embed_error.is_some(), "and the failure is reported, not swallowed");
+
+        // The decisive assertion: no placeholder rows.
+        let stored: i64 =
+            e.conn.query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0)).expect("count embeddings");
+        assert_eq!(stored, 0, "a failed embedder must write no vectors at all");
+
+        // Search still works, and says truthfully that only BM25 ran.
+        let res = e
+            .search_with(&SearchParams { query: "welcome".into(), limit: 10, ..Default::default() })
+            .unwrap();
+        assert!(!res.hits.is_empty(), "BM25 still answers");
+        assert_eq!(res.modalities, ["bm25"], "the vector arm is omitted, not faked");
+        assert!(
+            res.hits.iter().all(|h| h.score < 1.0),
+            "no hit carries a cosine-1.0 score from a synthesised vector"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The working path: vectors are stored, fusion reports both arms, and a
+    /// change of embedding space wipes rather than mixing incomparable rows.
+    #[test]
+    fn vector_arm_fuses_and_wipes_on_model_change() {
+        let d = vault();
+        let count = |e: &Engine| -> i64 {
+            e.conn.query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0)).unwrap()
+        };
+        {
+            let mut e =
+                Engine::open_with(&d, Some(std::sync::Arc::new(BagEmbedder { model: "bag-v1", dim: 8 })))
+                    .unwrap();
+            let r = e.reindex().unwrap();
+            assert!(r.embed_error.is_none());
+            assert!(r.embedded > 0 && r.embedded == r.chunks, "every chunk got a vector");
+            assert_eq!(count(&e), r.chunks as i64);
+
+            let res = e
+                .search_with(&SearchParams { query: "welcome".into(), limit: 10, ..Default::default() })
+                .unwrap();
+            assert_eq!(res.modalities, ["bm25", "vector"], "both arms ran and are reported");
+            assert!(!res.hits.is_empty());
+
+            let h = e.health().unwrap();
+            assert_eq!(h.embedder, "onnx");
+            assert_eq!(h.embed_model.as_deref(), Some("bag-v1"));
+            assert_eq!(h.embed_dim, Some(8));
+        }
+        // Same model, reopened: vectors survive.
+        {
+            let e = Engine::open_with(&d, Some(std::sync::Arc::new(BagEmbedder { model: "bag-v1", dim: 8 })))
+                .unwrap();
+            assert!(count(&e) > 0, "reopening with the same space keeps vectors");
+        }
+        // Different dimension: the space changed, so stored vectors are dropped.
+        {
+            let e =
+                Engine::open_with(&d, Some(std::sync::Arc::new(BagEmbedder { model: "bag-v1", dim: 12 })))
+                    .unwrap();
+            assert_eq!(count(&e), 0, "a dimension change wipes incomparable rows");
+        }
+        // Dropping the embedder entirely also clears the space and reports none.
+        {
+            let e = Engine::open(&d).unwrap();
+            assert_eq!(count(&e), 0);
+            assert_eq!(e.health().unwrap().embedder, "none");
+            let res = e
+                .search_with(&SearchParams { query: "welcome".into(), limit: 5, ..Default::default() })
+                .unwrap();
+            assert_eq!(res.modalities, ["bm25"]);
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

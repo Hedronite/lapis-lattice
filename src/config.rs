@@ -29,14 +29,36 @@ pub struct Config {
     pub theme: ThemeConfig,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct ThemeConfig {
-    /// `lapis` (default), `parchment`, `obsidian`.
+    /// `omarchy` (default) follows `~/.local/state/omarchy/current/`;
+    /// `lapis` pins the brand palettes. Off Omarchy, `omarchy` falls back to
+    /// brand on its own, so the default is safe everywhere.
+    #[serde(default = "default_theme_mode")]
+    pub mode: String,
+    /// `lapis` (default), `parchment`, `obsidian`. Only when `mode = "lapis"`.
     #[serde(default)]
     pub name: Option<String>,
     /// Role → `#RRGGBB`: blue, blue_deep, blue_soft, regent, cream, gold, copper, muted, ok, warn.
     #[serde(default)]
     pub custom: std::collections::BTreeMap<String, String>,
+}
+
+fn default_theme_mode() -> String {
+    "omarchy".to_string()
+}
+
+impl Default for ThemeConfig {
+    fn default() -> Self {
+        Self { mode: default_theme_mode(), name: None, custom: Default::default() }
+    }
+}
+
+impl ThemeConfig {
+    /// True unless the operator pinned the brand palettes.
+    pub fn is_omarchy(&self) -> bool {
+        !self.mode.eq_ignore_ascii_case("lapis")
+    }
 }
 
 /// `[agent]`: how the MCP server and `--agent` behave by default.
@@ -219,6 +241,8 @@ mod tests {
     fn theme_and_task_exclude() {
         let c: Config = toml::from_str("").unwrap();
         assert_eq!(c.theme, ThemeConfig::default());
+        assert_eq!(c.theme.mode, "omarchy", "Omarchy-native is the default");
+        assert!(c.theme.is_omarchy());
         assert!(c.agent.task_exclude.is_empty());
         let c: Config = toml::from_str(
             "[agent]\ntask_exclude = [\"assets/\", \"Archmagus-Stack/Sovereign-Bootcamp/\"]\n[theme]\nname = \"parchment\"\n[theme.custom]\ngold = \"#FFD700\"\n",
@@ -227,6 +251,9 @@ mod tests {
         assert_eq!(c.theme.name.as_deref(), Some("parchment"));
         assert_eq!(c.theme.custom.get("gold").map(String::as_str), Some("#FFD700"));
         assert_eq!(c.agent.task_exclude, ["assets/", "Archmagus-Stack/Sovereign-Bootcamp/"]);
+        // mode is independent of name: pinning brand palettes opts out of Omarchy
+        let pinned: Config = toml::from_str("[theme]\nmode = \"lapis\"\n").unwrap();
+        assert!(!pinned.theme.is_omarchy());
     }
 
     #[test]
