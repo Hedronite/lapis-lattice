@@ -1,0 +1,20 @@
+[package]
+name = "lapis-lattice"
+version = "0.1.0"
+edition = "2024"
+description = "Embedded SQLite+FTS5 index for a local Markdown vault: BM25 search, wikilink graph, allowlisted analytics. No HTTP daemon, no Turso, no DuckDB."
+license = "MIT"
+repository = "https://github.com/VirtualMachinist/lapis"
+homepage = "https://github.com/VirtualMachinist/lapis"
+documentation = "https://docs.rs/lapis-lattice"
+readme = "README.md"
+keywords = ["notes", "fts5", "sqlite", "markdown", "search"]
+categories = ["database", "text-processing"]
+exclude = []
+
+[dependencies]
+regex = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"

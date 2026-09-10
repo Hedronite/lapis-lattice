@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/lapis-desktop"]
+members = [".", "crates/lapis-desktop", "crates/lapis-lattice"]
 
 [package]
 name = "lapis"
