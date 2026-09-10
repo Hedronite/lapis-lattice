@@ -59,6 +59,43 @@ jobs:
           test "$code" -ne 0
           echo "$out" | grep -q 'lattice.mode'
 
+  # Real window binary (gpui-omarchy), not the 5a hello-world spike.
+  # Default `test` job keeps desktop off so it needs no GUI libs.
+  desktop-linux:
+    name: desktop linux-x64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: GUI system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libvulkan-dev libx11-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
+            libasound2-dev libssl-dev
+      - name: build (desktop on)
+        run: cargo build --release --bin lapis --features desktop
+      - name: desktop --check reports gpui
+        run: |
+          ./target/release/lapis --help
+          tmp=$(mktemp -d)
+          ./target/release/lapis init "$tmp"
+          ./target/release/lapis --vault "$tmp" desktop --check | tee check.txt
+          grep -q 'gpui=true' check.txt
+      - name: strip and package
+        run: |
+          strip target/release/lapis || true
+          mkdir -p dist
+          tar -C target/release -czf dist/lapis-desktop-linux-x64.tar.gz lapis
+          cd dist && shasum -a 256 lapis-desktop-linux-x64.tar.gz > lapis-desktop-linux-x64.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lapis-desktop-linux-x64
+          path: dist/*
+          if-no-files-found: error
+
   scrub:
     name: operator-topology grep gate
     runs-on: ubuntu-latest

@@ -19,7 +19,7 @@
 
 ---
 
-Lapis is a notes vault for people who work with agents. Notes stay ordinary Markdown files in a folder you own. A TUI, a JSON CLI, and an MCP server share those files. Search and the wikilink graph currently talk to a **Lapis Lattice** HTTP index; an **embedded SQLite + FTS5** index is the 0.2 work so a stranger can install this without a sidecar.
+Lapis is a notes vault for people who work with agents. Notes stay ordinary Markdown files in a folder you own. A TUI, a JSON CLI, and an MCP server share those files. Search and hop-1 neighbors use an **embedded SQLite + FTS5** index at `<vault>/.lapis/lattice.sqlite` (`meta.producer = lapis-lattice`). An HTTP lattice is opt-in (`lattice.mode = http`).
 
 No hosted notes service. Files are the source of truth.
 
@@ -30,7 +30,7 @@ No hosted notes service. Files are the source of truth.
 | **TUI** | you | Vim, preview, tasks, Kanban, dailies, templates, hop-1 graph pane |
 | **CLI** | scripts and agents | `lapis --json` |
 | **MCP** | coding agents | `lapis mcp` over stdio |
-| **Desktop** | preview | `lapis desktop` — off by default (`--features desktop`). A window exists; the visual knowledge-graph canvas is not painted yet |
+| **Desktop** | Linux / Omarchy | `lapis desktop` — off in the default CLI asset. The Linux desktop asset paints hop-1/hop-2 (gpui-omarchy). |
 
 ## Install
 
@@ -58,13 +58,14 @@ Full contract: [docs/install.md](docs/install.md).
 
 There is **no default vault**. A bare `lapis` without `--vault`, `$LAPIS_VAULT`, or config `vault` exits 1 and tells you to `lapis init`.
 
-Search, neighbors, list, analytics, and tree still need a lattice HTTP server (`http://127.0.0.1:8080` by default). If it is down those commands exit **2**. The TUI still opens the files. Embedded index (no TCP) is 0.2.
+Default search, list, neighbors (hop-1), and doctor talk to the embedded index. They open **no listening socket**. Hop-2 ego and `tree-retrieve` on embedded say they require `lattice.mode = http` rather than failing empty.
 
 ```text
 lapis init ~/Notes
 lapis --vault ~/Notes
-lapis read --json Welcome.md
-lapis task list --json
+lapis --vault ~/Notes --json search welcome
+lapis --vault ~/Notes --json list
+lapis --vault ~/Notes doctor
 ```
 
 ```json
@@ -75,15 +76,16 @@ lapis task list --json
 
 | Works today | Not yet |
 |---|---|
-| TUI, JSON CLI envelope, MCP | Search without an HTTP lattice (CLI still HTTP; engine crate is on crates.io) |
-| Tasks, dailies, templates (`note`, `daily`, `weekly`, `monthly`, `adr`) | GitHub Release binaries / Homebrew (install.sh builds from git today) |
-| Path sandbox, dry-run / mtime / hash guards | Windows |
-| Desktop window with `--features desktop` (Metal on macOS) | Visual knowledge-graph **canvas** (data layer only) |
-| PDF read-through when the lattice has indexed a tome | YAML/HTML as first-class document types in search |
+| TUI, JSON CLI envelope, MCP | Windows |
+| Embedded search / list / hop-1 / doctor (no `:8080`) | Tagged GitHub Release / Homebrew (install.sh is ready; tag needs GO) |
+| Tasks, dailies, templates (`note`, `daily`, `weekly`, `monthly`, `adr`) | Hop-2 ego and `tree-retrieve` on the embedded default (honest HTTP-required) |
+| HTML and YAML as first-class kinds | Dummy / fallback embeddings (will not ship) |
+| TUI Omarchy live-follow (`colors.toml`) | |
+| Linux desktop canvas: hop-1/hop-2, dashed dangling, click-to-open | |
 
 ## Status
 
-**Beta** (0.1): a well-built client over Markdown + an optional HTTP lattice. Not a public one-command app until 0.2 ships the embedded index.
+**Beta** (0.2 on `feat/v0.2-desktop`, not tagged): embedded index is the default. Tag `v0.2.0` only with operator GO.
 
 Requirements: macOS or Linux. Embeddings (Ollama / ONNX) are optional. Do **not** install Turso, DuckDB, Xcode, or Python to use the default binary.
 

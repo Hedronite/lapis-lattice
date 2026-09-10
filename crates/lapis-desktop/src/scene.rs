@@ -3,7 +3,7 @@
 //! Layout is deterministic and dependency-free: the seed at the origin, depth-1
 //! nodes on a ring, depth-2 nodes on a wider ring clustered near their `via`
 //! parent. Positions are in canvas units (the seed ring radius is 1.0), so the
-//! view scales them. `draw()` is a stub that returns the primitive list.
+//! view scales them. `draw()` is the paint list the gpui-omarchy window consumes.
 
 use std::collections::BTreeMap;
 
@@ -79,12 +79,61 @@ fn stem(p: &str) -> String {
     base.strip_suffix(".md").unwrap_or(base).to_string()
 }
 
+impl Node {
+    /// First path segment (`notes/Alpha.md` → `notes`). Files at the vault root
+    /// have no domain.
+    pub fn domain(&self) -> Option<&str> {
+        self.id.split_once('/').map(|(d, _)| d)
+    }
+
+    /// Gate C filters: seed always stays; dangling can be hidden; one domain at
+    /// a time (or all).
+    pub fn passes(&self, show_dangling: bool, domain: Option<&str>) -> bool {
+        if self.is_seed {
+            return true;
+        }
+        if self.dangling && !show_dangling {
+            return false;
+        }
+        match domain {
+            None => true,
+            Some(d) => self.domain() == Some(d),
+        }
+    }
+}
+
 impl Scene {
     pub fn seed(&self) -> Option<&Node> {
         self.nodes.iter().find(|n| n.is_seed)
     }
     pub fn index_of(&self, id: &str) -> Option<usize> {
         self.nodes.iter().position(|n| n.id == id)
+    }
+
+    /// Unique first-path-segment domains in the scene, sorted.
+    pub fn domains(&self) -> Vec<String> {
+        let mut d: Vec<String> = self.nodes.iter().filter_map(|n| n.domain().map(str::to_string)).collect();
+        d.sort();
+        d.dedup();
+        d
+    }
+
+    /// Sub-scene after Gate C filters. Edge endpoints that did not survive are dropped.
+    pub fn filtered(&self, show_dangling: bool, domain: Option<&str>) -> Scene {
+        let mut remap = vec![None; self.nodes.len()];
+        let mut nodes = Vec::new();
+        for (i, n) in self.nodes.iter().enumerate() {
+            if n.passes(show_dangling, domain) {
+                remap[i] = Some(nodes.len());
+                nodes.push(n.clone());
+            }
+        }
+        let edges = self
+            .edges
+            .iter()
+            .filter_map(|e| Some(Edge { from: remap[e.from]?, to: remap[e.to]?, dir: e.dir.clone() }))
+            .collect();
+        Scene { nodes, edges, truncated: self.truncated }
     }
 }
 
@@ -174,7 +223,8 @@ pub fn from_json(json: &str) -> Result<Scene, serde_json::Error> {
     Ok(build(&ego))
 }
 
-/// Draw primitives; the GPU pass is a stub until the window lands.
+/// Draw primitives the window paints: straight `Line`s (dashed when dangling),
+/// `Disc`s, and stem `Label`s.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum Prim {
     Line { x0: f32, y0: f32, x1: f32, y1: f32, dashed: bool },
@@ -240,12 +290,33 @@ mod tests {
         }
         assert!(s.edges.iter().any(|e| e.dir == "in"));
         let prims = draw(&s);
+        let discs = prims.iter().filter(|p| matches!(p, Prim::Disc { .. })).count();
+        let lines = prims.iter().filter(|p| matches!(p, Prim::Line { .. })).count();
+        let labels = prims.iter().filter(|p| matches!(p, Prim::Label { .. })).count();
+        assert_eq!(discs, s.nodes.len(), "one Disc per node");
+        assert_eq!(lines, s.edges.len(), "one Line per edge");
+        assert_eq!(labels, s.nodes.len(), "one Label per node");
         assert_eq!(prims.len(), 5 + 6 * 2);
         assert!(prims.iter().any(|p| matches!(p, Prim::Line { dashed: true, .. })));
         assert!(prims.iter().any(|p| matches!(p, Prim::Disc { seed: true, .. })));
         // Lapis envelope wrapping is accepted too
         let wrapped = format!(r#"{{"ok":true,"data":{FIXTURE},"error":null,"meta":{{}}}}"#);
         assert_eq!(from_json(&wrapped).unwrap().nodes.len(), 6);
+    }
+
+    #[test]
+    fn filters_hide_dangling_and_other_domains() {
+        let s = from_json(FIXTURE).unwrap();
+        assert_eq!(s.domains(), vec!["Cross-References".to_string(), "briefs".into(), "ideas".into()]);
+        let no_dang = s.filtered(false, None);
+        assert_eq!(no_dang.nodes.len(), 5, "seed + 4 resolved; dangling dropped");
+        assert!(!no_dang.nodes.iter().any(|n| n.dangling));
+        assert_eq!(draw(&no_dang).iter().filter(|p| matches!(p, Prim::Line { dashed: true, .. })).count(), 0);
+
+        let ideas = s.filtered(true, Some("ideas"));
+        assert!(ideas.seed().is_some(), "seed stays under a domain filter");
+        assert!(ideas.nodes.iter().all(|n| n.is_seed || n.domain() == Some("ideas")));
+        assert_eq!(ideas.nodes.iter().filter(|n| n.depth == 2).count(), 2);
     }
 
     #[test]

@@ -7,10 +7,14 @@ license = "MIT"
 
 [features]
 default = []
-# The real window. Heavy build (Metal shaders); everything else in this crate compiles without it.
-gpui = ["dep:gpui"]
+# Real window via gpui-omarchy (not Zed gpui 0.2). Heavy; everything else compiles without it.
+# Painting primitives (`canvas`, `paint_quad`) come through gpui-kit's `gpui` re-export.
+gpui = ["dep:gpui-omarchy", "dep:gpui-kit"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-gpui = { version = "0.2", optional = true }
+gpui-omarchy = { version = "0.1.2", optional = true }
+gpui-kit = { version = "=0.6.1", optional = true, default-features = false, features = ["assets"] }
+# Graph data comes from the vault's own index — no daemon, same as the CLI.
+lapis-lattice = { path = "../lapis-lattice", version = "0.1.0" }
