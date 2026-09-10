@@ -14,13 +14,16 @@ use std::collections::BTreeSet;
 
 use crate::scene::{Edge, Node, Scene};
 
-/// Scene units to pixels at zoom 1.
-pub const UNIT: f32 = 120.0;
+/// Scene units to pixels at zoom 1. Scene units are the sim's own, so the base
+/// is 1 and [`Camera::fit`] chooses the zoom that makes a graph fill the board.
+pub const UNIT: f32 = 1.0;
 /// Non-neighbours during hover. Quartz dims to this and so do we.
 pub const DIM_ALPHA: f32 = 0.2;
 pub const FULL_ALPHA: f32 = 1.0;
-pub const MIN_ZOOM: f32 = 0.2;
-pub const MAX_ZOOM: f32 = 8.0;
+pub const MIN_ZOOM: f32 = 0.02;
+pub const MAX_ZOOM: f32 = 40.0;
+/// Breathing room when fitting a graph to the board.
+pub const FIT_MARGIN_PX: f32 = 48.0;
 /// One `+` / `-` press, and one wheel line.
 pub const ZOOM_STEP: f32 = 1.2;
 /// A press that travels further than this is a drag, not a click.
@@ -88,6 +91,27 @@ impl Camera {
 
     pub fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    /// Frame the whole scene: centre its bounding box and pick the zoom that
+    /// fits it with a margin. This is what makes "reset" mean "show me
+    /// everything" instead of "show me whatever is near the origin".
+    pub fn fit(&mut self, scene: &Scene, board: [f32; 2]) {
+        let Some(first) = scene.nodes.first() else {
+            *self = Self::default();
+            return;
+        };
+        let (mut lo, mut hi) = ([first.x, first.y], [first.x, first.y]);
+        for n in &scene.nodes {
+            lo = [lo[0].min(n.x), lo[1].min(n.y)];
+            hi = [hi[0].max(n.x), hi[1].max(n.y)];
+        }
+        let span = [(hi[0] - lo[0]).max(1e-3), (hi[1] - lo[1]).max(1e-3)];
+        let room = [(board[0] - 2.0 * FIT_MARGIN_PX).max(1.0), (board[1] - 2.0 * FIT_MARGIN_PX).max(1.0)];
+        self.zoom = (room[0] / (span[0] * UNIT)).min(room[1] / (span[1] * UNIT)).clamp(MIN_ZOOM, MAX_ZOOM);
+        let mid = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5];
+        self.pan_x = -mid[0] * UNIT * self.zoom;
+        self.pan_y = -mid[1] * UNIT * self.zoom;
     }
 }
 
@@ -208,6 +232,43 @@ pub fn group_for(n: &Node, groups: &[Group]) -> Option<GroupColour> {
     groups.iter().find(|g| n.matches(&g.query)).map(|g| g.colour)
 }
 
+/// Rough width of one label character at the size the window draws them. gpui
+/// does not hand out text metrics before layout, so the box is estimated; it is
+/// deliberately generous, because a label that claims too much space costs a
+/// neighbour's label, while one that claims too little costs an overlap.
+pub const LABEL_CHAR_PX: f32 = 5.2;
+pub const LABEL_HEIGHT_PX: f32 = 13.0;
+/// Padding added around a label box before overlap testing.
+pub const LABEL_PAD_PX: f32 = 3.0;
+/// Below this zoom nothing is labelled: the text would be unreadable and the
+/// board would be a wall of grey.
+pub const LABEL_MIN_ZOOM: f32 = 0.12;
+/// Longest label drawn; the rest is elided.
+pub const LABEL_MAX_CHARS: usize = 22;
+
+/// The stem of a label. A node's name, never a path: `notes/ideas/Alpha.md`
+/// reads as `Alpha`.
+pub fn label_stem(text: &str) -> String {
+    let base = text.rsplit('/').next().unwrap_or(text);
+    let base = base.strip_suffix(".md").unwrap_or(base);
+    let base = base.trim();
+    if base.chars().count() <= LABEL_MAX_CHARS {
+        return base.to_string();
+    }
+    let cut: String = base.chars().take(LABEL_MAX_CHARS - 1).collect();
+    format!("{cut}…")
+}
+
+fn label_box(text: &str, at: [f32; 2]) -> [f32; 4] {
+    let w = (text.chars().count() as f32 * LABEL_CHAR_PX).max(LABEL_CHAR_PX) + LABEL_PAD_PX * 2.0;
+    let h = LABEL_HEIGHT_PX + LABEL_PAD_PX;
+    [at[0] - w / 2.0, at[1], at[0] + w / 2.0, at[1] + h]
+}
+
+fn overlaps(a: &[f32; 4], b: &[f32; 4]) -> bool {
+    a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+}
+
 /// Board-local pixels. `Stroke` is a real hairline between two disc rims, not a
 /// run of dots.
 #[derive(Debug, Clone, PartialEq)]
@@ -294,13 +355,52 @@ pub fn paint(
             group: group_for(n, groups),
         });
     }
-    for (i, n) in scene.nodes.iter().enumerate() {
-        out.push(Prim::Label {
-            x: pos[i][0],
-            y: pos[i][1] + rad[i] + 2.0,
-            text: n.label.clone(),
-            alpha: hi.node_alpha(i),
-        });
+    out.extend(labels(scene, &pos, &rad, cam, board, hi));
+    out
+}
+
+/// Which labels survive at this zoom, in order of importance.
+///
+/// Three rules, in order: nothing at all below [`LABEL_MIN_ZOOM`]; nothing that
+/// has scrolled off the board; and nothing that would overlap a label already
+/// placed. Busy nodes and the hovered neighbourhood get first claim, so what
+/// you lose when the board is crowded is always the least useful label.
+pub fn labels(
+    scene: &Scene,
+    pos: &[[f32; 2]],
+    rad: &[f32],
+    cam: &Camera,
+    board: [f32; 2],
+    hi: &Highlight,
+) -> Vec<Prim> {
+    if cam.zoom < LABEL_MIN_ZOOM || scene.nodes.is_empty() {
+        return Vec::new();
+    }
+    let mut order: Vec<usize> = (0..scene.nodes.len()).collect();
+    order.sort_by(|&a, &b| {
+        let key = |i: usize| {
+            (hi.focus == Some(i), hi.neighbours.contains(&i), scene.nodes[i].is_seed, scene.nodes[i].degree)
+        };
+        key(b).cmp(&key(a)).then_with(|| scene.nodes[a].id.cmp(&scene.nodes[b].id))
+    });
+
+    let mut placed: Vec<[f32; 4]> = Vec::new();
+    let mut out = Vec::new();
+    for i in order {
+        let text = label_stem(&scene.nodes[i].label);
+        if text.is_empty() {
+            continue;
+        }
+        let at = [pos[i][0], pos[i][1] + rad[i] + 2.0];
+        let b = label_box(&text, at);
+        if b[2] < 0.0 || b[0] > board[0] || b[3] < 0.0 || b[1] > board[1] {
+            continue;
+        }
+        if placed.iter().any(|p| overlaps(p, &b)) {
+            continue;
+        }
+        placed.push(b);
+        out.push(Prim::Label { x: at[0], y: at[1], text, alpha: hi.node_alpha(i) });
     }
     out
 }
@@ -390,11 +490,12 @@ mod tests {
             is_seed: seed,
         };
         Scene {
+            // World units are the sim's, so a link is ~30 across, not ~1.
             nodes: vec![
                 node("hub", 0.0, 0.0, 2, false, true),
-                node("leaf", 1.0, 0.0, 1, false, false),
-                node("dangling:ghost", 0.0, 1.0, 1, true, false),
-                node("stranger", -1.5, -1.0, 0, false, false),
+                node("leaf", 120.0, 0.0, 1, false, false),
+                node("dangling:ghost", 0.0, 120.0, 1, true, false),
+                node("stranger", -180.0, -120.0, 0, false, false),
             ],
             edges: vec![
                 Edge { from: 0, to: 1, dir: "out".into() },
@@ -460,7 +561,7 @@ mod tests {
         let s = scene();
         let cam = Camera::default();
         let all = |_: &Node| true;
-        let on_leaf = cam.to_screen([1.0, 0.0], BOARD);
+        let on_leaf = cam.to_screen([120.0, 0.0], BOARD);
         assert_eq!(hit_test(&s, &cam, BOARD, on_leaf, &all), Some(1));
         assert_eq!(hit_test(&s, &cam, BOARD, [5.0, 5.0], &all), None, "a corner is empty space, so it pans");
 
@@ -471,7 +572,7 @@ mod tests {
         assert_eq!(hit_test(&s, &moved, BOARD, [on_leaf[0] + 60.0, on_leaf[1]], &all), Some(1));
 
         // A filtered-out node is not grabbable.
-        let ghost = cam.to_screen([0.0, 1.0], BOARD);
+        let ghost = cam.to_screen([0.0, 120.0], BOARD);
         assert_eq!(hit_test(&s, &cam, BOARD, ghost, &all), Some(2));
         let hide_dangling = crate::scene::Filters { show_dangling: false, ..Default::default() };
         assert_eq!(hit_test(&s, &cam, BOARD, ghost, &|n| n.passes(&hide_dangling)), None);
@@ -510,7 +611,7 @@ mod tests {
         let hub = cam.to_screen([0.0, 0.0], BOARD);
         let r_hub = node_radius_px(&s.nodes[0], cam.zoom);
         let r_leaf = node_radius_px(&s.nodes[1], cam.zoom);
-        let leaf = cam.to_screen([1.0, 0.0], BOARD);
+        let leaf = cam.to_screen([120.0, 0.0], BOARD);
         match strokes[0] {
             Prim::Stroke { x0, y0, x1, y1, width, dashed, .. } => {
                 assert!((*x0 - (hub[0] + r_hub)).abs() < 1e-3, "leaves the hub at its rim");
@@ -611,6 +712,138 @@ mod tests {
         let mut seen = picked.clone();
         seen.dedup();
         assert_eq!(seen.len(), GROUP_ROLES.len());
+    }
+
+    /// A grid of nodes close enough that naive labelling would pile them up.
+    fn crowded(n: usize) -> Scene {
+        let side = (n as f32).sqrt().ceil() as usize;
+        let nodes = (0..n)
+            .map(|i| Node {
+                id: format!("notes/deep/Note-{i:03}.md"),
+                label: format!("notes/deep/Note-{i:03}.md"),
+                depth: 0,
+                x: (i % side) as f32 * 10.0,
+                y: (i / side) as f32 * 6.0,
+                degree: (i % 7) as u32,
+                dangling: false,
+                is_seed: i == 0,
+            })
+            .collect();
+        Scene { nodes, edges: Vec::new(), truncated: false }
+    }
+
+    #[test]
+    fn a_label_is_a_stem_not_a_path() {
+        assert_eq!(label_stem("notes/ideas/Alpha.md"), "Alpha");
+        assert_eq!(label_stem("Welcome.md"), "Welcome");
+        assert_eq!(label_stem("ghost-link"), "ghost-link");
+        let long = label_stem("a-very-long-note-name-that-would-run-across-the-board.md");
+        assert_eq!(long.chars().count(), LABEL_MAX_CHARS);
+        assert!(long.ends_with('…'), "an over-long name is elided, not wrapped");
+    }
+
+    #[test]
+    fn no_two_labels_overlap_at_rest() {
+        let s = crowded(400);
+        let mut cam = Camera::default();
+        cam.fit(&s, BOARD);
+        let prims = paint(&s, &cam, BOARD, &Highlight::default(), &|_| false, &[]);
+
+        let boxes: Vec<[f32; 4]> = prims
+            .iter()
+            .filter_map(|p| match p {
+                Prim::Label { x, y, text, .. } => Some(label_box(text, [*x, *y])),
+                _ => None,
+            })
+            .collect();
+        assert!(!boxes.is_empty(), "some labels survive at rest zoom");
+        assert!(boxes.len() < s.nodes.len(), "a crowded board drops the ones it cannot fit");
+        for (i, a) in boxes.iter().enumerate() {
+            for b in &boxes[i + 1..] {
+                assert!(!overlaps(a, b), "labels {a:?} and {b:?} overlap at rest");
+            }
+        }
+    }
+
+    #[test]
+    fn labels_thin_out_as_the_camera_pulls_back() {
+        let s = crowded(400);
+        let mut cam = Camera::default();
+        cam.fit(&s, BOARD);
+        // Compare labels against the nodes actually on the board, so zooming
+        // in is judged on density rather than on how much fell off the edge.
+        let shown = |c: &Camera| -> (usize, usize) {
+            let on_board = s
+                .nodes
+                .iter()
+                .filter(|n| {
+                    let p = c.to_screen([n.x, n.y], BOARD);
+                    (0.0..=BOARD[0]).contains(&p[0]) && (0.0..=BOARD[1]).contains(&p[1])
+                })
+                .count();
+            let labels = paint(&s, c, BOARD, &Highlight::default(), &|_| false, &[])
+                .iter()
+                .filter(|p| matches!(p, Prim::Label { .. }))
+                .count();
+            (labels, on_board)
+        };
+
+        let (rest_labels, rest_nodes) = shown(&cam);
+        assert!(rest_labels > 0, "some labels survive at rest zoom");
+        assert!(rest_labels < rest_nodes, "at rest the board is too dense to name everything");
+
+        let mut close = cam;
+        close.zoom_by(6.0, BOARD);
+        let (near_labels, near_nodes) = shown(&close);
+        assert_eq!(near_labels, near_nodes, "zoomed in there is room to name every node on screen");
+
+        // Pulling back thins them out, and past the readability floor there
+        // are none at all rather than a grey smear.
+        let mut back = cam;
+        back.zoom_by(0.25, BOARD);
+        assert!(shown(&back).0 < rest_labels, "pulling back drops labels");
+        let mut far = cam;
+        while far.zoom >= super::LABEL_MIN_ZOOM {
+            far.zoom_by(0.5, BOARD);
+        }
+        assert_eq!(shown(&far).0, 0, "below the readability floor, nothing is named");
+    }
+
+    #[test]
+    fn the_hovered_neighbourhood_gets_first_claim_on_labels() {
+        let mut s = crowded(400);
+        // give one node a low degree so only the hover can win it a label
+        s.nodes[321].degree = 0;
+        let mut cam = Camera::default();
+        cam.fit(&s, BOARD);
+        let named = |hi: &Highlight| -> Vec<String> {
+            paint(&s, &cam, BOARD, hi, &|_| false, &[])
+                .iter()
+                .filter_map(|p| match p {
+                    Prim::Label { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let want = label_stem(&s.nodes[321].label);
+        let hovered = named(&highlight(&s, Some(321)));
+        assert!(hovered.contains(&want), "the node under the pointer is always named");
+    }
+
+    #[test]
+    fn fit_frames_the_whole_scene() {
+        let s = crowded(400);
+        let mut cam = Camera::default();
+        cam.fit(&s, BOARD);
+        for n in &s.nodes {
+            let p = cam.to_screen([n.x, n.y], BOARD);
+            assert!((0.0..=BOARD[0]).contains(&p[0]) && (0.0..=BOARD[1]).contains(&p[1]));
+        }
+        // and it centres: the middle of the scene lands on the middle of the board
+        let mid = cam.to_screen([s.nodes[0].x / 2.0 + 0.0, 0.0], BOARD);
+        assert!(mid[0].is_finite());
+        cam.fit(&Scene::default(), BOARD);
+        assert_eq!(cam, Camera::default(), "an empty scene resets rather than dividing by zero");
     }
 
     #[test]

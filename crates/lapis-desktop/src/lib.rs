@@ -93,6 +93,7 @@ mod window {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::rc::Rc;
+    use std::time::Instant;
 
     use gpui_kit::{
         App, AppContext, Bounds, Context, Corners, Edges, FocusHandle, Hsla, InteractiveElement, IntoElement,
@@ -103,6 +104,7 @@ mod window {
     use gpui_omarchy::{ActiveTheme, panel};
 
     use super::scene::{Filters, Scene};
+    use super::sim::ForceSim;
     use super::view::{
         CLICK_SLOP_PX, Camera, Group, GroupColour, KeyAction, Prim, ZOOM_STEP, highlight, hit_test,
         key_action, paint,
@@ -114,6 +116,56 @@ mod window {
     /// constants, the lines would not meet the discs.
     const BOARD_W: f32 = 760.0;
     const BOARD_H: f32 = 520.0;
+
+    /// `LAPIS_GRAPH_DEBUG=1` puts a frame-time overlay on the board. It is the
+    /// only way to answer "is this 60 fps" with a number instead of a feeling.
+    fn debug_overlay_on() -> bool {
+        std::env::var("LAPIS_GRAPH_DEBUG").is_ok_and(|v| v != "0" && !v.is_empty())
+    }
+
+    /// Frames kept for the rolling average.
+    const FPS_WINDOW: usize = 60;
+    /// Ticks the sim is allowed per frame. One keeps the loop honest: the
+    /// screen shows what the physics just did, not a batch of it.
+    const TICKS_PER_FRAME: usize = 1;
+
+    /// Rolling frame timing, so the overlay reports measured fps.
+    #[derive(Debug, Default)]
+    struct Meter {
+        last: Option<Instant>,
+        frames: std::collections::VecDeque<f32>,
+        tick_ms: f32,
+    }
+
+    impl Meter {
+        fn frame(&mut self) {
+            let now = Instant::now();
+            if let Some(prev) = self.last.replace(now) {
+                let ms = now.duration_since(prev).as_secs_f32() * 1000.0;
+                // A frame after an idle pause is not a dropped frame.
+                if ms < 500.0 {
+                    self.frames.push_back(ms);
+                    if self.frames.len() > FPS_WINDOW {
+                        self.frames.pop_front();
+                    }
+                }
+            }
+        }
+        fn fps(&self) -> f32 {
+            if self.frames.is_empty() {
+                return 0.0;
+            }
+            let mean = self.frames.iter().sum::<f32>() / self.frames.len() as f32;
+            if mean <= 0.0 { 0.0 } else { 1000.0 / mean }
+        }
+        fn worst_ms(&self) -> f32 {
+            self.frames.iter().copied().fold(0.0f32, f32::max)
+        }
+        fn idle(&mut self) {
+            self.last = None;
+            self.frames.clear();
+        }
+    }
 
     /// A press in flight: which node it started on (none = empty space, so it
     /// pans) and whether it has travelled far enough to be a drag.
@@ -173,6 +225,10 @@ mod window {
         layout: Layout,
         /// Query to colour. First match wins.
         groups: Vec<Group>,
+        /// The layout, still running. The scene holds what was drawn last
+        /// frame; this is what moves it.
+        sim: ForceSim,
+        meter: Meter,
         camera: Camera,
         hover: Option<String>,
         press: Option<Press>,
@@ -193,21 +249,54 @@ mod window {
             let seed = self.seed.clone().unwrap_or_default();
             let ticks = graph_data::SETTLE_TICKS;
             let built = match self.layout {
-                Layout::Global => graph_data::global_scene(&self.vault, &seed, ticks),
+                Layout::Global => graph_data::global_live(&self.vault, &seed, ticks),
                 Layout::Local if seed.is_empty() => {
                     Err("local mode needs a note: open with `--path <note>` or click one".into())
                 }
-                Layout::Local => graph_data::local_scene(&self.vault, &seed, self.depth, ticks),
-                Layout::Rings => graph_data::scene_for(&self.vault, &seed, 2, false),
+                Layout::Local => graph_data::local_live(&self.vault, &seed, self.depth, ticks),
+                // The retired ego walk has no sim behind it: it is a fixed ring
+                // by definition, so it gets an empty one.
+                Layout::Rings => graph_data::scene_for(&self.vault, &seed, 2, false)
+                    .map(|scene| graph_data::Laid { scene, sim: ForceSim::empty() }),
             };
             match built {
-                Ok(mut s) => {
-                    s.apply_pins(&self.pins);
-                    self.scene = s;
+                Ok(laid) => {
+                    self.adopt(laid);
                     self.error = None;
                 }
                 Err(e) => self.error = Some(e),
             }
+        }
+
+        /// Take a freshly laid-out graph: restore the pins onto both the scene
+        /// and the sim, then frame it.
+        fn adopt(&mut self, mut laid: graph_data::Laid) {
+            laid.scene.apply_pins(&self.pins);
+            for (i, n) in laid.scene.nodes.iter().enumerate() {
+                if let Some(p) = self.pins.get(&n.id) {
+                    laid.sim.place(i, p[0], p[1]);
+                    laid.sim.set_pinned(i, true);
+                }
+            }
+            self.scene = laid.scene;
+            self.sim = laid.sim;
+            self.camera.fit(&self.scene, self.board());
+            self.meter.idle();
+        }
+
+        /// One frame of physics. Returns true while the graph is still moving,
+        /// which is what keeps the render loop alive and what stops it.
+        fn advance(&mut self) -> bool {
+            let t0 = Instant::now();
+            let mut moving = false;
+            for _ in 0..TICKS_PER_FRAME {
+                moving |= self.sim.tick();
+            }
+            if moving {
+                graph_data::sync_positions(&mut self.scene, &self.sim);
+            }
+            self.meter.tick_ms = t0.elapsed().as_secs_f32() * 1000.0;
+            moving
         }
 
         fn board(&self) -> [f32; 2] {
@@ -259,7 +348,9 @@ mod window {
                 if let Some(id) = node
                     && self.pins.remove(&id).is_some()
                 {
-                    self.reload();
+                    if let Some(i) = self.scene.index_of(&id) {
+                        self.sim.set_pinned(i, false);
+                    }
                     cx.notify();
                 }
                 return;
@@ -296,9 +387,13 @@ mod window {
                 Some(id) => {
                     let w = self.camera.to_world(at, board);
                     self.pins.insert(id.clone(), w);
-                    if let Some(n) = self.scene.nodes.iter_mut().find(|n| n.id == id) {
-                        n.x = w[0];
-                        n.y = w[1];
+                    if let Some(i) = self.scene.index_of(&id) {
+                        self.scene.nodes[i].x = w[0];
+                        self.scene.nodes[i].y = w[1];
+                        // The sim holds it there and lets the rest settle
+                        // around it, which is what makes a drag feel live.
+                        self.sim.place(i, w[0], w[1]);
+                        self.sim.set_pinned(i, true);
                     }
                 }
                 // Drag empty space: pan the camera. The layout does not move.
@@ -340,7 +435,10 @@ mod window {
                 KeyAction::None => return,
                 KeyAction::Zoom(f) => self.camera.zoom_by(f, board),
                 KeyAction::Pan(dx, dy) => self.camera.pan_by(dx, dy),
-                KeyAction::ResetCamera => self.camera.reset(),
+                KeyAction::ResetCamera => {
+                    let board = self.board();
+                    self.camera.fit(&self.scene, board);
+                }
                 KeyAction::StartQuery => self.typing = true,
                 KeyAction::QueryPush(c) => self.filters.query.push(c),
                 KeyAction::QueryPop => {
@@ -368,7 +466,7 @@ mod window {
                 KeyAction::ClearGroups => self.groups.clear(),
                 KeyAction::Unpin => {
                     self.pins.clear();
-                    rebuild = true;
+                    self.sim.unpin_all();
                 }
             }
             if rebuild {
@@ -436,8 +534,17 @@ mod window {
     }
 
     impl Render for Root {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = cx.omarchy();
+            // The graph keeps moving until it settles; each frame asks for the
+            // next one, and a graph at rest stops asking.
+            let moving = self.advance();
+            if moving {
+                self.meter.frame();
+                window.request_animation_frame();
+            } else {
+                self.meter.idle();
+            }
             let (edge_c, node_c, seed_c, dangling_c, label_c) =
                 (theme.border, theme.foreground, theme.accent, theme.danger, theme.secondary);
             let seen = self.visible();
@@ -521,6 +628,33 @@ mod window {
                 .on_scroll_wheel(cx.listener(|this, ev, _, cx| this.on_wheel(ev, cx)))
                 .on_key_down(cx.listener(|this, ev, _, cx| this.on_key(ev, cx)));
 
+            if debug_overlay_on() {
+                let (lo, hi) = self.sim.extent();
+                let overlay = format!(
+                    "{:.0} fps · worst {:.1} ms · tick {:.2} ms · {} nodes / {} edges · energy {:.4} · {}",
+                    self.meter.fps(),
+                    self.meter.worst_ms(),
+                    self.meter.tick_ms,
+                    self.scene.nodes.len(),
+                    self.scene.edges.len(),
+                    self.sim.energy(),
+                    if moving {
+                        format!("settling, span {:.0}", (hi[0] - lo[0]).max(hi[1] - lo[1]))
+                    } else {
+                        "at rest".to_string()
+                    },
+                );
+                board = board.child(
+                    div()
+                        .absolute()
+                        .left(px(6.0))
+                        .top(px(6.0))
+                        .text_xs()
+                        .text_color(theme.accent)
+                        .child(overlay),
+                );
+            }
+
             // Labels stay elements so they use the theme's text stack; they are
             // placed from the same paint list as the discs, so they cannot drift.
             for l in labels {
@@ -559,6 +693,7 @@ mod window {
                 format!("domain: {}", self.filters.domain.clone().unwrap_or_else(|| "all".into()));
             let zoom_label = format!("zoom {:.0}%", self.camera.zoom * 100.0);
             let pin_label = format!("unpin {}", self.pins.len());
+            let theme_label = format!("theme: {}", theme.name);
 
             let chip = |id: &'static str, text: String, colour: Hsla| {
                 div().id(id).text_sm().text_color(colour).child(text)
@@ -611,14 +746,18 @@ mod window {
                     cx.notify();
                 })))
                 .child(chip("f-zoom", zoom_label, label_c).on_click(cx.listener(|this, _, _, cx| {
-                    this.camera.reset();
+                    let board = this.board();
+                    this.camera.fit(&this.scene, board);
                     cx.notify();
                 })))
                 .child(chip("f-unpin", pin_label, label_c).on_click(cx.listener(|this, _, _, cx| {
                     this.pins.clear();
-                    this.reload();
+                    this.sim.unpin_all();
                     cx.notify();
-                })));
+                })))
+                // The live Omarchy theme by name, so a swap is visible in a
+                // screenshot and not just a claim.
+                .child(chip("f-theme", theme_label, label_c));
 
             // Each group shows in its own colour, so the legend is the swatch.
             for (n, g) in self.groups.iter().enumerate() {
@@ -666,38 +805,44 @@ mod window {
         let vault = opts.vault_root.clone();
         let title = opts.title.clone();
         // Default view: the whole indexed vault, laid out by the force sim.
-        let (scene, error) = match graph_data::global_scene(
+        let (laid, error) = match graph_data::global_live(
             &vault,
             seed.as_deref().unwrap_or_default(),
             graph_data::SETTLE_TICKS,
         ) {
-            Ok(s) => (s, None),
-            Err(e) => (Scene::default(), Some(e)),
+            Ok(l) => (l, None),
+            Err(e) => (graph_data::Laid { scene: Scene::default(), sim: ForceSim::empty() }, Some(e)),
         };
         gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx: &mut App| {
             gpui_omarchy::init(cx);
             let focus = cx.focus_handle();
             let opened = cx.open_window(WindowOptions::default(), |window, cx| {
                 window.focus(&focus, cx);
-                cx.new(|_| Root {
-                    title: title.clone(),
-                    vault: vault.clone(),
-                    seed: seed.clone(),
-                    scene: scene.clone(),
-                    error: error.clone(),
-                    selected: None,
-                    peek: None,
-                    filters: Filters::default(),
-                    typing: false,
-                    depth: 2,
-                    layout: Layout::Global,
-                    groups: Vec::new(),
-                    camera: Camera::default(),
-                    hover: None,
-                    press: None,
-                    pins: BTreeMap::new(),
-                    origin: Rc::new(Cell::new((0.0, 0.0))),
-                    focus: focus.clone(),
+                cx.new(|_| {
+                    let mut root = Root {
+                        title: title.clone(),
+                        vault: vault.clone(),
+                        seed: seed.clone(),
+                        scene: Scene::default(),
+                        error: error.clone(),
+                        selected: None,
+                        peek: None,
+                        filters: Filters::default(),
+                        typing: false,
+                        depth: 2,
+                        layout: Layout::Global,
+                        groups: Vec::new(),
+                        sim: ForceSim::empty(),
+                        meter: Meter::default(),
+                        camera: Camera::default(),
+                        hover: None,
+                        press: None,
+                        pins: BTreeMap::new(),
+                        origin: Rc::new(Cell::new((0.0, 0.0))),
+                        focus: focus.clone(),
+                    };
+                    root.adopt(graph_data::Laid { scene: laid.scene.clone(), sim: laid.sim.clone() });
+                    root
                 })
             });
             match opened {
@@ -757,6 +902,25 @@ mod tests {
         assert!(src.contains("f-orphans"), "orphans toggle");
         assert!(src.contains("f-query"), "query filter");
         assert!(src.contains("f-group") && src.contains("group_hsla"), "groups recolour by query");
+        assert!(src.contains("request_animation_frame"), "the sim keeps running after the first frame");
+        assert!(src.contains("LAPIS_GRAPH_DEBUG"), "the fps overlay is measurable, not a feeling");
+        assert!(src.contains("camera.fit"), "reset frames the whole graph");
+        assert!(src.contains("theme.background"), "the void is the Omarchy background");
+        assert!(src.contains("f-theme"), "the live theme name is on screen");
+        // Every colour on the board comes from the live Omarchy palette, so a
+        // theme swap restyles the graph with no restart. The only literal is a
+        // group's opt-in hex.
+        for role in ["theme.border", "theme.foreground", "theme.accent", "theme.danger"] {
+            assert!(src.contains(role), "{role} is read from cx.omarchy()");
+        }
+        // The needle is assembled at runtime so this assertion does not match
+        // itself in the source it is reading.
+        let literal_colour = format!("gpui{}rgb(", "_kit::");
+        assert_eq!(
+            src.matches(literal_colour.as_str()).count(),
+            1,
+            "the only literal colour in the window is a group's opt-in hex"
+        );
         // The chrome's mode string comes from `Layout`, whose global variant
         // reads "global". Nothing in the default view can say hop-2 unless the
         // operator has cycled to the rings debug layout.

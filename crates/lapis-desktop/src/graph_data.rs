@@ -23,9 +23,12 @@ use crate::sim::{ForceParams, ForceSim};
 /// vaults and small real ones to reach rest; the window keeps ticking after.
 pub const SETTLE_TICKS: usize = 600;
 
-/// Canvas half-extent in scene units. `scene::draw` and the window's `map()`
-/// expect roughly -2..2.
-const HALF_EXTENT: f32 = 2.0;
+/// A laid-out graph and the sim that is still laying it out. The window keeps
+/// both: the scene is what gets drawn, the sim is what keeps moving it.
+pub struct Laid {
+    pub scene: Scene,
+    pub sim: ForceSim,
+}
 
 /// Depth range the local-mode slider offers.
 pub const MIN_DEPTH: u32 = 1;
@@ -44,6 +47,17 @@ pub fn snapshot_for(vault: &Path) -> Result<GraphSnapshot, String> {
 /// which nodes exist. A vault with no note at `seed` still draws in full.
 pub fn global_scene(vault: &Path, seed: &str, ticks: usize) -> Result<Scene, String> {
     Ok(layout(&snapshot_for(vault)?, seed, ticks))
+}
+
+/// The global graph plus its live sim.
+pub fn global_live(vault: &Path, seed: &str, ticks: usize) -> Result<Laid, String> {
+    Ok(lay_out(&snapshot_for(vault)?, seed, ticks))
+}
+
+/// Local mode plus its live sim.
+pub fn local_live(vault: &Path, seed: &str, depth: u32, ticks: usize) -> Result<Laid, String> {
+    let snap = snapshot_for(vault)?;
+    Ok(lay_out(&within(&snap, seed, depth), seed, ticks))
 }
 
 /// Local mode: everything within `depth` links of `seed`, undirected, cut out
@@ -102,9 +116,18 @@ pub fn within(snap: &GraphSnapshot, seed: &str, depth: u32) -> GraphSnapshot {
 /// Snapshot plus forces to a drawable scene. Split out from the I/O so the
 /// layout is testable without a vault.
 pub fn layout(snap: &GraphSnapshot, seed: &str, ticks: usize) -> Scene {
+    lay_out(snap, seed, ticks).scene
+}
+
+/// Snapshot plus forces to a drawable scene and the sim still driving it.
+///
+/// Positions are the sim's own world units. Nothing is rescaled per frame: a
+/// graph that renormalised every tick would breathe as its extent changed.
+/// Fitting is the camera's job ([`crate::view::Camera::fit`]).
+pub fn lay_out(snap: &GraphSnapshot, seed: &str, ticks: usize) -> Laid {
     let mut sim = ForceSim::from_snapshot(snap, ForceParams::default());
     sim.settle(ticks);
-    let xy = sim.normalized(HALF_EXTENT);
+    let xy = sim.positions().to_vec();
 
     let index: std::collections::HashMap<&str, usize> =
         snap.nodes.iter().enumerate().map(|(i, n)| (n.id.as_str(), i)).collect();
@@ -136,7 +159,16 @@ pub fn layout(snap: &GraphSnapshot, seed: &str, ticks: usize) -> Scene {
         })
         .collect();
 
-    Scene { nodes, edges, truncated: snap.truncated }
+    Laid { scene: Scene { nodes, edges, truncated: snap.truncated }, sim }
+}
+
+/// Copy the sim's current positions onto the scene it laid out. The two are
+/// index-parallel by construction, so this is the whole of "the graph moved".
+pub fn sync_positions(scene: &mut Scene, sim: &ForceSim) {
+    for (n, p) in scene.nodes.iter_mut().zip(sim.positions()) {
+        n.x = p[0];
+        n.y = p[1];
+    }
 }
 
 /// Link distance from the active note, ignoring direction. Nodes in another
@@ -328,7 +360,16 @@ mod tests {
         pts.sort();
         pts.dedup();
         assert_eq!(pts.len(), s.nodes.len(), "the sim separates every node");
-        assert!(s.nodes.iter().all(|n| n.x.abs() <= 2.001 && n.y.abs() <= 2.001), "fits the board");
+        // Positions are the sim's own units; the camera is what frames them.
+        let mut cam = crate::view::Camera::default();
+        cam.fit(&s, [800.0, 600.0]);
+        assert!(
+            s.nodes.iter().all(|n| {
+                let p = cam.to_screen([n.x, n.y], [800.0, 600.0]);
+                (0.0..=800.0).contains(&p[0]) && (0.0..=600.0).contains(&p[1])
+            }),
+            "fit frames every node inside the board"
+        );
 
         let beta = s.nodes.iter().find(|n| n.id == "notes/Beta.md").unwrap();
         assert_eq!(beta.depth, 2, "hop distance from the active note, not a ring index");
@@ -356,7 +397,12 @@ mod tests {
 
         let hop2 = scene_for(&d, "Welcome.md", 2, false).unwrap();
         assert!(hop2.nodes.iter().any(|n| n.id == "notes/Beta.md" && n.depth == 2));
-        let prims = paint(&hop2, &Camera::default(), [800.0, 600.0], &Highlight::default(), &|_| false, &[]);
+        // The ring walk lays out in its own small units, so the camera frames
+        // it exactly as it frames a sim layout.
+        let board = [800.0f32, 600.0];
+        let mut cam = Camera::default();
+        cam.fit(&hop2, board);
+        let prims = paint(&hop2, &cam, board, &Highlight::default(), &|_| false, &[]);
         let discs = prims.iter().filter(|p| matches!(p, Prim::Disc { .. })).count();
         let strokes = prims.iter().filter(|p| matches!(p, Prim::Stroke { .. })).count();
         assert_eq!(discs, hop2.nodes.len());
