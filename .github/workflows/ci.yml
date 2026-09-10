@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'feat/**']
   pull_request:
 
 env:
@@ -22,8 +22,9 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      # --workspace, or the engine crate's own tests never run here.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
       - run: cargo build --release
       - run: ./target/release/lapis --help
       - name: no vault configured is usage (exit 1), not lattice-down
@@ -39,6 +40,24 @@ jobs:
           tmp=$(mktemp -d)
           ./target/release/lapis init "$tmp"
           ./target/release/lapis --vault "$tmp" --json read Welcome.md | grep -q '"ok": true'
+
+      - name: embedded search answers with no daemon (B3)
+        run: |
+          tmp=$(mktemp -d)
+          ./target/release/lapis init "$tmp"
+          ./target/release/lapis --vault "$tmp" --json search welcome | grep -q '"ok": true'
+          ./target/release/lapis --vault "$tmp" --json list | grep -q '"hash"'
+          ./target/release/lapis --vault "$tmp" doctor
+      - name: hop-2 is honest, not silently empty (B11)
+        run: |
+          tmp=$(mktemp -d)
+          ./target/release/lapis init "$tmp"
+          set +e
+          out=$(./target/release/lapis --vault "$tmp" neighbors Welcome.md --hop 2 2>&1)
+          code=$?
+          set -e
+          test "$code" -ne 0
+          echo "$out" | grep -q 'lattice.mode'
 
   scrub:
     name: operator-topology grep gate

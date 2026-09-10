@@ -181,6 +181,7 @@ mod tests {
         Document {
             path: path.into(),
             title: None,
+            hash: None,
             domain: None,
             doc_type: None,
             status: None,

@@ -23,25 +23,29 @@ pub fn run(conn: &Connection, query: &str) -> Result<Analytics> {
         )));
     }
     let sql = match q.as_str() {
-        "inventory" => "SELECT kind, COUNT(*) FROM documents GROUP BY kind ORDER BY 2 DESC",
+        "inventory" => "SELECT kind, COUNT(*) AS documents FROM documents GROUP BY kind ORDER BY 2 DESC",
         "priority" => {
-            "SELECT COALESCE(priority,'(none)'), COUNT(*) FROM documents GROUP BY 1 ORDER BY 2 DESC"
+            "SELECT COALESCE(priority,'(none)') AS priority, COUNT(*) AS documents FROM documents GROUP BY 1 ORDER BY 2 DESC"
         }
         "tags" => {
-            "SELECT json_each.value, COUNT(*) FROM documents, json_each(documents.tags_json) GROUP BY 1 ORDER BY 2 DESC LIMIT 50"
+            "SELECT json_each.value AS tag, COUNT(*) AS documents FROM documents, json_each(documents.tags_json) GROUP BY 1 ORDER BY 2 DESC LIMIT 50"
         }
         "health" => {
-            "SELECT 'documents', COUNT(*) FROM documents UNION ALL SELECT 'edges', COUNT(*) FROM edges UNION ALL SELECT 'dangling', COUNT(*) FROM edges WHERE resolved = 0"
+            "SELECT 'documents' AS metric, COUNT(*) AS value FROM documents UNION ALL SELECT 'edges', COUNT(*) FROM edges UNION ALL SELECT 'dangling', COUNT(*) FROM edges WHERE resolved = 0"
         }
-        "recent" => "SELECT path, COALESCE(title,''), mtime FROM documents ORDER BY mtime DESC LIMIT 50",
+        "recent" => {
+            "SELECT path, COALESCE(title,'') AS title, mtime FROM documents ORDER BY mtime DESC LIMIT 50"
+        }
         "hubs" => {
             "SELECT path, (SELECT COUNT(*) FROM edges e WHERE e.src = d.path OR e.dst_path = d.path) AS deg FROM documents d ORDER BY deg DESC LIMIT 50"
         }
-        "density" => "SELECT (SELECT COUNT(*) FROM edges)*1.0 / MAX((SELECT COUNT(*) FROM documents), 1)",
+        "density" => {
+            "SELECT (SELECT COUNT(*) FROM edges)*1.0 / MAX((SELECT COUNT(*) FROM documents), 1) AS links_per_document"
+        }
         "degree" => {
             "SELECT path, (SELECT COUNT(*) FROM edges e WHERE e.src = d.path) AS out_d, (SELECT COUNT(*) FROM edges e WHERE e.dst_path = d.path) AS in_d FROM documents d ORDER BY out_d + in_d DESC LIMIT 200"
         }
-        "dangling" => "SELECT src, dst_raw FROM edges WHERE resolved = 0 LIMIT 300",
+        "dangling" => "SELECT src, dst_raw AS target FROM edges WHERE resolved = 0 LIMIT 300",
         _ => unreachable!(),
     };
     let mut stmt = conn.prepare(sql)?;

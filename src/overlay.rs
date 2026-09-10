@@ -129,7 +129,11 @@ mod tests {
 
     #[test]
     fn missing_file_is_default() {
-        let dir = std::env::temp_dir().join(format!("lapis-overlay-{}", std::process::id()));
+        // Unique per call: pid alone repeats across parallel tests in one
+        // binary, and the clock is coarser than a nanosecond.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("lapis-overlay-{}-{seq}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let (o, src) = load(&dir).unwrap();
         assert_eq!(src, OverlaySource::Default);

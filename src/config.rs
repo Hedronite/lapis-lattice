@@ -29,14 +29,36 @@ pub struct Config {
     pub theme: ThemeConfig,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct ThemeConfig {
-    /// `lapis` (default), `parchment`, `obsidian`.
+    /// `omarchy` (default) follows `~/.local/state/omarchy/current/`;
+    /// `lapis` pins the brand palettes. Off Omarchy, `omarchy` falls back to
+    /// brand on its own, so the default is safe everywhere.
+    #[serde(default = "default_theme_mode")]
+    pub mode: String,
+    /// `lapis` (default), `parchment`, `obsidian`. Only when `mode = "lapis"`.
     #[serde(default)]
     pub name: Option<String>,
     /// Role → `#RRGGBB`: blue, blue_deep, blue_soft, regent, cream, gold, copper, muted, ok, warn.
     #[serde(default)]
     pub custom: std::collections::BTreeMap<String, String>,
+}
+
+fn default_theme_mode() -> String {
+    "omarchy".to_string()
+}
+
+impl Default for ThemeConfig {
+    fn default() -> Self {
+        Self { mode: default_theme_mode(), name: None, custom: Default::default() }
+    }
+}
+
+impl ThemeConfig {
+    /// True unless the operator pinned the brand palettes.
+    pub fn is_omarchy(&self) -> bool {
+        !self.mode.eq_ignore_ascii_case("lapis")
+    }
 }
 
 /// `[agent]`: how the MCP server and `--agent` behave by default.
@@ -102,10 +124,24 @@ pub struct OperatorConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct LatticeConfig {
+    /// `embedded` (default) or `http`. Embedded needs no daemon.
+    #[serde(default = "default_mode")]
+    pub mode: String,
     #[serde(default = "default_url")]
     pub url: String,
     #[serde(default = "default_timeout")]
     pub timeout_ms: u64,
+}
+
+fn default_mode() -> String {
+    "embedded".to_string()
+}
+
+impl LatticeConfig {
+    /// True unless the operator explicitly asked for the HTTP lattice.
+    pub fn is_embedded(&self) -> bool {
+        !self.mode.eq_ignore_ascii_case("http")
+    }
 }
 
 fn default_url() -> String {
@@ -117,7 +153,7 @@ fn default_timeout() -> u64 {
 
 impl Default for LatticeConfig {
     fn default() -> Self {
-        Self { url: default_url(), timeout_ms: default_timeout() }
+        Self { mode: default_mode(), url: default_url(), timeout_ms: default_timeout() }
     }
 }
 
@@ -174,6 +210,8 @@ mod tests {
         let c: Config = toml::from_str("").unwrap();
         assert_eq!(c.lattice.url, DEFAULT_LATTICE_URL);
         assert_eq!(c.lattice.timeout_ms, DEFAULT_TIMEOUT_MS);
+        assert_eq!(c.lattice.mode, "embedded", "embedded is the default backend");
+        assert!(c.lattice.is_embedded());
         assert!(c.vault.is_none());
         assert_eq!(c.agent, AgentConfig::default());
         assert!(c.agent.per_doc);
@@ -203,6 +241,8 @@ mod tests {
     fn theme_and_task_exclude() {
         let c: Config = toml::from_str("").unwrap();
         assert_eq!(c.theme, ThemeConfig::default());
+        assert_eq!(c.theme.mode, "omarchy", "Omarchy-native is the default");
+        assert!(c.theme.is_omarchy());
         assert!(c.agent.task_exclude.is_empty());
         let c: Config = toml::from_str(
             "[agent]\ntask_exclude = [\"assets/\", \"Archmagus-Stack/Sovereign-Bootcamp/\"]\n[theme]\nname = \"parchment\"\n[theme.custom]\ngold = \"#FFD700\"\n",
@@ -211,6 +251,9 @@ mod tests {
         assert_eq!(c.theme.name.as_deref(), Some("parchment"));
         assert_eq!(c.theme.custom.get("gold").map(String::as_str), Some("#FFD700"));
         assert_eq!(c.agent.task_exclude, ["assets/", "Archmagus-Stack/Sovereign-Bootcamp/"]);
+        // mode is independent of name: pinning brand palettes opts out of Omarchy
+        let pinned: Config = toml::from_str("[theme]\nmode = \"lapis\"\n").unwrap();
+        assert!(!pinned.theme.is_omarchy());
     }
 
     #[test]
@@ -221,6 +264,8 @@ mod tests {
         .unwrap();
         assert_eq!(c.lattice.url, "http://localhost:9999");
         assert_eq!(c.lattice.timeout_ms, 250);
+        let c: Config = toml::from_str("[lattice]\nmode = \"http\"\n").unwrap();
+        assert!(!c.lattice.is_embedded());
     }
 
     #[test]
