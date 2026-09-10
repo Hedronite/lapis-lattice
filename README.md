@@ -34,22 +34,25 @@ No hosted notes service. Files are the source of truth.
 
 ## Install
 
-macOS or Linux. Rust stable (see `rust-toolchain.toml`).
+Repo: [VirtualMachinist/lapis-lattice](https://github.com/VirtualMachinist/lapis-lattice). Binary: `lapis`. Engine library: [`lapis-lattice`](https://crates.io/crates/lapis-lattice) on crates.io.
+
+**One command** (needs Rust until GitHub Releases exist):
 
 ```bash
-git clone https://github.com/VirtualMachinist/lapis
-cd lapis
-cargo install --path .
-lapis init ~/Notes
-export LAPIS_VAULT=~/Notes
-lapis                  # TUI
-lapis --json vault info
-lapis mcp
+curl -fsSL https://raw.githubusercontent.com/VirtualMachinist/lapis-lattice/main/scripts/install.sh | bash
 ```
 
-`cargo install lapis` from crates.io is **not** this project — the crate name `lapis` is a yanked 0.0.0 placeholder owned by someone else. Use `--path` or a GitHub release when those exist.
+Or:
 
-There is no Homebrew formula and `lapis.sh` is not this installer.
+```bash
+cargo install --git https://github.com/VirtualMachinist/lapis-lattice --locked --bin lapis
+lapis init ~/Notes
+export LAPIS_VAULT=~/Notes
+```
+
+Do **not** run `cargo install lapis` (someone else’s yanked crate), `brew install lapis` (no formula yet), or anything from `lapis.sh` (not us).
+
+Full contract: [docs/install.md](docs/install.md).
 
 ## First run
 
@@ -72,8 +75,8 @@ lapis task list --json
 
 | Works today | Not yet |
 |---|---|
-| TUI, JSON CLI envelope, MCP | One-command `curl \| bash` install |
-| Tasks, dailies, templates (`note`, `daily`, `weekly`, `monthly`, `adr`) | Embedded SQLite lattice (search without HTTP) |
+| TUI, JSON CLI envelope, MCP | Search without an HTTP lattice (CLI still HTTP; engine crate is on crates.io) |
+| Tasks, dailies, templates (`note`, `daily`, `weekly`, `monthly`, `adr`) | GitHub Release binaries / Homebrew (install.sh builds from git today) |
 | Path sandbox, dry-run / mtime / hash guards | Windows |
 | Desktop window with `--features desktop` (Metal on macOS) | Visual knowledge-graph **canvas** (data layer only) |
 | PDF read-through when the lattice has indexed a tome | YAML/HTML as first-class document types in search |

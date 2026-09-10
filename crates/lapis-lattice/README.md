@@ -2,7 +2,7 @@
 
 Embedded **SQLite + FTS5** index for a folder of Markdown files.
 
-This is the in-process recall engine for [Lapis](https://github.com/VirtualMachinist/lapis): BM25 search, a `[[wikilink]]` graph, and allowlisted analytics. It writes `<vault>/.lapis/lattice.sqlite` and **never** rewrites user notes.
+This is the in-process recall engine for [Lapis](https://github.com/VirtualMachinist/lapis-lattice): BM25 search, a `[[wikilink]]` graph, and allowlisted analytics. It writes `<vault>/.lapis/lattice.sqlite` and **never** rewrites user notes.
 
 - No HTTP daemon required
 - No Turso / libsql
