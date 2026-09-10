@@ -84,4 +84,4 @@ lapis task list --json
 
 Requirements: macOS or Linux. Embeddings (Ollama / ONNX) are optional. Do **not** install Turso, DuckDB, Xcode, or Python to use the default binary.
 
-Inspired by [ZenNotes](https://github.com/ZenNotes/tui). Notices: [CREDITS.md](CREDITS.md).
+Inspired by [ZenNotes](https://github.com/ZenNotes/tui) and Obsidian. Notices: [CREDITS.md](CREDITS.md).
