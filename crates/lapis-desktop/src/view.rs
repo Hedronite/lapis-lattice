@@ -25,6 +25,8 @@ pub const MAX_ZOOM: f32 = 8.0;
 pub const ZOOM_STEP: f32 = 1.2;
 /// A press that travels further than this is a drag, not a click.
 pub const CLICK_SLOP_PX: f32 = 4.0;
+/// One arrow-key pan.
+pub const PAN_STEP_PX: f32 = 40.0;
 /// Extra pixels around a disc that still count as grabbing it.
 pub const GRAB_MARGIN_PX: f32 = 4.0;
 /// Edge stroke width. A hairline, not a bar.
@@ -89,8 +91,13 @@ impl Camera {
     }
 }
 
-/// Disc radius in pixels. Quartz's `2 + sqrt(degree)`, so a hub reads as a hub,
-/// with the zoom contribution damped so a far-out view still has visible nodes.
+/// Disc radius in pixels.
+///
+/// The size law is Quartz's `2 + sqrt(degree)`, so a hub reads as a hub and the
+/// curve flattens instead of letting one huge note swallow the board. The seed
+/// gets half again, the whole thing is scaled to pixels, and the zoom
+/// contribution is damped and clamped so a far-out view still has visible discs
+/// and a close-in one does not paint saucers.
 pub fn node_radius_px(n: &Node, zoom: f32) -> f32 {
     let base = 2.0 + (n.degree as f32).sqrt();
     let base = if n.is_seed { base * 1.5 } else { base };
@@ -167,13 +174,70 @@ impl Highlight {
     }
 }
 
+/// A colour a group asks for: an Omarchy role by name, so a theme swap restyles
+/// it, or a literal `0xRRGGBB` for the one case where the operator means that
+/// exact colour and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupColour {
+    Role(&'static str),
+    Hex(u32),
+}
+
+/// Roles a new group cycles through. Every one is an Omarchy role, so groups
+/// follow the theme by default and the collision rule from C6a still applies.
+pub const GROUP_ROLES: [&str; 5] = ["accent", "ok", "warn", "danger", "bright"];
+
+/// Obsidian's groups: a search, and a colour for what it matches.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Group {
+    pub query: String,
+    pub colour: GroupColour,
+}
+
+impl Group {
+    /// Next group for `query`, coloured by how many groups already exist so two
+    /// groups never land on the same role by accident.
+    pub fn next(query: impl Into<String>, existing: usize) -> Self {
+        Self { query: query.into(), colour: GroupColour::Role(GROUP_ROLES[existing % GROUP_ROLES.len()]) }
+    }
+}
+
+/// The first group whose query matches, or none. First match wins, so the
+/// operator can reason about order instead of blend rules.
+pub fn group_for(n: &Node, groups: &[Group]) -> Option<GroupColour> {
+    groups.iter().find(|g| n.matches(&g.query)).map(|g| g.colour)
+}
+
 /// Board-local pixels. `Stroke` is a real hairline between two disc rims, not a
 /// run of dots.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Prim {
-    Stroke { x0: f32, y0: f32, x1: f32, y1: f32, width: f32, dashed: bool, alpha: f32 },
-    Disc { x: f32, y: f32, r: f32, seed: bool, dangling: bool, pinned: bool, alpha: f32 },
-    Label { x: f32, y: f32, text: String, alpha: f32 },
+    Stroke {
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        width: f32,
+        dashed: bool,
+        alpha: f32,
+    },
+    Disc {
+        x: f32,
+        y: f32,
+        r: f32,
+        seed: bool,
+        dangling: bool,
+        pinned: bool,
+        alpha: f32,
+        /// Set when a group's query matched this node.
+        group: Option<GroupColour>,
+    },
+    Label {
+        x: f32,
+        y: f32,
+        text: String,
+        alpha: f32,
+    },
 }
 
 /// The segment between two discs, trimmed to their rims.
@@ -198,6 +262,7 @@ pub fn paint(
     board: [f32; 2],
     hi: &Highlight,
     pinned: &dyn Fn(&str) -> bool,
+    groups: &[Group],
 ) -> Vec<Prim> {
     let pos: Vec<[f32; 2]> = scene.nodes.iter().map(|n| cam.to_screen([n.x, n.y], board)).collect();
     let rad: Vec<f32> = scene.nodes.iter().map(|n| node_radius_px(n, cam.zoom)).collect();
@@ -226,6 +291,7 @@ pub fn paint(
             dangling: n.dangling,
             pinned: pinned(&n.id),
             alpha: hi.node_alpha(i),
+            group: group_for(n, groups),
         });
     }
     for (i, n) in scene.nodes.iter().enumerate() {
@@ -237,6 +303,74 @@ pub fn paint(
         });
     }
     out
+}
+
+/// What a keystroke means. The window owns state; this owns the mapping, so
+/// the keyboard contract is testable without a compositor.
+#[derive(Debug, Clone, PartialEq)]
+pub enum KeyAction {
+    Zoom(f32),
+    Pan(f32, f32),
+    ResetCamera,
+    StartQuery,
+    QueryPush(char),
+    QueryPop,
+    /// Leave the query box, keeping what was typed.
+    QueryCommit,
+    /// Leave the query box and clear it.
+    QueryCancel,
+    ToggleDangling,
+    ToggleOrphans,
+    CycleLayout,
+    CycleDomain,
+    Depth(i32),
+    /// Turn the current query into a group.
+    AddGroup,
+    ClearGroups,
+    Unpin,
+    None,
+}
+
+/// One keystroke, in or out of the query box.
+///
+/// While typing, printable keys are text and nothing else: a query containing
+/// `-` must not zoom out. `escape` always gets you out.
+pub fn key_action(key: &str, shift: bool, typing: bool) -> KeyAction {
+    if typing {
+        return match key {
+            "escape" => KeyAction::QueryCancel,
+            "enter" => KeyAction::QueryCommit,
+            "backspace" => KeyAction::QueryPop,
+            "space" => KeyAction::QueryPush(' '),
+            k => match k.chars().next() {
+                Some(c) if k.chars().count() == 1 && !c.is_control() => {
+                    KeyAction::QueryPush(if shift { c.to_ascii_uppercase() } else { c })
+                }
+                _ => KeyAction::None,
+            },
+        };
+    }
+    match key {
+        "+" | "=" => KeyAction::Zoom(ZOOM_STEP),
+        "-" | "_" => KeyAction::Zoom(1.0 / ZOOM_STEP),
+        "0" => KeyAction::ResetCamera,
+        "left" => KeyAction::Pan(PAN_STEP_PX, 0.0),
+        "right" => KeyAction::Pan(-PAN_STEP_PX, 0.0),
+        "up" => KeyAction::Pan(0.0, PAN_STEP_PX),
+        "down" => KeyAction::Pan(0.0, -PAN_STEP_PX),
+        "/" => KeyAction::StartQuery,
+        "escape" => KeyAction::QueryCancel,
+        "e" => KeyAction::ToggleDangling,
+        "o" => KeyAction::ToggleOrphans,
+        "l" => KeyAction::CycleLayout,
+        "d" => KeyAction::CycleDomain,
+        "[" => KeyAction::Depth(-1),
+        "]" => KeyAction::Depth(1),
+        "g" if shift => KeyAction::ClearGroups,
+        "g" => KeyAction::AddGroup,
+        "u" => KeyAction::Unpin,
+        _ => KeyAction::None,
+    }
 }
 
 #[cfg(test)]
@@ -339,7 +473,8 @@ mod tests {
         // A filtered-out node is not grabbable.
         let ghost = cam.to_screen([0.0, 1.0], BOARD);
         assert_eq!(hit_test(&s, &cam, BOARD, ghost, &all), Some(2));
-        assert_eq!(hit_test(&s, &cam, BOARD, ghost, &|n| n.passes(false, None)), None);
+        let hide_dangling = crate::scene::Filters { show_dangling: false, ..Default::default() };
+        assert_eq!(hit_test(&s, &cam, BOARD, ghost, &|n| n.passes(&hide_dangling)), None);
     }
 
     #[test]
@@ -365,7 +500,7 @@ mod tests {
     fn strokes_start_and_stop_on_the_disc_rims() {
         let s = scene();
         let cam = Camera::default();
-        let prims = paint(&s, &cam, BOARD, &highlight(&s, None), &|_| false);
+        let prims = paint(&s, &cam, BOARD, &highlight(&s, None), &|_| false, &[]);
 
         let strokes: Vec<&Prim> = prims.iter().filter(|p| matches!(p, Prim::Stroke { .. })).collect();
         assert_eq!(strokes.len(), 2);
@@ -398,7 +533,7 @@ mod tests {
         let mut s = scene();
         s.nodes[1].x = 0.0;
         s.nodes[1].y = 0.0;
-        let prims = paint(&s, &Camera::default(), BOARD, &Highlight::default(), &|_| false);
+        let prims = paint(&s, &Camera::default(), BOARD, &Highlight::default(), &|_| false, &[]);
         assert_eq!(
             prims.iter().filter(|p| matches!(p, Prim::Stroke { .. })).count(),
             1,
@@ -410,7 +545,7 @@ mod tests {
     fn paint_carries_hover_alpha_and_pins() {
         let s = scene();
         let hi = highlight(&s, Some(0));
-        let prims = paint(&s, &Camera::default(), BOARD, &hi, &|id| id == "leaf");
+        let prims = paint(&s, &Camera::default(), BOARD, &hi, &|id| id == "leaf", &[]);
         let dim = prims
             .iter()
             .filter(|p| matches!(p, Prim::Disc { alpha, .. } if (*alpha - DIM_ALPHA).abs() < 1e-6))
@@ -424,9 +559,87 @@ mod tests {
     }
 
     #[test]
-    fn a_disc_grows_with_degree() {
+    fn a_disc_grows_with_degree_on_the_quartz_curve() {
         let s = scene();
         let z = 1.0;
-        assert!(node_radius_px(&s.nodes[0], z) > node_radius_px(&s.nodes[3], z));
+        // hub (degree 2, seed) > leaf (1) > stranger (0)
+        assert!(node_radius_px(&s.nodes[0], z) > node_radius_px(&s.nodes[1], z));
+        assert!(node_radius_px(&s.nodes[1], z) > node_radius_px(&s.nodes[3], z));
+
+        // the law itself: 2 + sqrt(degree), scaled, seed at 1.5x
+        let plain = |deg: u32| Node {
+            id: "n".into(),
+            label: "n".into(),
+            depth: 0,
+            x: 0.0,
+            y: 0.0,
+            degree: deg,
+            dangling: false,
+            is_seed: false,
+        };
+        for deg in [0u32, 1, 4, 9, 25] {
+            let want = (2.0 + (deg as f32).sqrt()) * 1.6;
+            assert!(
+                (node_radius_px(&plain(deg), 1.0) - want).abs() < 1e-4,
+                "degree {deg} should be 2 + sqrt(degree)"
+            );
+        }
+        // and it keeps growing rather than flattening into uniform discs
+        let r: Vec<f32> = [0u32, 1, 4, 16, 64].iter().map(|&d| node_radius_px(&plain(d), 1.0)).collect();
+        assert!(r.windows(2).all(|w| w[1] > w[0] + 0.5), "monotone and visibly different: {r:?}");
+    }
+
+    #[test]
+    fn a_group_query_recolours_the_discs_it_matches() {
+        let s = scene();
+        let groups = vec![
+            Group::next("leaf", 0),
+            Group { query: "ghost".into(), colour: GroupColour::Hex(0x30_a0_ff) },
+        ];
+        assert_eq!(groups[0].colour, GroupColour::Role(GROUP_ROLES[0]));
+
+        assert_eq!(group_for(&s.nodes[1], &groups), Some(GroupColour::Role("accent")));
+        assert_eq!(group_for(&s.nodes[2], &groups), Some(GroupColour::Hex(0x30_a0_ff)));
+        assert_eq!(group_for(&s.nodes[0], &groups), None, "the hub matches no group");
+
+        let prims = paint(&s, &Camera::default(), BOARD, &Highlight::default(), &|_| false, &groups);
+        let grouped = prims.iter().filter(|p| matches!(p, Prim::Disc { group: Some(_), .. })).count();
+        assert_eq!(grouped, 2, "only the two matching discs carry a group colour");
+
+        // Groups cycle roles so two of them never collide by accident.
+        let picked: Vec<GroupColour> = (0..GROUP_ROLES.len()).map(|i| Group::next("q", i).colour).collect();
+        let mut seen = picked.clone();
+        seen.dedup();
+        assert_eq!(seen.len(), GROUP_ROLES.len());
+    }
+
+    #[test]
+    fn the_keymap_separates_typing_from_commands() {
+        // out of the query box
+        assert_eq!(key_action("=", false, false), KeyAction::Zoom(ZOOM_STEP));
+        assert_eq!(key_action("-", false, false), KeyAction::Zoom(1.0 / ZOOM_STEP));
+        assert_eq!(key_action("0", false, false), KeyAction::ResetCamera);
+        assert_eq!(key_action("left", false, false), KeyAction::Pan(PAN_STEP_PX, 0.0));
+        assert_eq!(key_action("down", false, false), KeyAction::Pan(0.0, -PAN_STEP_PX));
+        assert_eq!(key_action("/", false, false), KeyAction::StartQuery);
+        assert_eq!(key_action("e", false, false), KeyAction::ToggleDangling);
+        assert_eq!(key_action("o", false, false), KeyAction::ToggleOrphans);
+        assert_eq!(key_action("l", false, false), KeyAction::CycleLayout);
+        assert_eq!(key_action("]", false, false), KeyAction::Depth(1));
+        assert_eq!(key_action("[", false, false), KeyAction::Depth(-1));
+        assert_eq!(key_action("g", false, false), KeyAction::AddGroup);
+        assert_eq!(key_action("g", true, false), KeyAction::ClearGroups);
+        assert_eq!(key_action("q", false, false), KeyAction::None);
+
+        // inside it, printable keys are text — a query with a dash must not zoom
+        assert_eq!(key_action("-", false, true), KeyAction::QueryPush('-'));
+        assert_eq!(key_action("0", false, true), KeyAction::QueryPush('0'));
+        assert_eq!(key_action("e", false, true), KeyAction::QueryPush('e'));
+        assert_eq!(key_action("e", true, true), KeyAction::QueryPush('E'));
+        assert_eq!(key_action("space", false, true), KeyAction::QueryPush(' '));
+        assert_eq!(key_action("backspace", false, true), KeyAction::QueryPop);
+        assert_eq!(key_action("enter", false, true), KeyAction::QueryCommit);
+        assert_eq!(key_action("escape", false, true), KeyAction::QueryCancel);
+        assert_eq!(key_action("left", false, true), KeyAction::None, "arrows are not text");
     }
 }

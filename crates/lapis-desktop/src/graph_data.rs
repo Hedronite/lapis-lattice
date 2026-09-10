@@ -14,6 +14,8 @@
 use std::collections::VecDeque;
 use std::path::Path;
 
+use lapis_lattice::GraphSnapshot;
+
 use crate::scene::{Ego, EgoRow, Node, Scene, build};
 use crate::sim::{ForceParams, ForceSim};
 
@@ -25,19 +27,81 @@ pub const SETTLE_TICKS: usize = 600;
 /// expect roughly -2..2.
 const HALF_EXTENT: f32 = 2.0;
 
-/// The whole-vault graph, laid out by the force sim.
+/// Depth range the local-mode slider offers.
+pub const MIN_DEPTH: u32 = 1;
+pub const MAX_DEPTH: u32 = 8;
+
+/// Read the whole-vault snapshot from the embedded index.
+pub fn snapshot_for(vault: &Path) -> Result<GraphSnapshot, String> {
+    let engine = lapis_lattice::Engine::open(vault).map_err(|e| e.to_string())?;
+    engine.graph_snapshot().map_err(|e| e.to_string())
+}
+
+/// The whole-vault graph, laid out by the force sim. This is what `lapis
+/// desktop` opens with, `--path` or not.
 ///
 /// `seed` only marks the active note; unlike the ego walk it does not decide
 /// which nodes exist. A vault with no note at `seed` still draws in full.
 pub fn global_scene(vault: &Path, seed: &str, ticks: usize) -> Result<Scene, String> {
-    let engine = lapis_lattice::Engine::open(vault).map_err(|e| e.to_string())?;
-    let snap = engine.graph_snapshot().map_err(|e| e.to_string())?;
-    Ok(layout(&snap, seed, ticks))
+    Ok(layout(&snapshot_for(vault)?, seed, ticks))
+}
+
+/// Local mode: everything within `depth` links of `seed`, undirected, cut out
+/// of the same snapshot the global view uses.
+///
+/// This is a walk over rows already in memory. It never re-reads the vault and
+/// never builds a second index, which is the difference between a depth slider
+/// and a reindex.
+pub fn local_scene(vault: &Path, seed: &str, depth: u32, ticks: usize) -> Result<Scene, String> {
+    let snap = snapshot_for(vault)?;
+    Ok(layout(&within(&snap, seed, depth), seed, ticks))
+}
+
+/// The sub-snapshot within `depth` hops of `seed`. Degree stays vault-wide, so
+/// a hub looks like a hub even when most of its links are out of view.
+pub fn within(snap: &GraphSnapshot, seed: &str, depth: u32) -> GraphSnapshot {
+    let depth = depth.clamp(MIN_DEPTH, MAX_DEPTH);
+    let index: std::collections::HashMap<&str, usize> =
+        snap.nodes.iter().enumerate().map(|(i, n)| (n.id.as_str(), i)).collect();
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); snap.nodes.len()];
+    for e in &snap.edges {
+        if let (Some(&a), Some(&b)) = (index.get(e.src.as_str()), index.get(e.dst.as_str())) {
+            adj[a].push(b);
+            adj[b].push(a);
+        }
+    }
+    let Some(&start) = index.get(seed) else {
+        // No such note: an empty local graph is the honest answer, not the
+        // whole vault relabelled.
+        return GraphSnapshot {
+            generated_at: snap.generated_at.clone(),
+            vault: snap.vault.clone(),
+            truncated: snap.truncated,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        };
+    };
+    let hops = hops_from(&adj, Some(start));
+    let keep: std::collections::BTreeSet<usize> =
+        (0..snap.nodes.len()).filter(|&i| hops[i] <= depth).collect();
+    let ids: std::collections::BTreeSet<&str> = keep.iter().map(|&i| snap.nodes[i].id.as_str()).collect();
+    GraphSnapshot {
+        generated_at: snap.generated_at.clone(),
+        vault: snap.vault.clone(),
+        truncated: snap.truncated,
+        nodes: keep.iter().map(|&i| snap.nodes[i].clone()).collect(),
+        edges: snap
+            .edges
+            .iter()
+            .filter(|e| ids.contains(e.src.as_str()) && ids.contains(e.dst.as_str()))
+            .cloned()
+            .collect(),
+    }
 }
 
 /// Snapshot plus forces to a drawable scene. Split out from the I/O so the
 /// layout is testable without a vault.
-pub fn layout(snap: &lapis_lattice::GraphSnapshot, seed: &str, ticks: usize) -> Scene {
+pub fn layout(snap: &GraphSnapshot, seed: &str, ticks: usize) -> Scene {
     let mut sim = ForceSim::from_snapshot(snap, ForceParams::default());
     sim.settle(ticks);
     let xy = sim.normalized(HALF_EXTENT);
@@ -173,11 +237,52 @@ mod tests {
         std::fs::create_dir_all(d.join("notes")).unwrap();
         std::fs::write(d.join("Welcome.md"), "# Welcome\n\nSee [[Alpha]] and [[ghost]].\n").unwrap();
         std::fs::write(d.join("notes/Alpha.md"), "# Alpha\n\nOn to [[Beta]].\n").unwrap();
-        std::fs::write(d.join("notes/Beta.md"), "# Beta\n\nLeaf.\n").unwrap();
+        // a chain deep enough that a depth slider has something to slide over
+        std::fs::write(d.join("notes/Beta.md"), "# Beta\n\nOn to [[Gamma]].\n").unwrap();
+        std::fs::write(d.join("notes/Gamma.md"), "# Gamma\n\nOn to [[Delta]].\n").unwrap();
+        std::fs::write(d.join("notes/Delta.md"), "# Delta\n\nLeaf.\n").unwrap();
         std::fs::write(d.join("Orphan.md"), "# Orphan\n\nAlone.\n").unwrap();
         let mut e = lapis_lattice::Engine::open(&d).unwrap();
         e.reindex().unwrap();
         d
+    }
+
+    #[test]
+    fn local_mode_is_a_depth_walk_over_the_same_snapshot() {
+        let d = vault();
+        let snap = snapshot_for(&d).unwrap();
+        let whole = snap.nodes.len();
+        assert_eq!(whole, 7);
+
+        // Welcome -> Alpha -> Beta -> Gamma -> Delta, plus a dangling ghost at
+        // depth 1 and an orphan in another component that never arrives.
+        let counts: Vec<usize> = (1..=6).map(|k| within(&snap, "Welcome.md", k).nodes.len()).collect();
+        assert_eq!(counts, vec![3, 4, 5, 6, 6, 6], "the slider changes the node count");
+        assert!(counts.iter().all(|&n| n < whole), "the orphan is never within reach of the seed");
+
+        let d1 = within(&snap, "Welcome.md", 1);
+        let ids: Vec<&str> = d1.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["Welcome.md", "notes/Alpha.md", "dangling:ghost"], "snapshot order kept");
+        assert!(
+            d1.edges.iter().all(|e| ids.contains(&e.src.as_str()) && ids.contains(&e.dst.as_str())),
+            "no edge dangles off the cut"
+        );
+        assert_eq!(
+            d1.nodes.iter().find(|n| n.id == "notes/Alpha.md").unwrap().degree,
+            2,
+            "degree stays vault-wide, so a hub still looks like a hub in local mode"
+        );
+
+        // Out of range clamps rather than surprising the caller.
+        assert_eq!(within(&snap, "Welcome.md", 0).nodes.len(), 3);
+        assert_eq!(within(&snap, "Welcome.md", 99).nodes.len(), 6);
+        assert!(within(&snap, "no/such.md", 3).nodes.is_empty(), "an unknown seed is empty, not whole");
+
+        // And it is a walk over rows already read, not a second index.
+        let scene = local_scene(&d, "Welcome.md", 2, 200).unwrap();
+        assert_eq!(scene.nodes.len(), 4);
+        assert!(scene.nodes.iter().any(|n| n.is_seed && n.id == "Welcome.md"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -186,6 +291,8 @@ mod tests {
         let s = global_scene(&d, "Welcome.md", SETTLE_TICKS).unwrap();
         let by = |id: &str| s.nodes.iter().find(|n| n.id == id).unwrap().degree;
         assert_eq!(by("Welcome.md"), 2);
+        assert_eq!(by("notes/Beta.md"), 2);
+        assert_eq!(by("notes/Delta.md"), 1);
         assert_eq!(by("Orphan.md"), 0);
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -199,10 +306,18 @@ mod tests {
         ids.sort();
         assert_eq!(
             ids,
-            vec!["Orphan.md", "Welcome.md", "dangling:ghost", "notes/Alpha.md", "notes/Beta.md"],
+            vec![
+                "Orphan.md",
+                "Welcome.md",
+                "dangling:ghost",
+                "notes/Alpha.md",
+                "notes/Beta.md",
+                "notes/Delta.md",
+                "notes/Gamma.md"
+            ],
             "the orphan proves this is not an ego walk"
         );
-        assert_eq!(s.edges.len(), 3);
+        assert_eq!(s.edges.len(), 5);
         assert!(s.nodes.iter().any(|n| n.is_seed && n.id == "Welcome.md"));
         assert!(s.nodes.iter().any(|n| n.dangling && n.label == "ghost"));
 
@@ -241,7 +356,7 @@ mod tests {
 
         let hop2 = scene_for(&d, "Welcome.md", 2, false).unwrap();
         assert!(hop2.nodes.iter().any(|n| n.id == "notes/Beta.md" && n.depth == 2));
-        let prims = paint(&hop2, &Camera::default(), [800.0, 600.0], &Highlight::default(), &|_| false);
+        let prims = paint(&hop2, &Camera::default(), [800.0, 600.0], &Highlight::default(), &|_| false, &[]);
         let discs = prims.iter().filter(|p| matches!(p, Prim::Disc { .. })).count();
         let strokes = prims.iter().filter(|p| matches!(p, Prim::Stroke { .. })).count();
         assert_eq!(discs, hop2.nodes.len());

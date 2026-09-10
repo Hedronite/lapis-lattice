@@ -82,6 +82,36 @@ fn stem(p: &str) -> String {
     base.strip_suffix(".md").unwrap_or(base).to_string()
 }
 
+/// What the canvas is allowed to show. Obsidian's filter row, in one struct.
+///
+/// A filter hides exactly what it says it hides — the seed is not exempt.
+/// Exempting it made sense when the only view was an ego ring and hiding the
+/// subject was nonsense; on a global graph it just made the filters lie.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Filters {
+    /// Case-insensitive substring over the label and the vault path. Empty
+    /// matches everything.
+    pub query: String,
+    /// Obsidian's "existing files only", inverted: false hides dangling links.
+    pub show_dangling: bool,
+    /// Notes nothing links to and that link to nothing.
+    pub show_orphans: bool,
+    /// One first-path-segment domain at a time, or all.
+    pub domain: Option<String>,
+}
+
+impl Default for Filters {
+    fn default() -> Self {
+        Self { query: String::new(), show_dangling: true, show_orphans: true, domain: None }
+    }
+}
+
+impl Filters {
+    pub fn is_open(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 impl Node {
     /// First path segment (`notes/Alpha.md` → `notes`). Files at the vault root
     /// have no domain.
@@ -89,19 +119,33 @@ impl Node {
         self.id.split_once('/').map(|(d, _)| d)
     }
 
-    /// Gate C filters: seed always stays; dangling can be hidden; one domain at
-    /// a time (or all).
-    pub fn passes(&self, show_dangling: bool, domain: Option<&str>) -> bool {
-        if self.is_seed {
+    /// Nothing links here and it links nowhere. Degree is vault-wide, so a note
+    /// stays an orphan (or stops being one) regardless of what else is hidden.
+    pub fn is_orphan(&self) -> bool {
+        self.degree == 0
+    }
+
+    pub fn matches(&self, query: &str) -> bool {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
             return true;
         }
-        if self.dangling && !show_dangling {
+        self.label.to_lowercase().contains(&q) || self.id.to_lowercase().contains(&q)
+    }
+
+    pub fn passes(&self, f: &Filters) -> bool {
+        if self.dangling && !f.show_dangling {
             return false;
         }
-        match domain {
-            None => true,
-            Some(d) => self.domain() == Some(d),
+        if self.is_orphan() && !f.show_orphans {
+            return false;
         }
+        if let Some(d) = f.domain.as_deref()
+            && self.domain() != Some(d)
+        {
+            return false;
+        }
+        self.matches(&f.query)
     }
 }
 
@@ -121,12 +165,12 @@ impl Scene {
         d
     }
 
-    /// Sub-scene after Gate C filters. Edge endpoints that did not survive are dropped.
-    pub fn filtered(&self, show_dangling: bool, domain: Option<&str>) -> Scene {
+    /// Sub-scene after the filters. Edge endpoints that did not survive are dropped.
+    pub fn filtered(&self, f: &Filters) -> Scene {
         let mut remap = vec![None; self.nodes.len()];
         let mut nodes = Vec::new();
         for (i, n) in self.nodes.iter().enumerate() {
-            if n.passes(show_dangling, domain) {
+            if n.passes(f) {
                 remap[i] = Some(nodes.len());
                 nodes.push(n.clone());
             }
@@ -303,17 +347,45 @@ mod tests {
     }
 
     #[test]
-    fn filters_hide_dangling_and_other_domains() {
+    fn filters_hide_dangling_orphans_domains_and_non_matches() {
         let s = from_json(FIXTURE).unwrap();
         assert_eq!(s.domains(), vec!["Cross-References".to_string(), "briefs".into(), "ideas".into()]);
-        let no_dang = s.filtered(false, None);
-        assert_eq!(no_dang.nodes.len(), 5, "seed + 4 resolved; dangling dropped");
-        assert!(!no_dang.nodes.iter().any(|n| n.dangling));
+        assert!(Filters::default().is_open());
 
-        let ideas = s.filtered(true, Some("ideas"));
-        assert!(ideas.seed().is_some(), "seed stays under a domain filter");
-        assert!(ideas.nodes.iter().all(|n| n.is_seed || n.domain() == Some("ideas")));
-        assert_eq!(ideas.nodes.iter().filter(|n| n.depth == 2).count(), 2);
+        let no_dang = Filters { show_dangling: false, ..Default::default() };
+        let kept = s.filtered(&no_dang);
+        assert_eq!(kept.nodes.len(), 5, "seed + 4 resolved; dangling dropped");
+        assert!(!kept.nodes.iter().any(|n| n.dangling));
+
+        let ideas = Filters { domain: Some("ideas".into()), ..Default::default() };
+        let kept = s.filtered(&ideas);
+        assert!(kept.nodes.iter().all(|n| n.domain() == Some("ideas")), "a filter hides what it says");
+        assert_eq!(kept.nodes.len(), 2);
+
+        let q = Filters { query: "CAPITAL".into(), ..Default::default() };
+        let kept = s.filtered(&q);
+        assert!(!kept.nodes.is_empty());
+        assert!(
+            kept.nodes.iter().all(|n| n.matches("capital")),
+            "the query is case-insensitive over label and path"
+        );
+
+        // Every node in the ego fixture has an edge, so nothing is an orphan.
+        assert!(s.nodes.iter().all(|n| !n.is_orphan()));
+        let mut lonely = s.clone();
+        lonely.nodes.push(Node {
+            id: "Alone.md".into(),
+            label: "Alone".into(),
+            depth: 0,
+            x: 3.0,
+            y: 3.0,
+            degree: 0,
+            dangling: false,
+            is_seed: false,
+        });
+        let hide = Filters { show_orphans: false, ..Default::default() };
+        assert!(!lonely.filtered(&hide).nodes.iter().any(|n| n.id == "Alone.md"));
+        assert!(lonely.filtered(&Filters::default()).nodes.iter().any(|n| n.id == "Alone.md"));
     }
 
     #[test]
@@ -323,7 +395,7 @@ mod tests {
         s.apply_pins(&pins);
         let pinned = s.nodes.iter().find(|n| n.id == "briefs/b.md").unwrap();
         assert_eq!((pinned.x, pinned.y), (1.25, -0.5));
-        let after = s.filtered(true, None);
+        let after = s.filtered(&Filters::default());
         let still = after.nodes.iter().find(|n| n.id == "briefs/b.md").unwrap();
         assert_eq!((still.x, still.y), (1.25, -0.5), "a filter does not unpin");
     }

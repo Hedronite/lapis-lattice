@@ -472,7 +472,8 @@ pub struct InitArgs {
 
 #[derive(Debug, Args)]
 pub struct DesktopArgs {
-    /// Note to open / seed the graph canvas with.
+    /// Note to mark as active and to seed local mode with. The graph itself is
+    /// the whole indexed vault either way.
     #[arg(long, value_name = "PATH")]
     pub path: Option<String>,
 
