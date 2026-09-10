@@ -202,6 +202,11 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
     if requested > 50 {
         return Err(LapisError::Usage(format!("offset + limit must be ≤ 50 (got {requested})")));
     }
+    if args.embedder.as_deref() == Some("none") && matches!(args.mode, lattice::Mode::Vector) {
+        return Err(LapisError::Usage(
+            "vector mode needs an embedder; got --embedder none. Use --mode bm25|hybrid.".into(),
+        ));
+    }
     let params = SearchParams {
         query: args.query_text(),
         top_k: requested,
@@ -210,6 +215,7 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
         per_doc: args.effective_per_doc(ctx.cfg.agent.per_doc),
         mmr: args.mmr,
         include_archives: args.include_archives,
+        embedder: args.embedder.clone(),
     };
     let mut result = ctx.backend()?.search(&params).await?;
     // The lattice has no offset; ask for offset+limit and drop the head. Ranks stay absolute.
@@ -714,6 +720,7 @@ async fn doctor(ctx: &Ctx) -> Result<()> {
             per_doc: true,
             mmr: false,
             include_archives: false,
+            embedder: Some("none".into()),
         })
         .await;
     match &probe {

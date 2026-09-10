@@ -85,7 +85,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
-            libvulkan-dev libx11-dev libxcb1-dev libfontconfig-1-dev libfreetype-dev \
+            libvulkan-dev libx11-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
             libasound2-dev libssl-dev
       - name: build (desktop on)
         run: cargo build --release --locked --bin lapis --features desktop

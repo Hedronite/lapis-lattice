@@ -384,6 +384,7 @@ impl App {
                 per_doc: true,
                 mmr: false,
                 include_archives: false,
+                embedder: None,
             };
             let r = client.search(&params).await.map(|r| r.hits).map_err(|e| e.to_string());
             let _ = tx.send(Msg::Search(seq, r));
