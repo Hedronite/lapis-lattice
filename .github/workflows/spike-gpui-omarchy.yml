@@ -1,0 +1,35 @@
+# C8 / slice 5a: does gpui-omarchy@0.1.2 compile on linux-x64?
+# Throwaway crate on the runner — not vendored into the Lapis tree.
+name: spike-gpui-omarchy
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/spike-gpui-omarchy.yml"
+
+jobs:
+  linux-x64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: GUI system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libvulkan-dev libx11-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
+            libasound2-dev
+      - name: cargo add gpui-omarchy@0.1.2 && build
+        run: |
+          cargo new "$HOME/gpui-omarchy-spike" --bin --vcs none
+          cd "$HOME/gpui-omarchy-spike"
+          cargo add gpui-omarchy@0.1.2
+          cargo build --release
+          ls -la target/release/gpui-omarchy-spike
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpui-omarchy-spike-linux-x64
+          path: /home/runner/gpui-omarchy-spike/target/release/gpui-omarchy-spike
+          if-no-files-found: error
