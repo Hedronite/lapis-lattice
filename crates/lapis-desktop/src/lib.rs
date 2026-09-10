@@ -4,8 +4,11 @@
 //!   → plain text or draw list. Not a browser, not a webview, no JS, no CSS
 //!   engine, no network. It exists so notes and captured pages render inside
 //!   the app's own surface.
-//! * [`scene`]: the graph-canvas **data** layer — `/graph/ego` JSON → nodes,
-//!   edges, positions. [`scene::draw`] is the paint list the window consumes.
+//! * [`scene`]: the graph-canvas **data** layer — nodes, edges, positions.
+//!   [`scene::draw`] is the paint list the window consumes.
+//! * [`sim`]: the 2D force tick (center, repel, link, distance) that lays out
+//!   the whole-vault snapshot. The default canvas positions come from here;
+//!   the hop rings in [`scene::build`] are a debug view.
 //! * [`gitnexus`]: optional sidecar client. No vendored code; no-op when there
 //!   is no `.gitnexus` in the vault.
 //! * [`run`]: opens the GPUI window when built with the `gpui` feature, else
@@ -15,6 +18,7 @@ pub mod gitnexus;
 pub mod graph_data;
 pub mod html;
 pub mod scene;
+pub mod sim;
 
 use std::path::PathBuf;
 
@@ -117,12 +121,24 @@ mod window {
         /// Filters (Gate C): dangling on/off, and one domain at a time.
         show_dangling: bool,
         domain: Option<String>,
+        /// Ego depth. Only the ring debug view reads it; the global graph has
+        /// no hop limit.
         hops: u32,
+        /// False is the shipped default: the whole vault at force-sim positions.
+        /// True brings back the v0.2 hop rings as a debug overlay.
+        rings: bool,
     }
 
     impl Root {
+        /// Default layout is the whole-vault snapshot settled by the force sim.
+        /// The hop-ring walk stays reachable behind the layout toggle.
         fn reload(&mut self) {
-            match graph_data::scene_for(&self.vault, &self.seed, self.hops, false) {
+            let built = if self.rings {
+                graph_data::scene_for(&self.vault, &self.seed, self.hops, false)
+            } else {
+                graph_data::global_scene(&self.vault, &self.seed, graph_data::SETTLE_TICKS)
+            };
+            match built {
                 Ok(s) => {
                     self.scene = s;
                     self.error = None;
@@ -233,6 +249,7 @@ mod window {
             let dangling_label = format!("dangling: {}", if self.show_dangling { "shown" } else { "hidden" });
             let domain_label = format!("domain: {}", self.domain.clone().unwrap_or_else(|| "all".into()));
             let hop_label = format!("hop-{}", self.hops);
+            let layout_label = format!("layout: {}", if self.rings { "rings (debug)" } else { "sim" });
             let controls = div()
                 .flex()
                 .gap_2()
@@ -262,6 +279,13 @@ mod window {
                         this.reload();
                         cx.notify();
                     }),
+                ))
+                .child(div().id("f-layout").text_sm().text_color(label_c).child(layout_label).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.rings = !this.rings;
+                        this.reload();
+                        cx.notify();
+                    }),
                 ));
 
             panel(self.title.as_str(), cx)
@@ -273,11 +297,11 @@ mod window {
                     (Some(e), _) => e.clone(),
                     (None, Some(p)) => p.clone(),
                     (None, None) => format!(
-                        "{}  ·  {} nodes, {} links  ·  hop-{}",
+                        "{}  ·  {} nodes, {} links  ·  {}",
                         self.seed,
                         self.scene.nodes.len(),
                         self.scene.edges.len(),
-                        self.hops
+                        if self.rings { format!("hop-{} rings", self.hops) } else { "force sim".into() }
                     ),
                 }))
         }
@@ -289,7 +313,8 @@ mod window {
         let title = opts.title.clone();
         let show_dangling = true;
         let hops = 2u32;
-        let (scene, error) = match graph_data::scene_for(&vault, &seed, hops, false) {
+        // Default view: the whole vault, laid out by the force sim.
+        let (scene, error) = match graph_data::global_scene(&vault, &seed, graph_data::SETTLE_TICKS) {
             Ok(s) => (s, None),
             Err(e) => (Scene::default(), Some(e)),
         };
@@ -307,6 +332,7 @@ mod window {
                     show_dangling,
                     domain: None,
                     hops,
+                    rings: false,
                 })
             });
             match opened {
@@ -350,6 +376,9 @@ mod tests {
         assert!(src.contains("on_click"), "click a node opens that note");
         assert!(src.contains("show_dangling"), "dangling filter");
         assert!(src.contains("f-domain"), "domain filter");
+        assert!(src.contains("graph_data::global_scene"), "default layout is the whole-vault snapshot");
+        assert!(src.contains("rings: false"), "hop rings are the debug view, not the default");
+        assert!(src.contains("f-layout"), "rings stay reachable as a debug toggle");
         let toml = include_str!("../Cargo.toml");
         assert!(toml.contains("gpui-omarchy"));
         assert!(!toml.contains("gpui = \"0.2"));

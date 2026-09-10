@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hedronite.local/lapis/schema/v0.3/graph-snapshot.schema.json",
+  "title": "Lapis whole-vault graph snapshot",
+  "description": "Embedded index → canvas. snake_case. Whole vault, not ego-only.",
+  "type": "object",
+  "required": ["generated_at", "vault", "nodes", "edges"],
+  "properties": {
+    "generated_at": { "type": "string" },
+    "vault": { "type": "string" },
+    "truncated": { "type": "boolean" },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "degree", "dangling"],
+        "properties": {
+          "id": { "type": "string", "description": "vault-rel path, or dangling:<raw>" },
+          "path": { "type": ["string", "null"] },
+          "title": { "type": "string" },
+          "domain": { "type": ["string", "null"] },
+          "kind": { "type": ["string", "null"] },
+          "degree": { "type": "integer", "minimum": 0 },
+          "dangling": { "type": "boolean" },
+          "x": { "type": "number" },
+          "y": { "type": "number" }
+        }
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["src", "dst", "resolved"],
+        "properties": {
+          "src": { "type": "string" },
+          "dst": { "type": "string" },
+          "dst_raw": { "type": ["string", "null"] },
+          "resolved": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}
