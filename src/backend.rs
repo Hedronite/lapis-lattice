@@ -104,7 +104,13 @@ impl Backend {
                     .hits
                     .into_iter()
                     .map(|h| Hit {
-                        kind: notes::kind_of(&h.path),
+                        // recorded at index time, not re-derived per consumer
+                        kind: match h.kind.as_str() {
+                            lapis_lattice::HTML => notes::Kind::Html,
+                            lapis_lattice::YAML => notes::Kind::Yaml,
+                            lapis_lattice::MARKDOWN => notes::Kind::Markdown,
+                            _ => notes::kind_of(&h.path),
+                        },
                         title: h
                             .title
                             .filter(|t| !t.trim().is_empty())

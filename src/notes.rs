@@ -19,6 +19,7 @@ pub enum Kind {
     Markdown,
     Pdf,
     Html,
+    Yaml,
     Source,
 }
 
@@ -32,6 +33,7 @@ pub fn kind_of(path: &str) -> Kind {
         "md" | "markdown" => Kind::Markdown,
         "pdf" => Kind::Pdf,
         "html" | "htm" => Kind::Html,
+        "yaml" | "yml" => Kind::Yaml,
         _ => Kind::Source,
     }
 }

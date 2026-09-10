@@ -7,6 +7,7 @@ use regex::Regex;
 use rusqlite::{Connection, params};
 
 use crate::graph::parse_wikilinks;
+use crate::kinds;
 use crate::{IndexReport, Result};
 
 const SKIP: &[&str] = &[".lapis", ".git", ".obsidian", "node_modules", ".venv", "target"];
@@ -94,7 +95,28 @@ fn index_one(conn: &Connection, vault: &Path, rel: &str) -> Result<u64> {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     let text = read_lossy(&abs);
-    let (fm, body) = split_frontmatter(&text);
+    let kind = kinds::kind_for(rel).unwrap_or(kinds::MARKDOWN);
+    // Markdown keeps its frontmatter split; HTML and YAML each know how to give
+    // up a title, metadata and heading-shaped chunks of their own.
+    let (fm, body, chunks) = match kind {
+        kinds::HTML => {
+            let e = kinds::extract_html(&text);
+            let mut m = e.meta;
+            if let Some(t) = e.title.clone() {
+                m.insert("title".into(), t);
+            }
+            (m, e.body, e.chunks)
+        }
+        kinds::YAML => {
+            let e = kinds::extract_yaml(&text);
+            (e.meta, e.body, e.chunks)
+        }
+        _ => {
+            let (fm, body) = split_frontmatter(&text);
+            let chunks = chunk_body(&body);
+            (fm, body, chunks)
+        }
+    };
     let title = fm.get("name").or_else(|| fm.get("title")).cloned().or_else(|| h1(&body));
     let domain = rel.split('/').next().filter(|s| *s != rel).map(str::to_string);
     let doc_type = fm.get("type").cloned().or_else(|| fm.get("doc_type").cloned());
@@ -103,11 +125,11 @@ fn index_one(conn: &Connection, vault: &Path, rel: &str) -> Result<u64> {
     let tags_json = tags_json(fm.get("tags"));
     conn.execute(
         "INSERT OR REPLACE INTO documents(path,title,domain,doc_type,status,priority,tags_json,mtime,hash,kind)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'markdown')",
-        params![rel, title, domain, doc_type, status, priority, tags_json, mtime, hash(&text)],
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        params![rel, title, domain, doc_type, status, priority, tags_json, mtime, hash(&text), kind],
     )?;
     let mut n = 0u64;
-    for (i, (heading, chunk)) in chunk_body(&body).into_iter().enumerate() {
+    for (i, (heading, chunk)) in chunks.into_iter().enumerate() {
         conn.execute(
             "INSERT INTO chunks(path, chunk_index, heading, text) VALUES(?1,?2,?3,?4)",
             params![rel, i as i64, heading, chunk],
@@ -149,7 +171,7 @@ fn walk_inner(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {
                 continue;
             }
             walk_inner(root, &path, out)?;
-        } else if name.ends_with(".md") || name.ends_with(".markdown") {
+        } else if kinds::kind_for(&name).is_some() {
             let rel = path.strip_prefix(root).unwrap_or(&path);
             out.push(rel.to_string_lossy().replace('\\', "/"));
         }

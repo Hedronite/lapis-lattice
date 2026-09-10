@@ -11,6 +11,7 @@ mod analytics;
 mod embed;
 mod graph;
 mod index;
+mod kinds;
 mod sqlite;
 
 use std::path::{Path, PathBuf};
@@ -21,6 +22,7 @@ use serde::Serialize;
 pub use analytics::{ANALYTICS_QUERIES, Analytics};
 pub use embed::Embedder;
 pub use graph::Neighbor;
+pub use kinds::{HTML, MARKDOWN, YAML, kind_for};
 
 /// Written into `meta.producer` at creation; asserted on open.
 pub const PRODUCER: &str = "lapis-lattice";
@@ -47,6 +49,9 @@ pub struct Engine {
 #[derive(Debug, Clone, Serialize)]
 pub struct Hit {
     pub path: String,
+    /// `markdown` | `html` | `yaml`, as recorded at index time rather than
+    /// re-derived from the extension by every consumer.
+    pub kind: String,
     pub title: Option<String>,
     pub heading: Option<String>,
     pub snippet: Option<String>,
@@ -533,6 +538,62 @@ mod tests {
         fn embed_query(&self, _: &str) -> Result<Vec<f32>> {
             Err(Error::Usage("ollama unreachable".into()))
         }
+    }
+
+    /// C1/C2/C3: a vault that is not only markdown. One HTML page, one YAML
+    /// note, and the skip-list directories that must never be walked.
+    #[test]
+    fn html_and_yaml_are_indexed_with_their_kind() {
+        let d = vault();
+        std::fs::write(
+            d.join("page.html"),
+            "<!doctype html><html><head><title>Release notes</title>\
+             <style>b{color:red}</style><script>alert('no')</script></head>\
+             <body><h1>Shipping</h1><p>kumquat harvest</p></body></html>",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("deploy.yml"),
+            "name: Deploy plan\nstatus: draft\nsteps:\n  - build kumquat\n  - ship\n",
+        )
+        .unwrap();
+        // must never be walked, whatever extension they hold
+        for skip in ["node_modules", ".venv"] {
+            std::fs::create_dir_all(d.join(skip)).unwrap();
+            std::fs::write(d.join(skip).join("junk.yml"), "name: junk\n").unwrap();
+            std::fs::write(d.join(skip).join("junk.html"), "<p>junk</p>").unwrap();
+        }
+
+        let mut e = Engine::open(&d).unwrap();
+        let r = e.reindex().unwrap();
+        assert_eq!(r.documents, 4, "two markdown, one html, one yaml — nothing from the skip list");
+
+        let rows = e.documents(&ListParams { limit: 50, ..Default::default() }).unwrap();
+        let kind_of = |p: &str| rows.iter().find(|r| r.path == p).map(|r| r.kind.clone());
+        assert_eq!(kind_of("page.html").as_deref(), Some("html"));
+        assert_eq!(kind_of("deploy.yml").as_deref(), Some("yaml"));
+        assert_eq!(kind_of("Welcome.md").as_deref(), Some("markdown"));
+        assert!(rows.iter().all(|r| !r.path.contains("node_modules") && !r.path.contains(".venv")));
+
+        // titles come from the format's own idea of a title
+        let title = |p: &str| rows.iter().find(|r| r.path == p).and_then(|r| r.title.clone());
+        assert_eq!(title("page.html").as_deref(), Some("Release notes"), "<title> wins for html");
+        assert_eq!(title("deploy.yml").as_deref(), Some("Deploy plan"), "yaml is its own frontmatter");
+
+        // C3: hits carry the kind recorded at index time
+        let hits = e.search("kumquat", 10).unwrap();
+        let kinds: std::collections::BTreeSet<&str> = hits.iter().map(|h| h.kind.as_str()).collect();
+        assert_eq!(kinds, ["html", "yaml"].into_iter().collect(), "both formats are searchable");
+        assert!(hits.iter().any(|h| h.path == "page.html" && h.heading.as_deref() == Some("Shipping")));
+
+        // chrome never reaches the index
+        assert!(e.search("alert", 10).unwrap().is_empty(), "script bodies are not searchable");
+        assert!(e.search("color", 10).unwrap().is_empty(), "style bodies are not searchable");
+
+        // yaml stays retrievable by its own top-level key
+        let by_key = e.search("steps", 10).unwrap();
+        assert!(by_key.iter().any(|h| h.path == "deploy.yml"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// B9, the named one. A failing embedder must drop the vector arm and write

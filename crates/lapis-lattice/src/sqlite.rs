@@ -136,7 +136,8 @@ pub fn search(conn: &Connection, p: &SearchParams, embedder: Option<&dyn Embedde
         if !fts.trim().is_empty() {
             let mut sql = String::from(
                 "SELECT c.chunk_id, c.path, d.title, c.heading, \
-                 snippet(chunks_fts, 0, '', '', '…', 12), bm25(chunks_fts), d.domain, d.doc_type \
+                 snippet(chunks_fts, 0, '', '', '…', 12), bm25(chunks_fts), d.domain, d.doc_type, \
+                 d.kind \
                  FROM chunks_fts JOIN chunks c ON c.chunk_id = chunks_fts.rowid \
                  JOIN documents d ON d.path = c.path WHERE chunks_fts MATCH ?1",
             );
@@ -157,6 +158,7 @@ pub fn search(conn: &Connection, p: &SearchParams, embedder: Option<&dyn Embedde
                     id,
                     Hit {
                         path: row.get(1)?,
+                        kind: row.get::<_, Option<String>>(8)?.unwrap_or_else(|| "markdown".into()),
                         title: row.get(2)?,
                         heading: row.get(3)?,
                         snippet: row.get(4)?,
@@ -233,7 +235,7 @@ pub fn search(conn: &Connection, p: &SearchParams, embedder: Option<&dyn Embedde
 /// snippet is a plain text head: `snippet()` only exists inside an FTS query.
 fn hydrate_chunk(conn: &Connection, chunk_id: i64, domain: Option<&str>) -> Result<Option<Hit>> {
     let mut stmt = conn.prepare(
-        "SELECT c.path, d.title, c.heading, c.text, d.domain, d.doc_type \
+        "SELECT c.path, d.title, c.heading, c.text, d.domain, d.doc_type, d.kind \
          FROM chunks c JOIN documents d ON d.path = c.path WHERE c.chunk_id = ?1",
     )?;
     let mut rows = stmt.query(params![chunk_id])?;
@@ -248,6 +250,7 @@ fn hydrate_chunk(conn: &Connection, chunk_id: i64, domain: Option<&str>) -> Resu
     let snippet: String = text.chars().take(160).collect();
     Ok(Some(Hit {
         path: row.get(0)?,
+        kind: row.get::<_, Option<String>>(6)?.unwrap_or_else(|| "markdown".into()),
         title: row.get(1)?,
         heading: row.get(2)?,
         snippet: Some(snippet),
