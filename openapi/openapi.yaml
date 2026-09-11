@@ -1,0 +1,1283 @@
+openapi: 3.1.0
+info:
+  title: Lapis API
+  summary: Operator HTTP face over the same Engine CLI and MCP already use.
+  description: |
+    Versioned HTTP under `/v1`. This document is the agent-facing SoT.
+
+    **Envelope.** Every JSON HTTP body is `{ok, data, error, meta}`.
+    `error` is `null` when `ok` is true; otherwise a LapisProblem object.
+    `Content-Type` is always `application/json`. RFC 7807 is **not** a second
+    HTTP body: `application/problem+json` is forbidden.
+
+    **Face, not a third protocol.** CLI (`lapis --json`) and MCP tools call the
+    same Engine. `lapis search --json` does not require this daemon. Lattice
+    HTTP on `:8080` remains the indexer behind `readyGet` and search backends;
+    this API never writes `lattice.db`.
+
+    **Bind.** Default `api.bind=127.0.0.1`, `api.port=18765`. Loopback needs no
+    token (`LAPIS_API_TOKEN` optional). Tailscale / LAN bind requires bearer
+    `LAPIS_API_TOKEN` (default-deny). Public internet bind is out of scope.
+
+    **MVP.** Exactly the ten `operationId`s in `paths`. No extras this GOAL.
+  version: "1.0.0"
+  license:
+    name: MIT
+    identifier: MIT
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+servers:
+  - url: http://127.0.0.1:18765
+    description: Default loopback (config `api.bind` / `api.port`).
+security:
+  - {}
+  - BearerAuth: []
+tags:
+  - name: health
+    description: Liveness and readiness of the operator API process.
+  - name: vault
+    description: Vault root, overlay, and which index backend answered.
+  - name: search
+    description: Content search and path-table inventory.
+  - name: notes
+    description: Read a vault-relative note.
+  - name: graph
+    description: Neighbors and hub-routed tree walk.
+  - name: analytics
+    description: Allowlisted read-only analytics. No raw SQL.
+  - name: index
+    description: Embedded sqlite reindex kick. Never writes lattice.db.
+paths:
+  /v1/health:
+    get:
+      operationId: healthGet
+      tags: [health]
+      summary: Process up
+      description: |
+        Liveness. Returns `api_version` (`1.0.0`) and `lapis_version` matching
+        this binary / crates.io. Must not lie. Does not probe the lattice.
+      responses:
+        "200":
+          description: Process is up.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthEnvelope"
+              example:
+                ok: true
+                data:
+                  api_version: "1.0.0"
+                  lapis_version: "0.4.1"
+                error: null
+                meta:
+                  latency_ms: 0.4
+                  api_version: "1.0.0"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/ready:
+    get:
+      operationId: readyGet
+      tags: [health]
+      summary: Vault resolved and index backend reachable
+      description: |
+        Readiness. Vault root resolved, index backend named (`embedded` or
+        `http`), and that backend reachable. Lattice `:8080` is the HTTP
+        indexer when `lattice.mode=http`.
+      responses:
+        "200":
+          description: Vault resolved and backend reachable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyEnvelope"
+              example:
+                ok: true
+                data:
+                  ready: true
+                  vaultRoot: /Users/evan/Notes
+                  backend: embedded
+                  source: /Users/evan/Notes/.lapis/lattice.sqlite
+                  reachable: true
+                error: null
+                meta:
+                  latency_ms: 3.1
+                  api_version: "1.0.0"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/LatticeUnreachable"
+  /v1/vault:
+    get:
+      operationId: vaultInfoGet
+      tags: [vault]
+      summary: Vault info
+      description: |
+        Same fields as `lapis vault info` / MCP `vault_info`: vault root,
+        overlay buckets, lattice mode/url, docs indexed, graph stats.
+      responses:
+        "200":
+          description: |
+            Vault report. `lattice.reachable` may be false; that is still
+            `ok: true` data (same as MCP). Probe failures that prevent a
+            report use a typed error envelope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VaultInfoEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/LatticeUnreachable"
+  /v1/search:
+    post:
+      operationId: searchPost
+      tags: [search]
+      summary: Content hybrid search
+      description: |
+        BM25 / vector / title search. Body matches the frozen search-request
+        schema. Filename-like `query` (exact basename with a dot-extension,
+        glob with `*` / `?`, or a `/`-containing vault-relative path) **must**
+        query the path channel (fuse, or internal `pathsSearchPost`) before
+        returning success.
+
+        | Situation | Required behavior |
+        | --- | --- |
+        | True no matches after a **capable** search (path channel ran if filename-like) | `ok: true`, `data.count: 0`, `meta.search_capable: true`, `meta.diagnostics` lists backends used |
+        | Filename-like and path index was **not** queried | `ok: false`, `code: search_incomplete`, recovery `paths_search`. `miss_id: lapis.forensic.search.agents_md_silent_zero` when the query is `AGENTS.md` / `*.AGENTS.md` |
+        | Lattice / embedder / mode cannot serve the op | `ok: false` with typed `code` |
+
+        `meta.search_capable` is required on this operation. Silent
+        `ok: true` / `count: 0` on a filename-like query is a forensic fail.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchRequest"
+            examples:
+              content:
+                summary: Ordinary content query
+                value:
+                  query: vault overlay
+                  limit: 10
+                  mode: hybrid
+                  per_doc: true
+              filename:
+                summary: Filename-like query (must fuse the path channel)
+                value:
+                  query: AGENTS.md
+                  limit: 10
+                  mode: hybrid
+      responses:
+        "200":
+          description: Capable search completed (zero hits is a true empty).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchEnvelope"
+              examples:
+                hits:
+                  value:
+                    ok: true
+                    data:
+                      query: vault overlay
+                      mode: hybrid
+                      modalities: [bm25, title]
+                      count: 1
+                      hits:
+                        - path: foundry/lapis/SPEC-api.md
+                          kind: markdown
+                          title: SPEC-api
+                          rank: 1
+                          domain: foundry
+                          doc_type: foundry-doc
+                    error: null
+                    meta:
+                      latency_ms: 12.4
+                      api_version: "1.0.0"
+                      search_capable: true
+                      truncated: false
+                      next: null
+                empty:
+                  summary: True empty after a capable fused search
+                  value:
+                    ok: true
+                    data:
+                      query: zz-no-such-token
+                      mode: hybrid
+                      modalities: [bm25, title]
+                      count: 0
+                      hits: []
+                    error: null
+                    meta:
+                      latency_ms: 8.0
+                      api_version: "1.0.0"
+                      search_capable: true
+                      truncated: false
+                      next: null
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/SearchIncomplete"
+        "503":
+          $ref: "#/components/responses/LatticeUnreachable"
+  /v1/paths/search:
+    post:
+      operationId: pathsSearchPost
+      tags: [search]
+      summary: Filename / path inventory
+      description: |
+        Filename / path glob / basename inventory from the **index path table**.
+        Never a silent empty success when the table cannot answer — that is
+        `index_gap`. `ok: true` + `meta.incomplete` is **not** a legal
+        substitute.
+
+        Response `data.hits[]`: `{path, kind, mtime}`.
+        `meta.search_capable` is required on this operation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PathsSearchRequest"
+            example:
+              pattern: AGENTS.md
+              match: basename
+              limit: 50
+      responses:
+        "200":
+          description: Path table answered (zero hits is a true empty).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PathsSearchEnvelope"
+              example:
+                ok: true
+                data:
+                  count: 1
+                  hits:
+                    - path: agents/AGENTS.md
+                      kind: markdown
+                      mtime: 1750000000.0
+                error: null
+                meta:
+                  latency_ms: 4.2
+                  api_version: "1.0.0"
+                  search_capable: true
+                  truncated: false
+                  next: null
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/IndexGap"
+  /v1/notes/{path}:
+    get:
+      operationId: noteGet
+      tags: [notes]
+      summary: Read one note
+      description: |
+        Read a vault-relative note. `{path}` is URL-encoded (slashes as `%2F`).
+        Missing path → `not_found`. Same object as `lapis read` / MCP `read_note`.
+      parameters:
+        - $ref: "#/components/parameters/NotePath"
+        - name: heading
+          in: query
+          description: Only the section under this heading (case-insensitive; nested sub-sections included).
+          schema:
+            type: string
+        - name: chunk
+          in: query
+          description: Only the N-th heading section (0 = preamble / first section).
+          schema:
+            type: integer
+            minimum: 0
+        - name: max_chars
+          in: query
+          description: Clip the body; `meta.truncated` is true when it happened.
+          schema:
+            type: integer
+            minimum: 1
+        - name: meta_only
+          in: query
+          description: HAL and metadata only, no body.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Note body plus parsed HAL.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NoteEnvelope"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/notes/{path}/neighbors:
+    get:
+      operationId: neighborsGet
+      tags: [graph]
+      summary: Ego graph
+      description: |
+        Wikilink neighbors of a note. Default direction `both`. Dangling rows
+        have `path: null` and `dst_raw`. `hop=1` is the edges table; `hop=2`
+        is the ego graph with `depth` / `via` per row. Hop-2 on embedded must
+        not silently empty — typed error if the backend cannot serve it.
+      parameters:
+        - $ref: "#/components/parameters/NotePath"
+        - name: direction
+          in: query
+          description: Edge direction.
+          schema:
+            type: string
+            enum: [out, in, both]
+            default: both
+        - name: dangling
+          in: query
+          description: "Include dangling links (`path: null`, `dst_raw` set)."
+          schema:
+            type: boolean
+            default: false
+        - name: hop
+          in: query
+          description: 1 = direct neighbors; 2 = ego graph.
+          schema:
+            type: integer
+            enum: [1, 2]
+            default: 1
+      responses:
+        "200":
+          description: Neighbor rows (dangling allowed).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NeighborsEnvelope"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/LatticeModeUnsupported"
+  /v1/tree-retrieve:
+    post:
+      operationId: treeRetrievePost
+      tags: [graph]
+      summary: Hub-routed walk
+      description: |
+        Hub-routed out-link walk from a seed note, or from the Cross-References
+        hub nearest to `query`. Requires `lattice.mode=http`. Embedded mode
+        returns `lattice_mode_unsupported` with
+        `miss_id: lapis.forensic.tree_retrieve.embedded` and recovery
+        `set_lattice_http` / `use_neighbors`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TreeRetrieveRequest"
+            example:
+              query: API v1 envelope
+              depth: 2
+              max_nodes: 60
+      responses:
+        "200":
+          description: Walk result (`truncated` when the node cap was hit).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TreeEnvelope"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/TreeRetrieveEmbedded"
+        "503":
+          $ref: "#/components/responses/LatticeUnreachable"
+  /v1/analytics/{name}:
+    get:
+      operationId: analyticsGet
+      tags: [analytics]
+      summary: Allowlisted analytics
+      description: |
+        Named read-only analytics over the index. Unknown `name` →
+        `invalid_request`. No raw SQL.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: Allowlisted query name.
+          schema:
+            $ref: "#/components/schemas/AnalyticsName"
+      responses:
+        "200":
+          description: Columns, rows, and query-specific extras.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyticsEnvelope"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/LatticeModeUnsupported"
+        "503":
+          $ref: "#/components/responses/LatticeUnreachable"
+  /v1/reindex:
+    post:
+      operationId: reindexPost
+      tags: [index]
+      summary: Kick embedded path reindex
+      description: |
+        Re-index one note in the **embedded** sqlite at
+        `<vault>/.lapis/lattice.sqlite`. Never writes `lattice.db`. If
+        `lattice.mode=http`, return `lattice_mode_unsupported` — lattice
+        indexer reindex is out of scope.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReindexRequest"
+            example:
+              path: notes/STATUS.md
+      responses:
+        "200":
+          description: Embedded sqlite accepted the kick.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReindexEnvelope"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/LatticeModeUnsupported"
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: |
+        Token from env `LAPIS_API_TOKEN` (or Halo secret store). Required when
+        `api.bind` is not loopback. Optional on `127.0.0.1`. Public bind is
+        out of scope.
+  parameters:
+    NotePath:
+      name: path
+      in: path
+      required: true
+      style: simple
+      explode: false
+      description: |
+        Vault-relative POSIX path, percent-encoded as a single path segment
+        (slashes as `%2F`). Agents pass the `path` search / vault returned,
+        never prefixing `inbox/` themselves.
+      schema:
+        type: string
+        minLength: 1
+      example: notes%2FSPEC.md
+  responses:
+    InvalidRequest:
+      description: Schema fail (`invalid_request`). JSON envelope; never problem+json.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            ok: false
+            data: null
+            error:
+              code: invalid_request
+              kind: usage
+              message: "limit must be 1..50"
+              diagnostics:
+                - fact: limit
+                  value: 0
+              recovery:
+                - action: paths_search
+                  detail: "correct the request body and retry"
+            meta:
+              latency_ms: 0.5
+              api_version: "1.0.0"
+    Unauthorized:
+      description: Non-loopback without token (`unauthorized`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            ok: false
+            data: null
+            error:
+              code: unauthorized
+              kind: auth
+              message: "LAPIS_API_TOKEN required when api.bind is not loopback"
+              diagnostics:
+                - fact: api.bind
+                  value: "100.89.131.70"
+                  evidence: config
+              recovery:
+                - action: set_token
+                  detail: "set LAPIS_API_TOKEN (Halo secret store or env)"
+                - action: bind_loopback
+                  detail: "default api.bind=127.0.0.1 does not require a token"
+            meta:
+              latency_ms: 0.3
+              api_version: "1.0.0"
+    NotFound:
+      description: Note path missing (`not_found`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            ok: false
+            data: null
+            error:
+              code: not_found
+              kind: not_found
+              message: "not found: notes/missing.md"
+              diagnostics:
+                - fact: path
+                  value: notes/missing.md
+              recovery:
+                - action: paths_search
+                  detail: "POST /v1/paths/search with pattern=missing.md match=basename"
+            meta:
+              latency_ms: 1.1
+              api_version: "1.0.0"
+    LatticeUnreachable:
+      description: Index backend down (`lattice_unreachable`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            ok: false
+            data: null
+            error:
+              code: lattice_unreachable
+              kind: dependency
+              message: "lattice http://127.0.0.1:8080 unreachable"
+              diagnostics:
+                - fact: lattice.mode
+                  value: http
+                  evidence: vaultInfoGet
+                - fact: lattice.url
+                  value: http://127.0.0.1:8080
+              recovery:
+                - action: start_lattice
+                  detail: "start the lattice indexer on :8080"
+              miss_id: lapis.forensic.lattice.unreachable
+            meta:
+              latency_ms: 8.0
+              api_version: "1.0.0"
+    LatticeModeUnsupported:
+      description: Op not implemented for current lattice mode.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            ok: false
+            data: null
+            error:
+              code: lattice_mode_unsupported
+              kind: dependency
+              message: "operation requires a different lattice.mode"
+              diagnostics:
+                - fact: lattice.mode
+                  value: embedded
+                  evidence: vaultInfoGet
+              recovery:
+                - action: set_lattice_http
+                  detail: "pass lattice_url or set config lattice.mode=http"
+            meta:
+              latency_ms: 1.0
+              api_version: "1.0.0"
+    TreeRetrieveEmbedded:
+      description: tree-retrieve under embedded mode (golden miss_id).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            ok: false
+            data: null
+            error:
+              code: lattice_mode_unsupported
+              kind: dependency
+              message: "tree-retrieve requires lattice.mode=http"
+              exit: 3
+              diagnostics:
+                - fact: lattice.mode
+                  value: embedded
+                  evidence: vaultInfoGet
+              recovery:
+                - action: set_lattice_http
+                  detail: "pass lattice_url or set config lattice.mode=http"
+                - action: use_neighbors
+                  detail: "neighborsGet on a known hub path"
+              miss_id: lapis.forensic.tree_retrieve.embedded
+            meta:
+              latency_ms: 2
+              api_version: "1.0.0"
+    SearchIncomplete:
+      description: Filename-like searchPost without a path channel.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            ok: false
+            data: null
+            error:
+              code: search_incomplete
+              kind: dependency
+              message: "filename-like query did not run the path channel"
+              diagnostics:
+                - fact: query
+                  value: AGENTS.md
+                - fact: path_channel
+                  value: false
+              recovery:
+                - action: paths_search
+                  detail: "POST /v1/paths/search {pattern: AGENTS.md, match: basename}"
+              miss_id: lapis.forensic.search.agents_md_silent_zero
+            meta:
+              latency_ms: 5.0
+              api_version: "1.0.0"
+              search_capable: false
+    IndexGap:
+      description: pathsSearchPost cannot read the path table (`index_gap` only).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            ok: false
+            data: null
+            error:
+              code: index_gap
+              kind: dependency
+              message: "index path table cannot answer"
+              diagnostics:
+                - fact: backend
+                  value: embedded
+              recovery:
+                - action: reindex
+                  detail: "POST /v1/reindex for a known path, then retry paths/search"
+                - action: start_lattice
+                  detail: "or switch lattice.mode=http if the HTTP indexer is the SoT"
+            meta:
+              latency_ms: 2.0
+              api_version: "1.0.0"
+              search_capable: false
+  schemas:
+    Envelope:
+      title: Lapis API v1 envelope
+      description: |
+        The only HTTP JSON body. Four keys always present. `error` is a
+        LapisProblem when `ok` is false, else null. RFC 7807 is forbidden as a
+        second shape.
+      type: object
+      additionalProperties: false
+      required: [ok, data, error, meta]
+      properties:
+        ok:
+          type: boolean
+        data: {}
+        error:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/LapisProblem"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    ErrorEnvelope:
+      description: Envelope when `ok` is false. `data` is null; `error` is LapisProblem.
+      type: object
+      additionalProperties: false
+      required: [ok, data, error, meta]
+      properties:
+        ok:
+          type: boolean
+          const: false
+        data:
+          type: "null"
+        error:
+          $ref: "#/components/schemas/LapisProblem"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    Meta:
+      type: object
+      required: [latency_ms, api_version]
+      properties:
+        latency_ms:
+          type: number
+          minimum: 0
+        api_version:
+          type: string
+          const: "1.0.0"
+        incomplete:
+          type: boolean
+          description: |
+            Present when a page or body is a prefix. Not a legal substitute for
+            `index_gap` on `pathsSearchPost`.
+        search_capable:
+          type: boolean
+          description: |
+            Required on searchPost / pathsSearchPost. true means every required
+            backend for this query actually ran.
+        diagnostics:
+          type: array
+          items:
+            $ref: "#/components/schemas/Diagnostic"
+        truncated:
+          type: boolean
+        next:
+          type: ["integer", "null"]
+          minimum: 0
+    LapisProblem:
+      title: LapisProblem — error object inside the v1 envelope
+      description: |
+        Never a second HTTP body. Lives at envelope.error when ok=false.
+        Codes: lattice_unreachable, lattice_mode_unsupported, index_gap,
+        search_incomplete, not_found, unauthorized, invalid_request.
+      type: object
+      additionalProperties: false
+      required: [code, kind, message, diagnostics, recovery]
+      properties:
+        code:
+          $ref: "#/components/schemas/ProblemCode"
+        kind:
+          $ref: "#/components/schemas/ProblemKind"
+        message:
+          type: string
+          minLength: 1
+        exit:
+          type: integer
+          minimum: 1
+          maximum: 125
+        diagnostics:
+          type: array
+          items:
+            $ref: "#/components/schemas/Diagnostic"
+        recovery:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/Recovery"
+        miss_id:
+          type: string
+          description: Stable forensic id, e.g. lapis.forensic.search.agents_md_silent_zero
+    ProblemCode:
+      type: string
+      enum:
+        - lattice_unreachable
+        - lattice_mode_unsupported
+        - index_gap
+        - search_incomplete
+        - not_found
+        - unauthorized
+        - invalid_request
+    ProblemKind:
+      type: string
+      enum: [dependency, usage, auth, not_found, internal]
+    Diagnostic:
+      type: object
+      additionalProperties: false
+      required: [fact, value]
+      properties:
+        fact:
+          type: string
+        value: {}
+        evidence:
+          type: string
+    Recovery:
+      type: object
+      additionalProperties: false
+      required: [action, detail]
+      properties:
+        action:
+          $ref: "#/components/schemas/RecoveryAction"
+        detail:
+          type: string
+        disk_inventory_allowed:
+          type: boolean
+          description: Operator forensics only. Agents still prefer API recoveries.
+    RecoveryAction:
+      type: string
+      enum:
+        - paths_search
+        - set_lattice_http
+        - use_neighbors
+        - start_lattice
+        - reindex
+        - bind_loopback
+        - set_token
+    Kind:
+      type: string
+      enum: [markdown, pdf, html, yaml, source]
+    SearchRequest:
+      title: POST /v1/search body (searchPost)
+      type: object
+      additionalProperties: false
+      required: [query]
+      properties:
+        query:
+          type: string
+          minLength: 1
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 10
+        offset:
+          type: integer
+          minimum: 0
+          default: 0
+        domain:
+          type: ["string", "null"]
+        mode:
+          type: string
+          enum: [hybrid, bm25, vector]
+          default: hybrid
+        per_doc:
+          type: boolean
+          default: true
+    PathsSearchRequest:
+      title: POST /v1/paths/search body (pathsSearchPost)
+      description: Filename / path inventory from the index path table.
+      type: object
+      additionalProperties: false
+      required: [pattern]
+      properties:
+        pattern:
+          type: string
+          minLength: 1
+        match:
+          type: string
+          enum: [basename, glob, substring]
+          default: basename
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          default: 50
+    TreeRetrieveRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        path:
+          type: ["string", "null"]
+          description: Seed note (vault-relative). Omit to start at the hub nearest to `query`.
+        query:
+          type: ["string", "null"]
+          description: Rank children by similarity; picks the seed hub when `path` is omitted.
+        depth:
+          type: integer
+          minimum: 1
+          maximum: 3
+          default: 2
+        max_nodes:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 60
+      description: At least one of `path` or `query` is required.
+    ReindexRequest:
+      type: object
+      additionalProperties: false
+      required: [path]
+      properties:
+        path:
+          type: string
+          minLength: 1
+          description: Vault-relative markdown path to reindex in embedded sqlite.
+    HealthData:
+      type: object
+      additionalProperties: false
+      required: [api_version, lapis_version]
+      properties:
+        api_version:
+          type: string
+          const: "1.0.0"
+        lapis_version:
+          type: string
+          minLength: 1
+          description: Must match this binary (must not lie).
+    ReadyData:
+      type: object
+      additionalProperties: false
+      required: [ready, vaultRoot, backend, source, reachable]
+      properties:
+        ready:
+          type: boolean
+        vaultRoot:
+          type: string
+        backend:
+          type: string
+          enum: [embedded, http]
+        source:
+          type: string
+          description: sqlite file when embedded, lattice base URL when http.
+        reachable:
+          type: boolean
+    VaultInfo:
+      type: object
+      required: [vaultRoot, vaultSource, overlay, lattice]
+      properties:
+        vaultRoot:
+          type: string
+        vaultSource:
+          type: string
+        overlay:
+          type: object
+        lattice:
+          type: object
+          required: [mode, url, reachable]
+          properties:
+            mode:
+              type: string
+              enum: [embedded, http]
+            url:
+              type: string
+            reachable:
+              type: boolean
+            health:
+              type: object
+            error:
+              type: ["string", "null"]
+    SearchHit:
+      type: object
+      required: [path, rank, domain, doc_type]
+      properties:
+        path:
+          type: string
+        kind:
+          $ref: "#/components/schemas/Kind"
+        title:
+          type: string
+        heading:
+          type: ["string", "null"]
+        snippet:
+          type: ["string", "null"]
+        score:
+          type: number
+        rank:
+          type: integer
+          minimum: 1
+        domain:
+          type: ["string", "null"]
+        doc_type:
+          type: ["string", "null"]
+        tags:
+          type: array
+          items:
+            type: string
+        chunk_id:
+          type: ["integer", "null"]
+        chunk_index:
+          type: ["integer", "null"]
+    SearchData:
+      type: object
+      required: [query, mode, count, hits]
+      properties:
+        query:
+          type: string
+        mode:
+          type: string
+          enum: [hybrid, bm25, vector]
+        modalities:
+          type: array
+          items:
+            type: string
+            enum: [bm25, vector, title]
+        count:
+          type: integer
+          minimum: 0
+        hits:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchHit"
+    PathHit:
+      type: object
+      additionalProperties: false
+      required: [path, kind, mtime]
+      properties:
+        path:
+          type: string
+        kind:
+          $ref: "#/components/schemas/Kind"
+        mtime:
+          type: ["number", "null"]
+          description: Index mtime (unix seconds) from the path table.
+    PathsSearchData:
+      type: object
+      additionalProperties: false
+      required: [count, hits]
+      properties:
+        count:
+          type: integer
+          minimum: 0
+        hits:
+          type: array
+          items:
+            $ref: "#/components/schemas/PathHit"
+    Note:
+      type: object
+      required: [path, kind, title, body, hash]
+      properties:
+        path:
+          type: string
+        kind:
+          $ref: "#/components/schemas/Kind"
+        title:
+          type: string
+        hal:
+          type: object
+        halValid:
+          type: boolean
+        halError:
+          type: ["string", "null"]
+        tags:
+          type: array
+          items:
+            type: string
+        body:
+          type: string
+        size:
+          type: integer
+          minimum: 0
+        updatedAt:
+          type: ["integer", "null"]
+        hash:
+          type: string
+        pages:
+          type: ["integer", "null"]
+    Neighbor:
+      type: object
+      properties:
+        path:
+          type: ["string", "null"]
+          description: Resolved vault path. null on a dangling link; see dst_raw.
+        dst_raw:
+          type: ["string", "null"]
+        alias:
+          type: ["string", "null"]
+        anchor:
+          type: ["string", "null"]
+        resolved:
+          type: boolean
+        direction:
+          type: string
+          enum: [out, in]
+        depth:
+          type: integer
+          minimum: 1
+        via:
+          type: ["string", "null"]
+    NeighborsData:
+      type: object
+      required: [path, direction, hop, neighbors]
+      properties:
+        path:
+          type: string
+        direction:
+          type: string
+          enum: [out, in, both]
+        hop:
+          type: integer
+          enum: [1, 2]
+        neighbors:
+          type: array
+          items:
+            $ref: "#/components/schemas/Neighbor"
+    TreeNode:
+      type: object
+      required: [path, depth]
+      properties:
+        path:
+          type: string
+        title:
+          type: ["string", "null"]
+        doc_type:
+          type: ["string", "null"]
+        domain:
+          type: ["string", "null"]
+        depth:
+          type: integer
+          minimum: 0
+        is_hub:
+          type: boolean
+        out_degree:
+          type: integer
+          minimum: 0
+        score:
+          type: ["number", "null"]
+    TreeEdge:
+      type: object
+      required: [src, dst]
+      properties:
+        src:
+          type: string
+        dst:
+          type: string
+    TreeData:
+      type: object
+      required: [seed, depth, nodes, edges]
+      properties:
+        seed:
+          type: string
+        query:
+          type: ["string", "null"]
+        depth:
+          type: integer
+        max_nodes:
+          type: integer
+        hubs:
+          type: array
+          items:
+            type: string
+        ranked:
+          type: boolean
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/TreeNode"
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/TreeEdge"
+        count:
+          type: integer
+          minimum: 0
+        truncated:
+          type: boolean
+    AnalyticsName:
+      type: string
+      enum:
+        - inventory
+        - priority
+        - tags
+        - health
+        - recent
+        - hubs
+        - density
+        - degree
+        - dangling
+    AnalyticsData:
+      type: object
+      required: [query, columns, rows]
+      properties:
+        query:
+          $ref: "#/components/schemas/AnalyticsName"
+        columns:
+          type: array
+          items:
+            type: string
+        rows:
+          type: array
+          items:
+            type: array
+        count:
+          type: integer
+          minimum: 0
+        truncated:
+          type: boolean
+    ReindexData:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+        changed:
+          type: ["boolean", "null"]
+        chunks:
+          type: ["integer", "null"]
+        elapsed_ms:
+          type: ["number", "null"]
+    HealthEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/HealthData"
+    ReadyEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/ReadyData"
+    VaultInfoEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/VaultInfo"
+    SearchEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/SearchData"
+    PathsSearchEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/PathsSearchData"
+    NoteEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/Note"
+    NeighborsEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/NeighborsData"
+    TreeEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/TreeData"
+    AnalyticsEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/AnalyticsData"
+    ReindexEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/ReindexData"
