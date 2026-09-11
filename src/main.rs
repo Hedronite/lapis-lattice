@@ -700,11 +700,7 @@ async fn doctor(ctx: &Ctx) -> Result<()> {
         if writable { "ok" } else { "fail" },
         if writable { ".lapis is writable" } else { "cannot create .lapis" }
     );
-    check!(
-        "backend",
-        "ok",
-        if ctx.force_http { "http".to_string() } else { ctx.cfg.lattice.mode.clone() }
-    );
+    check!("backend", "ok", if ctx.force_http { "http".to_string() } else { ctx.cfg.lattice.mode.clone() });
 
     let health = ctx.backend()?.health().await;
     let (embedder, health_val) = match &health {
