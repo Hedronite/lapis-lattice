@@ -38,7 +38,7 @@ Lapis: a local Markdown notes vault with Lapis Lattice retrieval.
 10. Every result is `structuredContent` = {ok, data, meta}. meta.truncated / meta.next tell you to page (offset).
 11. `search_and_read` returns top hits with HAL meta and a body snippet in one call; `read_note` takes heading / chunk / max_chars.
 12. Notes are also resources: `lapis://note/{path}` (body as text/markdown). `resolve_link` maps a [[wikilink]] or dst_raw to a path.
-13. `neighbors` with hop=2 returns the ego graph (rows carry depth and via). `tree_retrieve` walks hub-first from a seed or a query. `analytics` runs named read-only DuckDB queries (inventory, priority, tags, health, recent, hubs, density, degree, dangling).";
+13. `neighbors` with hop=2 returns the ego graph (rows carry depth and via). `tree_retrieve` walks hub-first from a seed or a query. `analytics` runs named read-only queries over the index (inventory, priority, tags, health, recent, hubs, density, degree, dangling).";
 
 pub const NOTE_URI_PREFIX: &str = "lapis://note/";
 
@@ -556,7 +556,7 @@ impl LapisServer {
     }
 
     #[tool(
-        description = "Named lattice analytics over a read-only DuckDB attach: inventory, priority, tags, health, recent, hubs, density, degree, dangling. Returns {columns, rows} plus query-specific extras."
+        description = "Named read-only analytics over the index: inventory, priority, tags, health, recent, hubs, density, degree, dangling. Returns {columns, rows} plus query-specific extras."
     )]
     async fn analytics(
         &self,

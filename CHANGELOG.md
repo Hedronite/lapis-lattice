@@ -1,17 +1,73 @@
 # Changelog
 
-## Unreleased — post v0.3.1
+## 0.4.0 — 2026-09-11
 
-Docs and stranger-facing copy after the `v0.3.1` tag.
+Tagged `v0.4.0`. Operator GO 2026-09-11.
+
+The vector arm becomes a SQLite query instead of a Rust table scan.
+
+### sqlite-vec, linked not loaded
+
+- The crate depends on `sqlite-vec` and registers it with
+  `sqlite3_auto_extension` before the first connection opens, so every
+  connection has `vec0`. There is no shared object to ship or find on `PATH`,
+  and `load_extension` is never enabled, so a vault database cannot talk the
+  process into loading code. A test calls `vec_version()` and asserts
+  `load_extension` still refuses.
+- Pinned to `0.1.9`, the newest release that builds. `0.1.10-alpha.4` does not:
+  its `sqlite-vec.c` includes a `sqlite-vec-diskann.c` the package omits. That
+  alpha also carries DiskANN, which this tag rules out, so the pin is deliberate
+  rather than incidental.
+
+### Embeddings live in `vec0`
+
+- Chunk vectors moved from `embeddings(chunk_id, vec BLOB)` to a `vec0` virtual
+  table beside `chunks_fts`, in the same database. One file is still the whole
+  index and WAL is unchanged.
+- The column is as wide as the embedder and uses `distance_metric=cosine`,
+  because cosine is what the Rust scan computed. Taking `vec0`'s default L2
+  would have quietly re-ranked every vault.
+- The table is created only once a width is known, so a database opened with
+  `--embedder none` has no vector table rather than an empty one.
+- A pre-v0.4 blob table is adopted on open: rows that decode to exactly the
+  right width are carried into `vec0` and the old table is retired, so upgrading
+  does not cost a model run per chunk. Rows of another width belong to another
+  embedding space and are dropped, which is the rule everywhere else.
+- `vec0` carries no foreign key, so vectors are now cleared on a full reindex
+  and removed per path on `reindex_path`. Without that, KNN would keep returning
+  chunk ids that no longer name a chunk.
+
+### `vector_rank` is KNN in SQL
+
+- One `MATCH` with a `k`, ordered by distance, run inside SQLite. The corpus no
+  longer crosses the FFI boundary on every query.
+- Brute force on purpose. A test asserts the query names no approximate index:
+  no DiskANN, HNSW, IVF or `INDEXED BY`.
+- Fusion is unchanged: the same reciprocal rank fusion with FTS5 BM25, and
+  hybrid search still reports `modalities`.
+- Unchanged law: `--embedder none` is the default, a dead embedder omits the
+  vector arm, and a dummy vector is never written. The named test that pins that
+  behaviour is still green, now counting rows in `vec0`.
+- The Rust `cosine` helper is gone. Leaving a second definition of "similar"
+  next to the one SQLite now computes is how two answers to the same question
+  start to disagree.
+
+### Help text that named the wrong engine
+
+- The CLI and the MCP tool description called the named analytics "DuckDB". On
+  the embedded default they run on the same SQLite index as everything else.
+  Corrected in both places.
+
+## 0.3.1 — 2026-09-11
+
+Tagged `v0.3.1`.
+
+### Stranger-install copy (on `main` before this tag)
 
 - README / `docs/install.md` match the tagged Release assets (no longer say Releases do not exist).
 - macOS browser-download Gatekeeper gap is documented (`xattr` + ad-hoc `codesign`); `install.sh` clears quarantine when it can.
 - `lapis --help` describes the embedded default instead of implying HTTP `:8080`.
 - HTTP-down errors no longer mention `serve.py` / `launchctl kickstart`.
-
-## 0.3.1 — 2026-09-11
-
-Tagged `v0.3.1`.
 
 ### `lapis init` configures the vault it creates
 

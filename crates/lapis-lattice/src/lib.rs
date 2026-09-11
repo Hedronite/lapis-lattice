@@ -178,6 +178,10 @@ impl Engine {
         let dir = vault.join(".lapis");
         std::fs::create_dir_all(&dir)?;
         let db = dir.join("lattice.sqlite");
+        // Before the connection exists: sqlite-vec registers as an auto-extension,
+        // so `vec0` is present on this connection and every later one without a
+        // shared object to find and without enabling `load_extension`.
+        sqlite::register_vec();
         let conn = Connection::open(&db)?;
         sqlite::migrate(&conn)?;
         sqlite::assert_producer(&conn, &db)?;
@@ -621,7 +625,7 @@ mod tests {
 
         // The decisive assertion: no placeholder rows.
         let stored: i64 =
-            e.conn.query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0)).expect("count embeddings");
+            e.conn.query_row("SELECT COUNT(*) FROM chunk_vec", [], |r| r.get(0)).expect("count vectors");
         assert_eq!(stored, 0, "a failed embedder must write no vectors at all");
 
         // Search still works, and says truthfully that only BM25 ran.
@@ -637,14 +641,187 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// v0.4: the extension is linked into this binary, not loaded from a file.
+    /// If registration ever stopped happening, every vector path would fail at
+    /// `CREATE VIRTUAL TABLE` instead of here.
+    #[test]
+    fn sqlite_vec_is_linked_and_vec0_is_queryable() {
+        let d = vault();
+        let mut e = Engine::open_with(&d, Some(std::sync::Arc::new(BagEmbedder { model: "bag-v1", dim: 8 })))
+            .unwrap();
+
+        let version: String = e.conn.query_row("SELECT vec_version()", [], |r| r.get(0)).unwrap();
+        assert!(version.starts_with('v'), "sqlite-vec answered: {version}");
+
+        // Nothing was loaded from disk to get here, and nothing could be: the
+        // C API that enables `load_extension` was never called, so the SQL
+        // function refuses.
+        let loaded = e.conn.query_row("SELECT load_extension('nonexistent')", [], |r| r.get::<_, String>(0));
+        assert!(loaded.is_err(), "load_extension is off, so vec0 can only be here by linking");
+
+        e.reindex().unwrap();
+        // The table is a real vec0 virtual table holding the chunk vectors.
+        let sql: String = e
+            .conn
+            .query_row("SELECT sql FROM sqlite_master WHERE name = 'chunk_vec'", [], |r| r.get(0))
+            .unwrap();
+        assert!(sql.contains("USING vec0"), "chunk_vec is a vec0 table: {sql}");
+        assert!(sql.contains("float[8]"), "the column is as wide as the embedder: {sql}");
+        assert!(sql.contains("distance_metric=cosine"), "cosine, as the Rust scan was: {sql}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// v0.4: ranking is a KNN `MATCH` inside SQLite, not every stored blob
+    /// dragged into Rust and scored there.
+    #[test]
+    fn vector_rank_is_a_knn_match_not_a_blob_scan() {
+        let d = vault();
+        let mut e = Engine::open_with(&d, Some(std::sync::Arc::new(BagEmbedder { model: "bag-v1", dim: 8 })))
+            .unwrap();
+        e.reindex().unwrap();
+
+        // The planner's own account of the query: a virtual table lookup on
+        // chunk_vec, which is what a `MATCH` constraint compiles to.
+        let mut stmt = e.conn.prepare(&format!("EXPLAIN QUERY PLAN {}", embed::KNN_SQL)).unwrap();
+        let probe = embed::to_blob(&[0.0f32; 8]);
+        let plan: Vec<String> = stmt
+            .query_map(rusqlite::params![probe, 5i64], |r| r.get::<_, String>(3))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        let plan = plan.join(" | ");
+        assert!(plan.contains("chunk_vec"), "the plan reads chunk_vec: {plan}");
+        assert!(
+            plan.to_lowercase().contains("virtual table"),
+            "and reads it as a virtual table, which is where the KNN happens: {plan}"
+        );
+
+        // And the query really is a MATCH with a k, not a scan with a LIMIT.
+        assert!(embed::KNN_SQL.contains("MATCH"), "{}", embed::KNN_SQL);
+        assert!(embed::KNN_SQL.contains("k = ?2"), "{}", embed::KNN_SQL);
+
+        // It answers, and it answers in distance order.
+        let ids =
+            embed::vector_rank(&e.conn, &BagEmbedder { model: "bag-v1", dim: 8 }, "welcome", 10).unwrap();
+        assert!(!ids.is_empty(), "the KNN arm returns neighbours");
+        assert!(ids.len() <= 10);
+        let distinct: std::collections::BTreeSet<i64> = ids.iter().copied().collect();
+        assert_eq!(distinct.len(), ids.len(), "no chunk is returned twice");
+
+        // `k` is honoured as the neighbour count.
+        let two =
+            embed::vector_rank(&e.conn, &BagEmbedder { model: "bag-v1", dim: 8 }, "welcome", 2).unwrap();
+        assert_eq!(two.len(), 2.min(ids.len()));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// v0.4: a database written by v0.3 has a blob table. Its vectors are worth
+    /// keeping, because re-embedding a vault costs a model run per chunk.
+    #[test]
+    fn a_pre_v04_blob_table_is_adopted_then_retired() {
+        let d = vault();
+        {
+            // Build the index and let v0.4 write its vectors, then stage the old
+            // shape: same rows, in the table an older build would have used.
+            let mut e =
+                Engine::open_with(&d, Some(std::sync::Arc::new(BagEmbedder { model: "bag-v1", dim: 8 })))
+                    .unwrap();
+            e.reindex().unwrap();
+            let ids: Vec<i64> = {
+                let mut s = e.conn.prepare("SELECT chunk_id FROM chunks ORDER BY chunk_id").unwrap();
+                s.query_map([], |r| r.get(0)).unwrap().filter_map(|r| r.ok()).collect()
+            };
+            assert!(ids.len() >= 2, "the fixture has chunks to carry over");
+            e.conn
+                .execute_batch(
+                    "DROP TABLE IF EXISTS chunk_vec;
+                     CREATE TABLE embeddings (chunk_id INTEGER PRIMARY KEY, vec BLOB NOT NULL);",
+                )
+                .unwrap();
+            for (n, id) in ids.iter().enumerate() {
+                // One row of the wrong width, to prove it is judged not trusted.
+                let wide = if n == 0 { 8 } else { 4 };
+                let v: Vec<f32> = (0..wide).map(|i| i as f32).collect();
+                e.conn
+                    .execute(
+                        "INSERT INTO embeddings(chunk_id, vec) VALUES(?1, ?2)",
+                        rusqlite::params![id, embed::to_blob(&v)],
+                    )
+                    .unwrap();
+            }
+        }
+        // Reopening in the same embedding space adopts what fits and retires the
+        // old table either way.
+        let e = Engine::open_with(&d, Some(std::sync::Arc::new(BagEmbedder { model: "bag-v1", dim: 8 })))
+            .unwrap();
+        let moved: i64 = e.conn.query_row("SELECT COUNT(*) FROM chunk_vec", [], |r| r.get(0)).unwrap();
+        assert_eq!(moved, 1, "only the row of the right width came across");
+        let legacy: i64 = e
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'embeddings'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy, 0, "the blob table is gone, so nothing writes to a store nothing reads");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Chunk rows and their vectors go together. `vec0` has no foreign key, so
+    /// without this a reindex would leave neighbours pointing at nothing.
+    #[test]
+    fn vectors_follow_their_chunks_on_reindex_and_forget() {
+        let d = vault();
+        let mut e = Engine::open_with(&d, Some(std::sync::Arc::new(BagEmbedder { model: "bag-v1", dim: 8 })))
+            .unwrap();
+        let r = e.reindex().unwrap();
+        let count = |e: &Engine| -> i64 {
+            e.conn.query_row("SELECT COUNT(*) FROM chunk_vec", [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(count(&e), r.chunks as i64);
+
+        // A second full reindex does not double the store.
+        let again = e.reindex().unwrap();
+        assert_eq!(count(&e), again.chunks as i64, "a reindex replaces vectors, it does not stack them");
+
+        // Every vector still names a live chunk.
+        let orphans: i64 = e
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunk_vec WHERE chunk_id NOT IN (SELECT chunk_id FROM chunks)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0);
+
+        // Removing one note takes its vectors with it.
+        std::fs::remove_file(d.join("notes/Alpha.md")).unwrap();
+        e.reindex_path("notes/Alpha.md").unwrap();
+        let left: i64 = e
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunk_vec WHERE chunk_id NOT IN (SELECT chunk_id FROM chunks)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0, "forgetting a path forgets its vectors");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// The working path: vectors are stored, fusion reports both arms, and a
     /// change of embedding space wipes rather than mixing incomparable rows.
     #[test]
     fn vector_arm_fuses_and_wipes_on_model_change() {
         let d = vault();
-        let count = |e: &Engine| -> i64 {
-            e.conn.query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0)).unwrap()
+        // None when there is no vector table at all, which is what a database
+        // with no embedder should look like: not an empty store, no store.
+        let vectors = |e: &Engine| -> Option<i64> {
+            e.conn.query_row("SELECT COUNT(*) FROM chunk_vec", [], |r| r.get(0)).ok()
         };
+        let count = |e: &Engine| -> i64 { vectors(e).expect("vector table exists") };
         {
             let mut e =
                 Engine::open_with(&d, Some(std::sync::Arc::new(BagEmbedder { model: "bag-v1", dim: 8 })))
@@ -681,7 +858,7 @@ mod tests {
         // Dropping the embedder entirely also clears the space and reports none.
         {
             let e = Engine::open(&d).unwrap();
-            assert_eq!(count(&e), 0);
+            assert_eq!(vectors(&e), None, "no embedder means no vector table, not an empty one");
             assert_eq!(e.health().unwrap().embedder, "none");
             let res = e
                 .search_with(&SearchParams { query: "welcome".into(), limit: 5, ..Default::default() })

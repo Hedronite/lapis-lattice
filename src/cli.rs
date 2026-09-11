@@ -74,7 +74,7 @@ pub enum Command {
     /// Resolve a wikilink (`[[Name|alias#anchor]]`) or lattice `dst_raw` to a vault path.
     Resolve(ResolveArgs),
 
-    /// Named analytics: inventory, priority, tags, health, recent, hubs, density, degree, dangling.
+    /// Named read-only analytics over the index: inventory, priority, tags, health, recent, hubs, density, degree, dangling.
     Analytics(AnalyticsArgs),
 
     /// Hub-routed link walk from a seed note (or the nearest Cross-References hub for --query).

@@ -2,7 +2,7 @@
 name = "lapis-lattice"
 version = "0.1.0"
 edition = "2024"
-description = "Embedded SQLite+FTS5 index for a local Markdown vault: BM25 search, wikilink graph, allowlisted analytics. No HTTP daemon, no Turso, no DuckDB."
+description = "Embedded SQLite index for a local Markdown vault: FTS5 BM25, sqlite-vec KNN, wikilink graph, allowlisted analytics. No HTTP daemon, no Turso, no DuckDB."
 license = "MIT"
 repository = "https://github.com/VirtualMachinist/lapis-lattice"
 homepage = "https://github.com/VirtualMachinist/lapis-lattice"
@@ -15,6 +15,10 @@ exclude = []
 [dependencies]
 regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Vector KNN inside the same SQLite file. Linked into the binary and registered
+# as an auto-extension, so there is no `.so` to find on PATH and
+# `load_extension` never has to be enabled. Pre-1.0 upstream, pinned exactly.
+sqlite-vec = "=0.1.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

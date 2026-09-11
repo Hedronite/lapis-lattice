@@ -9,6 +9,96 @@ use crate::{
     Document, Error, Graph, Health, Hit, ListParams, Mode, PRODUCER, Result, SearchParams, SearchResult,
 };
 
+/// Name of the `vec0` virtual table holding chunk embeddings. It lives in the
+/// same file as `chunks_fts`, so one database is still the whole index.
+pub const VEC_TABLE: &str = "chunk_vec";
+
+/// Link sqlite-vec into every connection this process opens.
+///
+/// `sqlite3_auto_extension` registers the entry point with SQLite itself, so
+/// each new connection gets `vec0` and `vec_version()` without loading anything
+/// from disk. That matters twice over: there is no `.so` to ship or find on
+/// PATH, and `load_extension` stays disabled, so a vault database cannot talk
+/// this process into loading code.
+pub fn register_vec() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // The entry point is a C function pointer; sqlite-vec exports it with a
+        // bare signature, so the cast to what SQLite expects is explicit here
+        // rather than inferred.
+        type EntryPoint = unsafe extern "C" fn(
+            *mut rusqlite::ffi::sqlite3,
+            *mut *mut std::os::raw::c_char,
+            *const rusqlite::ffi::sqlite3_api_routines,
+        ) -> std::os::raw::c_int;
+        unsafe {
+            let entry: EntryPoint = std::mem::transmute(sqlite_vec::sqlite3_vec_init as *const ());
+            rusqlite::ffi::sqlite3_auto_extension(Some(entry));
+        }
+    });
+}
+
+/// True when the `vec0` table exists. It is created only once a dimension is
+/// known, which means only once an embedder is present.
+pub fn vec_table_exists(conn: &Connection) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        params![VEC_TABLE],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Create the vector table for `dim`-wide embeddings.
+///
+/// `vec0` fixes the width at creation, so this cannot live in [`migrate`]: the
+/// width is a property of the embedder, and a database opened with
+/// `--embedder none` has no embeddings and needs no table.
+pub fn create_vec_table(conn: &Connection, dim: usize) -> Result<()> {
+    // Cosine, because that is what the Rust scan this replaces computed.
+    // Switching to the default L2 here would quietly re-rank every vault.
+    conn.execute_batch(&format!(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS {VEC_TABLE} USING vec0(
+            chunk_id integer primary key,
+            embedding float[{dim}] distance_metric=cosine
+        );"
+    ))?;
+    Ok(())
+}
+
+/// Drop the vector table. Used when the embedding space changes: rows from a
+/// different model or width are not comparable and must not be mixed in.
+pub fn drop_vec_table(conn: &Connection) -> Result<()> {
+    conn.execute_batch(&format!("DROP TABLE IF EXISTS {VEC_TABLE};"))?;
+    Ok(())
+}
+
+/// Forget the vectors for a set of chunks.
+///
+/// A `vec0` table carries no foreign key, so nothing cascades when chunk rows
+/// go. Without this a reindex would leave vectors pointing at chunk ids that no
+/// longer exist, and KNN would keep returning them for rows the hydrator then
+/// silently drops.
+pub fn forget_vectors_for_path(conn: &Connection, rel: &str) -> Result<()> {
+    if !vec_table_exists(conn)? {
+        return Ok(());
+    }
+    conn.execute(
+        &format!("DELETE FROM {VEC_TABLE} WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE path = ?1)"),
+        params![rel],
+    )?;
+    Ok(())
+}
+
+/// Empty the vector table, for a full reindex.
+pub fn clear_vectors(conn: &Connection) -> Result<()> {
+    if !vec_table_exists(conn)? {
+        return Ok(());
+    }
+    conn.execute_batch(&format!("DELETE FROM {VEC_TABLE};"))?;
+    Ok(())
+}
+
 pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"

@@ -13,6 +13,10 @@ use crate::{IndexReport, Result};
 const SKIP: &[&str] = &[".lapis", ".git", ".obsidian", "node_modules", ".venv", "target"];
 
 pub fn reindex(conn: &Connection, vault: &Path) -> Result<IndexReport> {
+    // The vector table carries no foreign key, so nothing cascades when the
+    // chunk rows go. Clearing it here is what stops KNN from returning ids that
+    // no longer name a chunk.
+    crate::sqlite::clear_vectors(conn)?;
     conn.execute_batch("DELETE FROM edges; DELETE FROM chunks; DELETE FROM documents;")?;
     // chunks_fts is an external-content table; the cheapest way to clear it in
     // bulk is to drop and recreate. Single-path updates use the 'delete'
@@ -66,6 +70,9 @@ pub fn reindex_path(conn: &Connection, vault: &Path, rel: &str) -> Result<IndexR
 /// must be retired with the external-content 'delete' command *before* the
 /// chunk rows go, or the index keeps stale postings.
 fn forget_path(conn: &Connection, rel: &str) -> Result<()> {
+    // Same reason as the full reindex: `vec0` has no cascade of its own, and the
+    // chunk ids have to go before the chunks do.
+    crate::sqlite::forget_vectors_for_path(conn, rel)?;
     let mut stmt = conn.prepare("SELECT chunk_id, text, path, heading FROM chunks WHERE path = ?1")?;
     let rows: Vec<(i64, String, String, Option<String>)> = stmt
         .query_map(params![rel], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
