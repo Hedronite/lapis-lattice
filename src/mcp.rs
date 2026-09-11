@@ -20,10 +20,10 @@ use serde_json::{Value, json};
 
 use crate::envelope::{self, Meta};
 use crate::error::LapisError;
-use crate::http::{ListParams, Mode};
-use crate::ops::{self, Ctx};
+use crate::http::ListParams;
+use crate::ops::{self, Ctx, SearchQuery};
 use crate::{notes, resolve, tasks, write};
-use lapis_lattice::{Hit, SearchParams};
+use lapis_lattice::Hit;
 
 pub const INSTRUCTIONS: &str = "\
 Lapis: a local Markdown notes vault with Lapis Lattice retrieval.
@@ -51,11 +51,12 @@ pub struct LapisServer {
 }
 
 fn fail(e: LapisError) -> ErrorData {
+    let msg = e.to_string();
     match e {
-        LapisError::Usage(_) | LapisError::Path(_) => ErrorData::invalid_params(e.to_string(), None),
-        LapisError::LatticeDown(_) | LapisError::Internal(_) => {
-            ErrorData::internal_error(e.to_string(), None)
+        LapisError::Usage(_) | LapisError::Path(_) | LapisError::HttpOnly { .. } => {
+            ErrorData::invalid_params(msg, None)
         }
+        LapisError::LatticeDown(_) | LapisError::Internal(_) => ErrorData::internal_error(msg, None),
     }
 }
 
@@ -266,47 +267,29 @@ fn guard(dry_run: Option<bool>, if_mtime: Option<u64>, if_hash: Option<String>) 
     write::Guard { dry_run: dry_run.unwrap_or(false), if_mtime, if_hash }
 }
 
-fn parse_mode(m: Option<&str>) -> std::result::Result<Mode, ErrorData> {
+fn parse_mode(m: Option<&str>) -> std::result::Result<lapis_lattice::Mode, ErrorData> {
     match m {
-        None | Some("hybrid") => Ok(Mode::Hybrid),
-        Some("bm25") => Ok(Mode::Bm25),
-        Some("vector") => Ok(Mode::Vector),
+        None | Some("hybrid") => Ok(lapis_lattice::Mode::Hybrid),
+        Some("bm25") => Ok(lapis_lattice::Mode::Bm25),
+        Some("vector") => Ok(lapis_lattice::Mode::Vector),
         Some(other) => {
             Err(ErrorData::invalid_params(format!("mode must be hybrid|bm25|vector, got {other}"), None))
         }
     }
 }
 
-/// MCP `search` args → lattice params. `per_doc` falls back to the agent
-/// profile default. Returns `(params, limit, offset)`; `top_k` is offset+limit.
-pub fn search_params(
-    a: SearchArg,
-    default_per_doc: bool,
-) -> std::result::Result<(SearchParams, u32, u32), ErrorData> {
-    let mode = parse_mode(a.mode.as_deref())?;
-    let limit = a.limit.unwrap_or(10).max(1);
-    let offset = a.offset.unwrap_or(0);
-    if offset + limit > 50 {
-        return Err(ErrorData::invalid_params(
-            format!("offset + limit must be ≤ 50 (got {})", offset + limit),
-            None,
-        ));
-    }
-    Ok((
-        SearchParams {
-            query: a.query,
-            limit: offset + limit,
-            offset: 0,
-            domain: a.domain,
-            mode: mode.into(),
-            per_doc: a.per_doc.unwrap_or(default_per_doc),
-            mmr: false,
-            include_archives: false,
-            embedder: None,
-        },
-        limit,
-        offset,
-    ))
+fn search_query(a: SearchArg, default_per_doc: bool) -> std::result::Result<SearchQuery, ErrorData> {
+    Ok(SearchQuery {
+        query: a.query,
+        limit: a.limit.unwrap_or(10),
+        offset: a.offset.unwrap_or(0),
+        domain: a.domain,
+        mode: parse_mode(a.mode.as_deref())?,
+        per_doc: a.per_doc.unwrap_or(default_per_doc),
+        mmr: false,
+        include_archives: false,
+        embedder: None,
+    })
 }
 
 /// `lapis://note/{path}` → vault-relative path (percent-decoded).
@@ -429,20 +412,16 @@ impl LapisServer {
         Parameters(a): Parameters<SearchArg>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let t0 = Instant::now();
-        let (p, limit, offset) = search_params(a, self.ctx.cfg.agent.per_doc)?;
-        let mut r = self.ctx.client().map_err(fail)?.search(&p).await.map_err(fail)?;
-        let total = r.hits.len();
-        r.hits = r.hits.into_iter().skip(offset as usize).collect();
-        r.count = r.hits.len();
-        let requested = offset + limit;
-        let truncated = total as u32 >= requested && requested < 50;
+        let page =
+            ops::search(&self.ctx, search_query(a, self.ctx.cfg.agent.per_doc)?).await.map_err(fail)?;
+        let r = page.result;
         let meta = Meta {
-            truncated,
-            next: if truncated { Some(requested) } else { None },
+            truncated: page.truncated,
+            next: page.next,
             latency: Some(r.latency),
             count: Some(r.count),
-            limit: Some(limit),
-            offset: Some(offset),
+            limit: Some(page.limit),
+            offset: Some(page.offset),
             ..Meta::default()
         };
         ok_meta(t0, &r, meta)
@@ -457,15 +436,20 @@ impl LapisServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let t0 = Instant::now();
         let limit = a.limit.unwrap_or(5).clamp(1, 20);
-        let p = SearchParams {
-            query: a.query.clone(),
-            limit,
-            domain: a.domain,
-            mode: parse_mode(a.mode.as_deref())?.into(),
-            per_doc: true,
-            ..Default::default()
-        };
-        let r = self.ctx.client().map_err(fail)?.search(&p).await.map_err(fail)?;
+        let page = ops::search(
+            &self.ctx,
+            SearchQuery {
+                query: a.query.clone(),
+                limit,
+                domain: a.domain,
+                mode: parse_mode(a.mode.as_deref())?,
+                per_doc: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(fail)?;
+        let r = page.result;
         let max = a.snippet_chars.unwrap_or(600);
         let root = self.ctx.vault.root.clone();
         let mut any_truncated = false;
@@ -543,16 +527,23 @@ impl LapisServer {
         Parameters(a): Parameters<NeighborsArg>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let t0 = Instant::now();
-        let rel = notes::clean_rel(&a.path).map_err(fail)?;
-        let rel = if std::path::Path::new(&rel).extension().is_none() { format!("{rel}.md") } else { rel };
-        let dir = a.direction.unwrap_or_else(|| self.ctx.cfg.agent.direction().to_string());
-        let resolved_only = !a.dangling.unwrap_or(false);
-        if hop_of(a.hop)? == 2 {
-            let e = self.ctx.client().map_err(fail)?.ego(&rel, 2, &dir, resolved_only).await.map_err(fail)?;
-            return ok_meta(t0, &e, Meta { truncated: e.truncated, count: Some(e.count), ..Meta::default() });
+        match ops::neighbors(
+            &self.ctx,
+            &a.path,
+            a.direction.as_deref(),
+            a.dangling.unwrap_or(false),
+            hop_of(a.hop)?,
+        )
+        .await
+        .map_err(fail)?
+        {
+            ops::NeighborView::Ego(e) => {
+                ok_meta(t0, &e, Meta { truncated: e.truncated, count: Some(e.count), ..Meta::default() })
+            }
+            ops::NeighborView::Direct(n) => {
+                ok_meta(t0, &n, Meta { count: Some(n.neighbors.len()), ..Meta::default() })
+            }
         }
-        let n = self.ctx.client().map_err(fail)?.neighbors(&rel, &dir, resolved_only).await.map_err(fail)?;
-        ok_meta(t0, &n, Meta { count: Some(n.neighbors.len()), ..Meta::default() })
     }
 
     #[tool(
@@ -745,23 +736,23 @@ mod tests {
         serde_json::from_str(json).unwrap()
     }
 
-    /// N3 / N14: MCP search defaults to the agent profile's per_doc; explicit false wins; offset pages.
+    /// N3 / N14: MCP search defaults to the agent profile's per_doc; explicit false wins.
+    /// Offset+limit cap lives in `ops::prepare_search`.
     #[test]
     fn mcp_search_defaults_to_per_doc() {
-        let (p, limit, offset) = search_params(arg(r#"{"query":"lattice"}"#), true).unwrap();
-        assert!(p.per_doc);
-        assert_eq!((p.limit, p.mode, limit, offset), (10, lapis_lattice::Mode::Hybrid, 10, 0));
-        let (p, ..) = search_params(arg(r#"{"query":"lattice"}"#), false).unwrap();
-        assert!(!p.per_doc, "[agent] per_doc=false is honoured");
-        let (p, limit, offset) = search_params(
+        let q = search_query(arg(r#"{"query":"lattice"}"#), true).unwrap();
+        assert!(q.per_doc);
+        assert_eq!((q.limit, q.mode, q.offset), (10, lapis_lattice::Mode::Hybrid, 0));
+        let q = search_query(arg(r#"{"query":"lattice"}"#), false).unwrap();
+        assert!(!q.per_doc, "[agent] per_doc=false is honoured");
+        let q = search_query(
             arg(r#"{"query":"lattice","per_doc":false,"mode":"bm25","limit":3,"offset":6}"#),
             true,
         )
         .unwrap();
-        assert!(!p.per_doc);
-        assert_eq!((p.limit, p.mode, limit, offset), (9, lapis_lattice::Mode::Bm25, 3, 6));
-        assert!(search_params(arg(r#"{"query":"x","mode":"sideways"}"#), true).is_err());
-        assert!(search_params(arg(r#"{"query":"x","limit":30,"offset":30}"#), true).is_err());
+        assert!(!q.per_doc);
+        assert_eq!((q.limit, q.mode, q.offset), (3, lapis_lattice::Mode::Bm25, 6));
+        assert!(search_query(arg(r#"{"query":"x","mode":"sideways"}"#), true).is_err());
     }
 
     /// N2 / N4: arg defaults documented in the schema match the handlers.

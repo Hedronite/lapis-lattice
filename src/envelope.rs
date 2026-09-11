@@ -69,7 +69,7 @@ pub fn err(e: &LapisError, latency_ms: f64) -> Envelope<Value> {
     Envelope {
         ok: false,
         data: None,
-        error: Some(ErrorBody { kind: e.kind(), message: e.message().to_string(), exit: e.exit_code() }),
+        error: Some(ErrorBody { kind: e.kind(), message: e.message(), exit: e.exit_code() }),
         meta: Meta { latency_ms, ..Meta::default() },
     }
 }
@@ -113,6 +113,15 @@ mod tests {
         assert_eq!(e["error"]["exit"], 3);
         assert_eq!(e["error"]["message"], "not found: x.md");
         assert_eq!(e["meta"]["truncated"], false);
+
+        let h = serde_json::to_value(err(
+            &LapisError::HttpOnly { op: "`neighbors --hop 2` (the hop-2 ego graph)" },
+            0.1,
+        ))
+        .unwrap();
+        assert_eq!(h["error"]["kind"], "http_only");
+        assert_eq!(h["error"]["exit"], 1);
+        assert!(h["error"]["message"].as_str().unwrap().contains("lattice.mode"));
     }
 
     #[test]

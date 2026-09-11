@@ -56,13 +56,9 @@ fn lock(e: &Arc<Mutex<Engine>>) -> std::sync::MutexGuard<'_, Engine> {
     e.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Message for surfaces the embedded engine does not implement in v0.2.
-/// B11: never a vague empty result, always this sentence.
-fn http_only(what: &str) -> LapisError {
-    LapisError::Usage(format!(
-        "{what} is not implemented by the embedded index in v0.2; it requires `lattice.mode = \"http\"` \
-         (set it in ~/.config/lapis/config.toml or pass --lattice <url>)"
-    ))
+/// B11: never a vague empty result. `kind` is `http_only`, not a Usage paragraph.
+fn http_only(op: &'static str) -> LapisError {
+    LapisError::HttpOnly { op }
 }
 
 impl Backend {
@@ -86,7 +82,7 @@ impl Backend {
             Backend::Http(c) => c.search(p).await,
             Backend::Embedded(e) => {
                 let t0 = std::time::Instant::now();
-                let r = lock(e).search_with(p).map_err(engine_err)?;
+                let r = lock(e).search_with(p).map_err(LapisError::from)?;
                 Ok(SearchResult::from_engine(p, r, t0.elapsed().as_secs_f64() * 1000.0))
             }
         }
@@ -95,9 +91,12 @@ impl Backend {
     pub async fn documents(&self, p: &ListParams) -> Result<Vec<http::Document>> {
         match self {
             Backend::Http(c) => c.documents(p).await,
-            Backend::Embedded(e) => {
-                Ok(lock(e).documents(&p.into()).map_err(engine_err)?.into_iter().map(Into::into).collect())
-            }
+            Backend::Embedded(e) => Ok(lock(e)
+                .documents(&p.into())
+                .map_err(LapisError::from)?
+                .into_iter()
+                .map(Into::into)
+                .collect()),
         }
     }
 
@@ -107,7 +106,7 @@ impl Backend {
             Backend::Embedded(e) => {
                 let neighbors = lock(e)
                     .neighbors(path, direction)
-                    .map_err(engine_err)?
+                    .map_err(LapisError::from)?
                     .into_iter()
                     .filter(|n| !resolved_only || n.resolved)
                     .map(Into::into)
@@ -151,7 +150,7 @@ impl Backend {
             Backend::Embedded(e) => {
                 http::check_analytics_query(query)?;
                 let t0 = std::time::Instant::now();
-                let a = lock(e).analytics(query).map_err(engine_err)?;
+                let a = lock(e).analytics(query).map_err(LapisError::from)?;
                 Ok(http::Analytics {
                     query: a.query,
                     columns: a.columns,
@@ -168,7 +167,7 @@ impl Backend {
     pub async fn health(&self) -> Result<Health> {
         match self {
             Backend::Embedded(e) => {
-                let h = lock(e).health().map_err(engine_err)?;
+                let h = lock(e).health().map_err(LapisError::from)?;
                 Ok(Health {
                     status: h.status,
                     documents_indexed: h.documents_indexed,
@@ -210,7 +209,7 @@ impl Backend {
             Backend::Http(c) => c.reindex(rel).await,
             Backend::Embedded(e) => {
                 let t0 = std::time::Instant::now();
-                let r = lock(e).reindex_path(rel).map_err(engine_err)?;
+                let r = lock(e).reindex_path(rel).map_err(LapisError::from)?;
                 Ok(http::Reindex {
                     ok: true,
                     path: rel.to_string(),
@@ -223,16 +222,6 @@ impl Backend {
                 })
             }
         }
-    }
-}
-
-/// Engine errors carry the CLI exit contract: usage is 1, sqlite trouble is 2
-/// (the index is down, the same class as the lattice being unreachable).
-fn engine_err(e: lapis_lattice::Error) -> LapisError {
-    match e {
-        lapis_lattice::Error::Usage(m) => LapisError::Usage(m),
-        lapis_lattice::Error::Io(io) => LapisError::from(io),
-        lapis_lattice::Error::Sqlite(s) => LapisError::LatticeDown(format!("index: {s}")),
     }
 }
 
@@ -269,11 +258,14 @@ mod tests {
             b.tree(Some("Welcome.md"), None, 2, 50).await.err(),
         ] {
             match err {
-                Some(LapisError::Usage(m)) => {
+                Some(e @ LapisError::HttpOnly { .. }) => {
+                    assert_eq!(e.kind(), "http_only");
+                    assert_eq!(e.exit_code(), 1);
+                    let m = e.message();
                     assert!(m.contains("lattice.mode"), "names the setting: {m}");
                     assert!(m.contains("http"), "names the mode: {m}");
                 }
-                other => panic!("expected a usage error naming lattice.mode, got {other:?}"),
+                other => panic!("expected HttpOnly naming lattice.mode, got {other:?}"),
             }
         }
         let _ = std::fs::remove_dir_all(&d);
