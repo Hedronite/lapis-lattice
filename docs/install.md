@@ -39,7 +39,7 @@ That must exit 0 only when:
 1. `lapis` is on `PATH` (default `$HOME/.local/bin`)
 2. A vault exists and is named: `--vault`, `$LAPIS_VAULT`, or the `vault` key `lapis init` writes
 3. `lapis --version` prints
-4. `lapis doctor` is green (once `doctor` exists)
+4. `lapis doctor` is green
 
 `install.sh` **downloads the matching Release asset** and does not require a
 compiler. If there is no asset for this arch (`darwin-x64` today), it falls
