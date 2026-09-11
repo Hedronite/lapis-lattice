@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased — v0.3.0
+## 0.3.0 — 2026-09-11
 
-Not tagged. Do not treat this as a GitHub Release until the operator says GO.
+Tagged `v0.3.0`. Operator GO 2026-09-11.
 
 The headline is the desktop graph: `lapis --vault <notes> desktop` opens the
 **whole vault**, laid out by a force sim, themed by Omarchy, and steerable with
@@ -81,7 +81,7 @@ existing-only, `o` orphans, `d` domain, `[` `]` depth, `l` layout, `g` group,
 - 3D, edge bundling, hierarchical or circle layouts, minimap.
 - Turso / DuckDB as first-run.
 - Dummy embeddings.
-- Merging `main` or tagging without operator GO.
+- Checkpoint tags `v0.2.1`–`v0.2.4`.
 
 ## Unreleased — v0.2.0
 
