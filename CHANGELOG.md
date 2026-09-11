@@ -1,5 +1,47 @@
 # Changelog
 
+## Unreleased — v0.3.1
+
+A patch on top of `v0.3.0`. Not tagged.
+
+### `lapis init` configures the vault it creates
+
+Creating a vault used to leave nothing behind that pointed at it. The resolver
+reads `--vault`, then `$LAPIS_VAULT`, then `vault` in the config, and `init`
+wrote none of the three, so `lapis`, `lapis tui` and `lapis desktop` still said
+`no vault configured` after an init that had built the index. The error then
+offered `lapis init` as the remedy, which is the command that had just failed to
+help, so following the message returned you to the message.
+
+- `lapis init <path>` writes `vault = "<path>"` into `~/.config/lapis/config.toml`
+  and says which file it wrote. The next bare `lapis` resolves with no
+  environment variable.
+- Nothing is guessed: the operator named the path. `--vault` and `$LAPIS_VAULT`
+  still win over the config.
+- An existing `vault` key is never overwritten. A second `init` somewhere else
+  reports that it left the configured vault alone.
+- An existing config is edited, not rewritten: the key goes into the top-level
+  table above the first section, so it cannot land inside one, and comments and
+  ordering survive. A malformed config is refused rather than clobbered.
+- The `no vault configured` message now names a remedy that leaves a vault
+  configured.
+- `scripts/install.sh` no longer tells you to export `LAPIS_VAULT` afterwards;
+  the commands it prints work as typed.
+
+### Docs that described something else
+
+- `docs/install.md` documented a `lapis setup` command as "init + config + first
+  index". There is no such subcommand; `init` is the whole of it, and the page
+  now says so.
+- The same page claimed `init` does not yet build `lattice.sqlite`. It does.
+
+### CI
+
+- The no-vault assertion runs against an empty `XDG_CONFIG_HOME`, so it tests
+  the resolver rather than whatever an earlier step left on the runner.
+- A new step runs `init` and then a bare `lapis` with no flag and no
+  environment, and asserts search answers. That is the path that was broken.
+
 ## 0.3.0 — 2026-09-11
 
 Tagged `v0.3.0`. Operator GO 2026-09-11.
