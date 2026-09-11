@@ -12,6 +12,7 @@ use crate::http::{self, Client, Document, ListParams, Reindex, SearchResult};
 use crate::{config, notes, overlay, tasks, vault, write};
 use lapis_lattice::SearchParams;
 
+#[derive(Clone)]
 pub struct Ctx {
     pub json: bool,
     pub vault: vault::Vault,
@@ -425,5 +426,142 @@ mod tests {
             Err(LapisError::Usage(m)) => assert!(m.contains("embedder"), "{m}"),
             other => panic!("expected usage, got {other:?}"),
         }
+    }
+
+    fn golden_ctx() -> (std::path::PathBuf, Ctx) {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("lapis-g3-{}-{n}-{seq}", std::process::id()));
+        std::fs::create_dir_all(d.join("pack")).unwrap();
+        std::fs::create_dir_all(d.join("notes")).unwrap();
+        std::fs::write(
+            d.join("AGENTS.md"),
+            "---\nname: AGENTS\n---\n# AGENTS.md\n\nHalo copilot notes for this vault.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("pack/GOAL-struct.md"),
+            "---\nname: GOAL-struct\ntitle: GOAL-struct\n---\n# Paste\n\nAuthorized loop text.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("pack/AGENTS.md"),
+            "---\nname: Nested AGENTS\n---\n# Nested\n\nPack-level agent notes.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("notes/Skills-Paradigm.md"),
+            "---\nname: Skills Paradigm\n---\n# Skills Paradigm\n\nstructure skills paradigm decoy.\n",
+        )
+        .unwrap();
+        let mut e = lapis_lattice::Engine::open(&d).unwrap();
+        e.reindex().unwrap();
+        drop(e);
+        let ctx = Ctx {
+            json: false,
+            vault: crate::vault::Vault { root: d.clone(), source: "test" },
+            cfg: crate::config::Config::default(),
+            lattice_url: crate::config::DEFAULT_LATTICE_URL.into(),
+            force_http: false,
+        };
+        (d, ctx)
+    }
+
+    /// G3a/G3b: shipped `ops::search` goldens. Empty hits while indexed fail CI.
+    #[tokio::test]
+    async fn search_goldens_hit_indexed_identifiers() {
+        let (d, ctx) = golden_ctx();
+        let docs = ctx
+            .backend()
+            .unwrap()
+            .documents(&crate::http::ListParams { limit: 50, ..Default::default() })
+            .await
+            .unwrap();
+        for (query, path) in [
+            ("GOAL-struct", "pack/GOAL-struct.md"),
+            ("AGENTS.md", "AGENTS.md"),
+            ("pack/AGENTS.md", "pack/AGENTS.md"),
+        ] {
+            assert!(docs.iter().any(|r| r.path == path), "{path} must be indexed before search");
+            let page = search(
+                &ctx,
+                SearchQuery {
+                    query: query.into(),
+                    limit: 10,
+                    embedder: Some("none".into()),
+                    per_doc: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert!(!page.result.hits.is_empty(), "indexed {path} must not silent-zero for {query:?}");
+            assert!(
+                page.result.hits.iter().any(|h| h.path == path),
+                "{path} must be in hits for {query:?}, got {:?}",
+                page.result.hits.iter().map(|h| &h.path).collect::<Vec<_>>()
+            );
+            assert!(
+                page.result.modalities.iter().any(|m| m == "identifier"),
+                "boost must name itself for {query:?}, got {:?}",
+                page.result.modalities
+            );
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// G4a: boost is defined and called once; TUI/MCP/CLI do not re-fuse.
+    #[test]
+    fn identifier_boost_is_one_site() {
+        let backend = include_str!("backend.rs");
+        assert_eq!(backend.matches("async fn apply_identifier_boost").count(), 1);
+        assert_eq!(backend.matches("self.apply_identifier_boost").count(), 1);
+        for (name, src) in [
+            ("tui/app.rs", include_str!("tui/app.rs")),
+            ("mcp.rs", include_str!("mcp.rs")),
+            ("main.rs", include_str!("main.rs")),
+        ] {
+            assert!(!src.contains("apply_identifier_boost"), "{name} must not re-fuse");
+            assert!(!src.contains("identifier_strength"), "{name} must not re-fuse");
+        }
+        assert!(include_str!("tui/app.rs").contains("ops::search"), "TUI palette uses ops::search");
+        assert!(include_str!("mcp.rs").contains("ops::search"), "MCP uses ops::search");
+        assert!(include_str!("main.rs").contains("ops::search"), "CLI uses ops::search");
+    }
+
+    /// G4b: no second `Hit`; sources we own stay under 1000 lines.
+    #[test]
+    fn one_hit_type_and_src_files_under_cap() {
+        let hit_struct = concat!("pub struct Hit ", "{");
+        assert_eq!(include_str!("../crates/lapis-lattice/src/lib.rs").matches(hit_struct).count(), 1);
+        for (name, src) in [
+            ("http.rs", include_str!("http.rs")),
+            ("backend.rs", include_str!("backend.rs")),
+            ("mcp.rs", include_str!("mcp.rs")),
+            ("ops.rs", include_str!("ops.rs")),
+        ] {
+            assert!(!src.contains(hit_struct), "{name} must not grow a second Hit");
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut over = Vec::new();
+        fn walk(dir: &std::path::Path, root: &std::path::Path, over: &mut Vec<String>) {
+            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            for ent in rd.flatten() {
+                let p = ent.path();
+                if p.is_dir() {
+                    walk(&p, root, over);
+                } else if p.extension().is_some_and(|e| e == "rs") {
+                    let n = std::fs::read_to_string(&p).map(|s| s.lines().count()).unwrap_or(0);
+                    if n >= 1000 {
+                        over.push(format!("{}:{n}", p.strip_prefix(root).unwrap_or(&p).display()));
+                    }
+                }
+            }
+        }
+        walk(&root.join("src"), root, &mut over);
+        walk(&root.join("crates"), root, &mut over);
+        over.retain(|p| !p.starts_with("crates/lapis-lattice/src/lib.rs"));
+        assert!(over.is_empty(), "files ≥ 1000 lines: {over:?}");
     }
 }
