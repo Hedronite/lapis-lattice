@@ -111,9 +111,10 @@ mod window {
     };
     use super::{DesktopError, Options, graph_data};
 
-    /// The board is a fixed size so the painted strokes and the camera share one
-    /// mapping. If the canvas mapped by its live bounds while the labels used
-    /// constants, the lines would not meet the discs.
+    /// Fallback board size, used for the single frame before the canvas has
+    /// reported its real bounds. The strokes, the camera and the labels all read
+    /// one measured size after that: if the canvas mapped by its live bounds
+    /// while the labels used constants, the lines would not meet the discs.
     const BOARD_W: f32 = 760.0;
     const BOARD_H: f32 = 520.0;
     /// Drawn height of a label box, shared with the placer that reserves it.
@@ -243,6 +244,13 @@ mod window {
         /// The board's top-left in window coordinates, written by the canvas as
         /// it paints and read by the mouse handlers. Both run on the UI thread.
         origin: Rc<Cell<(f32, f32)>>,
+        /// The board's measured size, written the same way. The board fills the
+        /// window's width, so a narrow window must not leave part of the graph
+        /// laid out past its right edge where nobody can reach it.
+        board_px: Rc<Cell<(f32, f32)>>,
+        /// Size the camera was last framed for, so a resize refits and a settle
+        /// does not.
+        fitted_for: (f32, f32),
         focus: FocusHandle,
     }
 
@@ -285,7 +293,9 @@ mod window {
             }
             self.scene = laid.scene;
             self.sim = laid.sim;
-            self.camera.fit(&self.scene, self.board());
+            let board = self.board();
+            self.camera.fit(&self.scene, board);
+            self.fitted_for = (board[0], board[1]);
             self.meter.idle();
         }
 
@@ -305,7 +315,8 @@ mod window {
         }
 
         fn board(&self) -> [f32; 2] {
-            [BOARD_W, BOARD_H]
+            let (w, h) = self.board_px.get();
+            if w > 1.0 && h > 1.0 { [w, h] } else { [BOARD_W, BOARD_H] }
         }
 
         /// Window coordinates to board-local pixels.
@@ -574,6 +585,13 @@ mod window {
     impl Render for Root {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = cx.omarchy();
+            // The first frame lays out against the fallback size; once the
+            // canvas reports its real bounds, frame the graph for those.
+            let board_now = self.board();
+            if self.fitted_for != (board_now[0], board_now[1]) {
+                self.camera.fit(&self.scene, board_now);
+                self.fitted_for = (board_now[0], board_now[1]);
+            }
             // The graph keeps moving until it settles; each frame asks for the
             // next one, and a graph at rest stops asking.
             let moving = self.advance();
@@ -597,6 +615,7 @@ mod window {
             let labels: Vec<Prim> =
                 prims.iter().filter(|p| matches!(p, Prim::Label { .. })).cloned().collect();
             let origin = self.origin.clone();
+            let board_px = self.board_px.clone();
             let show_boxes = debug_overlay_on();
 
             // Strokes are real hairlines built with PathBuilder and dashed by
@@ -605,6 +624,7 @@ mod window {
                 move |_, _, _| {},
                 move |bounds, _, window, _| {
                     origin.set((f32::from(bounds.origin.x), f32::from(bounds.origin.y)));
+                    board_px.set((f32::from(bounds.size.width), f32::from(bounds.size.height)));
                     let at = |x: f32, y: f32| point(bounds.origin.x + px(x), bounds.origin.y + px(y));
 
                     // Every stroke of one colour goes into one path. Tessellating
@@ -688,7 +708,7 @@ mod window {
                 .id("graph-board")
                 .track_focus(&self.focus)
                 .relative()
-                .w(px(BOARD_W))
+                .w_full()
                 .h(px(BOARD_H))
                 .overflow_hidden()
                 .bg(theme.background)
@@ -738,7 +758,7 @@ mod window {
             for l in labels {
                 let Prim::Label { x, y, text, alpha } = l else { continue };
                 let w = super::view::label_width_px(&text);
-                if x + w < 0.0 || y + LABEL_H < 0.0 || x - w > BOARD_W || y > BOARD_H {
+                if x + w < 0.0 || y + LABEL_H < 0.0 || x - w > board_now[0] || y > board_now[1] {
                     continue;
                 }
                 board = board.child(
@@ -927,6 +947,8 @@ mod window {
                         press: None,
                         pins: BTreeMap::new(),
                         origin: Rc::new(Cell::new((0.0, 0.0))),
+                        board_px: Rc::new(Cell::new((0.0, 0.0))),
+                        fitted_for: (0.0, 0.0),
                         focus: focus.clone(),
                     };
                     root.adopt(graph_data::Laid { scene: laid.scene.clone(), sim: laid.sim.clone() });
@@ -1001,6 +1023,8 @@ mod tests {
         assert!(src.contains("overflow_hidden"), "a label cannot grow past its box");
         assert!(src.contains("view::label_box"), "the debug overlay draws the reserved boxes");
         assert!(src.contains("is_running()"), "a pointer event does not book a second render");
+        assert!(src.contains("board_px"), "the board reports its real size back to the camera");
+        assert!(src.contains(".w_full()"), "the board fills the window, so no node is laid out off it");
         // Every colour on the board comes from the live Omarchy palette, so a
         // theme swap restyles the graph with no restart. The only literal is a
         // group's opt-in hex.
