@@ -37,7 +37,7 @@ use ratatui::{DefaultTerminal, Frame};
 use ratatui_textarea::{Input, TextArea};
 
 use crate::error::{LapisError, Result};
-use crate::lattice::{Client, Document, Hit, ListParams, Mode as SearchMode, Neighbor, SearchParams};
+use crate::lattice::{Document, Hit, ListParams, Mode as SearchMode, Neighbor, SearchParams};
 use crate::ops::Ctx;
 use crate::tasks::Task;
 use crate::{hal, notes, tasks, templates, write};
@@ -127,7 +127,6 @@ impl Tab {
 
 struct App {
     ctx: Ctx,
-    client: Option<Client>,
     tree: Tree,
     sel: usize,
     sidebar_scroll: usize,
@@ -170,13 +169,11 @@ fn key_input(k: KeyEvent) -> Input {
 impl App {
     fn new(ctx: Ctx) -> Self {
         let (tx, rx) = channel();
-        let client = ctx.client().ok();
         let trash_bucket = crate::ops::trash_bucket(&ctx);
         let mut tree = Tree::default();
         tree.load(&ctx.vault.root, "");
         let mut app = App {
             ctx,
-            client,
             tree,
             sel: 0,
             sidebar_scroll: 0,
@@ -234,10 +231,10 @@ impl App {
     // ------------------------------------------------------------ background
 
     fn poll_health(&self) {
-        let Some(client) = self.client.clone() else { return };
+        let Ok(backend) = self.ctx.backend() else { return };
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let ok = client.health().await.is_ok();
+            let ok = backend.health().await.is_ok();
             let _ = tx.send(Msg::Health(ok));
         });
     }
@@ -295,25 +292,28 @@ impl App {
     }
 
     fn kick(&self, rel: String) {
-        let Some(client) = self.client.clone() else { return };
+        let Ok(backend) = self.ctx.backend() else { return };
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let r = client.reindex(&rel).await.map(|r| r.chunks).map_err(|e| e.to_string());
+            let r = backend.reindex(&rel).await.map(|r| r.chunks).map_err(|e| e.to_string());
             let _ = tx.send(Msg::Reindexed(rel, r));
         });
     }
 
     fn fetch_neighbors(&mut self) {
         let Some(rel) = self.tab().map(|t| t.rel.clone()) else { return };
-        let Some(client) = self.client.clone() else {
-            self.set_status("lattice client unavailable");
-            return;
+        let backend = match self.ctx.backend() {
+            Ok(b) => b,
+            Err(e) => {
+                self.set_status(format!("lattice: {e}"));
+                return;
+            }
         };
         self.neighbors_for = rel.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let r =
-                client.neighbors(&rel, "both", true).await.map(|n| n.neighbors).map_err(|e| e.to_string());
+                backend.neighbors(&rel, "both", true).await.map(|n| n.neighbors).map_err(|e| e.to_string());
             let _ = tx.send(Msg::Neighbors(rel, r));
         });
     }
@@ -339,15 +339,20 @@ impl App {
     fn open_tags(&mut self) {
         self.overlay = Some(Overlay::Tags(TagsBrowser::new()));
         let tx = self.tx.clone();
-        match self.client.clone() {
-            Some(client) => {
+        match self.ctx.backend() {
+            Ok(backend) => {
                 tokio::spawn(async move {
                     let p = ListParams { limit: 1000, ..ListParams::default() };
-                    let r = client.documents(&p).await.map_err(|e| e.to_string());
+                    let r = backend.documents(&p).await.map_err(|e| e.to_string());
                     let _ = tx.send(Msg::Documents(r));
                 });
             }
-            None => self.set_status("lattice client unavailable; tags from tasks only"),
+            Err(e) => {
+                self.set_status(format!("lattice: {e}; tags from tasks only"));
+                if let Some(Overlay::Tags(b)) = self.overlay.as_mut() {
+                    b.loading = false;
+                }
+            }
         }
         let root = self.root();
         let tx = self.tx.clone();
@@ -366,9 +371,12 @@ impl App {
         if q == p.asked {
             return;
         }
-        let Some(client) = self.client.clone() else {
-            self.set_status("lattice client unavailable");
-            return;
+        let backend = match self.ctx.backend() {
+            Ok(b) => b,
+            Err(e) => {
+                self.set_status(format!("lattice: {e}"));
+                return;
+            }
         };
         p.seq += 1;
         p.pending = true;
@@ -386,7 +394,7 @@ impl App {
                 include_archives: false,
                 embedder: None,
             };
-            let r = client.search(&params).await.map(|r| r.hits).map_err(|e| e.to_string());
+            let r = backend.search(&params).await.map(|r| r.hits).map_err(|e| e.to_string());
             let _ = tx.send(Msg::Search(seq, r));
         });
     }
@@ -922,9 +930,6 @@ impl App {
                 Msg::Tasks(list) => {
                     if let Some(Overlay::Tags(b)) = self.overlay.as_mut() {
                         b.add_tasks(&list);
-                        if self.client.is_none() {
-                            b.loading = false;
-                        }
                     }
                     if let Some(t) = self.tasks.as_mut() {
                         t.set_tasks(list);

@@ -362,4 +362,52 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&d);
     }
+
+    /// G0b: the TUI palette calls this same `Backend::search`. Embedded mode
+    /// with `--embedder none` must return hits from the vault index with no
+    /// HTTP listener. Empty-because-:8080-is-down is a failure, not a miss.
+    #[tokio::test]
+    async fn embedded_search_answers_without_http() {
+        let d = std::env::temp_dir().join(format!(
+            "lapis-g0b-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("Welcome.md"), "# Welcome\n\nThe quokka is a small macropod.\n").unwrap();
+        let mut e = lapis_lattice::Engine::open(&d).unwrap();
+        e.reindex().unwrap();
+        drop(e);
+
+        let ctx = crate::ops::Ctx {
+            json: false,
+            vault: crate::vault::Vault { root: d.clone(), source: "test" },
+            cfg: crate::config::Config::default(),
+            lattice_url: crate::config::DEFAULT_LATTICE_URL.into(),
+            force_http: false,
+        };
+        let b = ctx.backend().expect("embedded backend opens without a lattice listener");
+        assert_eq!(b.mode(), "embedded");
+        assert!(b.health().await.is_ok(), "health must not depend on HTTP :8080 in embedded mode");
+
+        let r = b
+            .search(&SearchParams {
+                query: "quokka".into(),
+                top_k: 10,
+                domain: None,
+                mode: Mode::Bm25,
+                per_doc: true,
+                mmr: false,
+                include_archives: false,
+                embedder: Some("none".into()),
+            })
+            .await
+            .expect("embedded search must be an error or hits, never a silent HTTP miss");
+        assert!(
+            r.hits.iter().any(|h| h.path == "Welcome.md"),
+            "expected Welcome.md in hits, got {:?}",
+            r.hits.iter().map(|h| &h.path).collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
