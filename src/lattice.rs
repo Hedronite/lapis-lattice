@@ -640,7 +640,10 @@ fn describe_reqwest(url: &str, e: &reqwest::Error) -> String {
     if e.is_timeout() {
         format!("lattice timed out: {url}")
     } else if e.is_connect() {
-        format!("lattice unreachable: {url} (is serve.py running? try `launchctl kickstart`)")
+        format!(
+            "lattice unreachable: {url}. Default search is the embedded index (no daemon). \
+             Drop --lattice, or set lattice.mode = \"http\" only if you run a lattice at that URL."
+        )
     } else {
         format!("lattice request failed: {url}: {e}")
     }
@@ -878,5 +881,9 @@ mod tests {
         let c = Client::new("http://127.0.0.1:9", Duration::from_millis(500)).unwrap();
         let e = c.health().await.unwrap_err();
         assert_eq!(e.exit_code(), 2, "{e}");
+        let msg = e.to_string();
+        assert!(msg.contains("unreachable"), "{msg}");
+        assert!(!msg.contains("serve.py"), "{msg}");
+        assert!(!msg.contains("launchctl"), "{msg}");
     }
 }

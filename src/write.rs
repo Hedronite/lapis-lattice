@@ -84,7 +84,7 @@ pub fn slug(s: &str) -> String {
 
 pub const DEFAULT_INIT_VAULT: &str = "~/Notes";
 const VAULT_GITIGNORE: &str = ".lapis/\nlattice.sqlite*\n*.duckdb\n";
-const WELCOME_MD: &str = "---\nname: Welcome\nstatus: draft\ntags: []\n---\n# Welcome\n\nThis is your vault. Notes are ordinary Markdown files.\n\n- Open the TUI: `lapis --vault .`\n- Search (needs a lattice): `lapis search --json welcome`\n- MCP: `lapis mcp`\n";
+const WELCOME_MD: &str = "---\nname: Welcome\nstatus: draft\ntags: []\n---\n# Welcome\n\nThis is your vault. Notes are ordinary Markdown files.\n\n- Open the TUI: `lapis`\n- Search (no daemon): `lapis search welcome`\n- MCP: `lapis mcp`\n";
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct InitResult {

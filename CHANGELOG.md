@@ -1,8 +1,17 @@
 # Changelog
 
-## Unreleased — v0.3.1
+## Unreleased — post v0.3.1
 
-A patch on top of `v0.3.0`. Not tagged.
+Docs and stranger-facing copy after the `v0.3.1` tag.
+
+- README / `docs/install.md` match the tagged Release assets (no longer say Releases do not exist).
+- macOS browser-download Gatekeeper gap is documented (`xattr` + ad-hoc `codesign`); `install.sh` clears quarantine when it can.
+- `lapis --help` describes the embedded default instead of implying HTTP `:8080`.
+- HTTP-down errors no longer mention `serve.py` / `launchctl kickstart`.
+
+## 0.3.1 — 2026-09-11
+
+Tagged `v0.3.1`.
 
 ### `lapis init` configures the vault it creates
 
