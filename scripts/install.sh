@@ -129,11 +129,23 @@ if [ "$installed" = 0 ]; then
   fi
 fi
 
-# macOS refuses to run a downloaded binary that carries no signature at all.
-if [ "$os" = "Darwin" ] && [ -x "$BIN_DIR/lapis" ] && ! "$BIN_DIR/lapis" --version >/dev/null 2>&1; then
-  echo "lapis-install: macOS killed the binary (AMFI). Signing it locally:"
-  echo "  codesign -s - -f \"$BIN_DIR/lapis\""
-  codesign -s - -f "$BIN_DIR/lapis" >/dev/null 2>&1 || true
+# macOS Release assets are ad-hoc / linker-signed, not notarized. A browser
+# download (and some tools) attach com.apple.quarantine; Gatekeeper SIGKILLs
+# the unsigned-to-Gatekeeper binary. curl | bash usually has no quarantine,
+# but clearing it is cheap and the workaround is what we tell strangers.
+if [ "$os" = "Darwin" ] && [ -x "$BIN_DIR/lapis" ]; then
+  xattr -d com.apple.quarantine "$BIN_DIR/lapis" 2>/dev/null || true
+  if ! "$BIN_DIR/lapis" --version >/dev/null 2>&1; then
+    echo "lapis-install: macOS blocked the binary (Gatekeeper). Clearing quarantine and ad-hoc signing:"
+    echo "  xattr -d com.apple.quarantine \"$BIN_DIR/lapis\""
+    echo "  codesign -s - -f \"$BIN_DIR/lapis\""
+    xattr -d com.apple.quarantine "$BIN_DIR/lapis" 2>/dev/null || true
+    codesign -s - -f "$BIN_DIR/lapis" >/dev/null 2>&1 || true
+    if ! "$BIN_DIR/lapis" --version >/dev/null 2>&1; then
+      echo "lapis-install: still blocked. The Release is not Developer ID + notarized." >&2
+      echo "  If you downloaded the .tar.gz in a browser, run the two commands above on that file." >&2
+    fi
+  fi
 fi
 
 case ":$PATH:" in

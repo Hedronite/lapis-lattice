@@ -8,11 +8,11 @@ const AFTER_HELP: &str = "\
 Exit codes:
   0  ok
   1  usage / user error
-  2  lattice down (HTTP unreachable, timeout, or 5xx)
+  2  lattice / index down (HTTP unreachable, timeout, 5xx, or the embedded sqlite index failed)
   3  path escape or not found
 
-Vault: --vault, $LAPIS_VAULT, or config `vault`. No implicit default; `lapis init ~/Notes` creates one.
-Lattice: --lattice, $LAPIS_LATTICE_URL, or config [lattice].url (default http://127.0.0.1:8080).
+Vault: --vault, $LAPIS_VAULT, or config `vault`. No implicit default; `lapis init ~/Notes` creates a vault, indexes it, and records the path.
+Lattice: embedded sqlite at `<vault>/.lapis/lattice.sqlite` by default (no daemon). `--lattice`, `$LAPIS_LATTICE_URL`, or `lattice.mode = \"http\"` opt into HTTP (URL default http://127.0.0.1:8080).
 Config: ~/.config/lapis/config.toml (or $XDG_CONFIG_HOME/lapis/config.toml).";
 
 #[derive(Debug, Parser)]
@@ -62,7 +62,7 @@ pub enum Command {
         command: VaultCommand,
     },
 
-    /// Hybrid lattice search (BM25 + vectors + title, fused). Not a disk scan.
+    /// Search the vault index (BM25; vectors only if an embedder is configured).
     Search(SearchArgs),
 
     /// Read one note: body plus parsed HAL frontmatter.
@@ -74,7 +74,7 @@ pub enum Command {
     /// Resolve a wikilink (`[[Name|alias#anchor]]`) or lattice `dst_raw` to a vault path.
     Resolve(ResolveArgs),
 
-    /// Named lattice analytics (DuckDB, read-only): inventory, priority, tags, health, recent, hubs, density, degree, dangling.
+    /// Named analytics: inventory, priority, tags, health, recent, hubs, density, degree, dangling.
     Analytics(AnalyticsArgs),
 
     /// Hub-routed link walk from a seed note (or the nearest Cross-References hub for --query).
@@ -83,7 +83,7 @@ pub enum Command {
     /// List notes from the lattice `documents` table (metadata only). Never walks the vault.
     List(ListArgs),
 
-    /// Ask the lattice to re-index one note (runs its own indexer; Lapis never writes lattice.db).
+    /// Re-index one note in the embedded sqlite index (or the HTTP lattice, if opted in).
     Reindex(ReindexArgs),
 
     /// Create a note with a HAL create-set (name, type, domain, status=draft, dates, hal_version).
@@ -125,10 +125,10 @@ pub enum Command {
     /// Check this install: vault, index, embedder, search, path sandbox. Exit non-zero if a check fails.
     Doctor,
 
-    /// Terminal UI: sidebar tree, editor, lattice search palette (Ctrl+P), HAL inspector.
+    /// Terminal UI: sidebar tree, Vim editor, preview, tasks. `?` for keys.
     Tui,
 
-    /// Create a vault directory (Welcome.md, Daily/, `.lapis/` gitignore). Does not start an index.
+    /// Create a vault, build its embedded index, and record the path in the config.
     Init(InitArgs),
 
     /// Desktop shell (GPUI). Needs a build with `--features desktop`; `--check` reports what is available.

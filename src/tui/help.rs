@@ -13,9 +13,9 @@ pub fn sections() -> Vec<Section> {
         Section {
             title: "Global",
             rows: vec![
-                s("Ctrl+P", "palette: lattice search, `>` for commands"),
-                s("Ctrl+S", "save current note (kicks lattice reindex)"),
-                s("Ctrl+Q", "quit"),
+                s("Ctrl+P", "palette: search / commands (`>` prefix)"),
+                s("Ctrl+S", "save current note"),
+                s("Ctrl+Q / q", "quit (q from the sidebar or preview)"),
                 s("?", "this help"),
                 s("Space", "leader (which-key shows the next keys)"),
                 s("Tab / Shift+Tab", "cycle focus: sidebar → editor → preview"),
