@@ -515,9 +515,9 @@ mod tests {
     #[test]
     fn search_goal_struct_ranks_first() {
         let d = vault();
-        std::fs::create_dir_all(d.join("foundry/lapis")).unwrap();
+        std::fs::create_dir_all(d.join("pack")).unwrap();
         std::fs::write(
-            d.join("foundry/lapis/GOAL-struct.md"),
+            d.join("pack/GOAL-struct.md"),
             "---\nname: GOAL-struct\ntitle: GOAL-struct\n---\n# Paste\n\n\
              Authorized loop text. Ranking uses path and HAL name, not this body.\n",
         )
@@ -531,7 +531,7 @@ mod tests {
         e.reindex().unwrap();
         let indexed = e.documents(&ListParams { limit: 50, ..Default::default() }).unwrap();
         assert!(
-            indexed.iter().any(|r| r.path == "foundry/lapis/GOAL-struct.md"),
+            indexed.iter().any(|r| r.path == "pack/GOAL-struct.md"),
             "fixture GOAL-struct.md must be in the index before search"
         );
 
@@ -546,7 +546,7 @@ mod tests {
         assert!(!res.hits.is_empty(), "indexed GOAL-struct.md must not silent-zero, got empty hits");
         assert_eq!(
             res.hits[0].path,
-            "foundry/lapis/GOAL-struct.md",
+            "pack/GOAL-struct.md",
             "GOAL-struct.md must rank #1, got {:?}",
             res.hits.iter().map(|h| &h.path).collect::<Vec<_>>()
         );

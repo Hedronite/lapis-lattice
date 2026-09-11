@@ -12,6 +12,15 @@ use crate::{IndexReport, Result};
 
 const SKIP: &[&str] = &[".lapis", ".git", ".obsidian", "node_modules", ".venv", "target"];
 
+/// One external-content FTS row, for the 'delete' command in [`forget_path`].
+struct FtsRow {
+    id: i64,
+    text: String,
+    path: String,
+    heading: Option<String>,
+    title: Option<String>,
+}
+
 pub fn reindex(conn: &Connection, vault: &Path) -> Result<IndexReport> {
     // The vector table carries no foreign key, so nothing cascades when the
     // chunk rows go. Clearing it here is what stops KNN from returning ids that
@@ -69,15 +78,23 @@ fn forget_path(conn: &Connection, rel: &str) -> Result<()> {
     // chunk ids have to go before the chunks do.
     crate::sqlite::forget_vectors_for_path(conn, rel)?;
     let mut stmt = conn.prepare("SELECT chunk_id, text, path, heading, title FROM chunks WHERE path = ?1")?;
-    let rows: Vec<(i64, String, String, Option<String>, Option<String>)> = stmt
-        .query_map(params![rel], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+    let rows: Vec<FtsRow> = stmt
+        .query_map(params![rel], |r| {
+            Ok(FtsRow {
+                id: r.get(0)?,
+                text: r.get(1)?,
+                path: r.get(2)?,
+                heading: r.get(3)?,
+                title: r.get(4)?,
+            })
+        })?
         .filter_map(|r| r.ok())
         .collect();
-    for (id, text, path, heading, title) in rows {
+    for row in rows {
         conn.execute(
             "INSERT INTO chunks_fts(chunks_fts, rowid, text, path, heading, title) \
              VALUES('delete',?1,?2,?3,?4,?5)",
-            params![id, text, path, heading, title],
+            params![row.id, row.text, row.path, row.heading, row.title],
         )?;
     }
     conn.execute("DELETE FROM chunks WHERE path = ?1", params![rel])?;
