@@ -6,8 +6,11 @@ use std::path::PathBuf;
 use crate::config::{Config, expand_tilde};
 use crate::error::{LapisError, Result};
 
-pub const NO_VAULT: &str = "no vault configured. Set --vault, $LAPIS_VAULT, or config `vault`, \
-or run `lapis init ~/Notes`.";
+/// The remedy has to be something that actually leaves a vault configured.
+/// The old wording offered `lapis init` for a vault that already existed, and
+/// init used to record nothing, so following it landed you back here.
+pub const NO_VAULT: &str = "no vault configured. Pass --vault <path>, set $LAPIS_VAULT, or run \
+`lapis init <path>` to create a vault and record it in the config.";
 
 #[derive(Debug, Clone)]
 pub struct Vault {
@@ -51,6 +54,29 @@ mod tests {
         assert_eq!(e.exit_code(), 1);
         assert!(e.message().contains("lapis init"), "{}", e.message());
         assert!(!e.message().contains("Obsidian"));
+        // The remedy has to change what the resolver reads. Offering `init` on
+        // a path that already exists, back when init recorded nothing, sent the
+        // operator straight back to this same error.
+        assert!(
+            e.message().contains("record it in the config"),
+            "the suggested command must leave a vault configured: {}",
+            e.message()
+        );
+    }
+
+    #[test]
+    fn config_vault_resolves_when_no_flag_or_env_is_given() {
+        let d = std::env::temp_dir().join(format!(
+            "lapis-vault-cfg-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        let cfg = Config { vault: Some(d.display().to_string()), ..Config::default() };
+        let v = resolve(None, &cfg).unwrap();
+        assert_eq!(v.source, "config");
+        assert_eq!(v.root, d.canonicalize().unwrap());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

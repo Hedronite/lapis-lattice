@@ -625,6 +625,10 @@ fn init_vault_cmd(json: bool, args: cli::InitArgs) -> Result<()> {
     // B2: a vault with no index is a vault whose first search fails. Build it
     // here so `init` then `search` works with no daemon and no second command.
     let indexed = lapis_lattice::Engine::open(&w.path).ok().and_then(|mut e| e.reindex().ok());
+    // And record the vault, so `init` then a bare `lapis` works too. Creating a
+    // vault and leaving nothing behind that points at it is what made
+    // `no vault configured` a loop.
+    let remembered = config::remember_vault(&w.path)?;
     if json {
         return emit_json(&json!({
             "path": w.path,
@@ -632,6 +636,13 @@ fn init_vault_cmd(json: bool, args: cli::InitArgs) -> Result<()> {
             "indexed": indexed.as_ref().map(|r| json!({
                 "documents": r.documents, "chunks": r.chunks, "edges": r.edges
             })),
+            "configured": match &remembered {
+                config::Remembered::Wrote(p) => json!({
+                    "wrote": p.display().to_string(), "vault": w.path,
+                }),
+                config::Remembered::AlreadySet(v) => json!({ "already": v }),
+                config::Remembered::NoConfigDir => serde_json::Value::Null,
+            },
         }));
     }
     let verb = if w.created { "created" } else { "already exists" };
@@ -640,7 +651,20 @@ fn init_vault_cmd(json: bool, args: cli::InitArgs) -> Result<()> {
         Some(r) => println!("indexed: {} documents, {} chunks, {} links", r.documents, r.chunks, r.edges),
         None => println!("indexed: skipped (could not open the index)"),
     }
-    println!("next: lapis --vault {}   or   export LAPIS_VAULT={}", w.path, w.path);
+    match &remembered {
+        config::Remembered::Wrote(p) => {
+            println!("configured: {} now names this vault", p.display());
+            println!("next: lapis");
+        }
+        config::Remembered::AlreadySet(v) => {
+            println!("configured: left alone, config already names {v}");
+            println!("next: lapis --vault {}   or   export LAPIS_VAULT={}", w.path, w.path);
+        }
+        config::Remembered::NoConfigDir => {
+            println!("configured: no config directory to write to");
+            println!("next: lapis --vault {}   or   export LAPIS_VAULT={}", w.path, w.path);
+        }
+    }
     Ok(())
 }
 

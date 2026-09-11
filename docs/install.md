@@ -33,7 +33,7 @@ curl -fsSL https://raw.githubusercontent.com/VirtualMachinist/lapis-lattice/main
 That must exit 0 only when:
 
 1. `lapis` is on `PATH` (default `$HOME/.local/bin`)
-2. A vault exists (`--vault` or `$LAPIS_VAULT` or `lapis init`)
+2. A vault exists and is named: `--vault`, `$LAPIS_VAULT`, or the `vault` key `lapis init` writes
 3. `lapis --version` prints
 4. `lapis doctor` is green (once `doctor` exists)
 
@@ -68,7 +68,11 @@ Windows: installer prints “macOS and Linux only” and exits 1 until we have a
 
 ## `lapis setup` / `lapis doctor` (needed for the command to be true)
 
-`lapis init` already creates a vault. `setup` is init + config + first index. `doctor` reports:
+`lapis init <path>` is the whole of it: it creates the vault, indexes it, and
+writes `vault` into `~/.config/lapis/config.toml` so the next bare `lapis`
+resolves without an environment variable. `--vault` and `$LAPIS_VAULT` still win
+over the config, and an `init` of somewhere else never overwrites a vault the
+config already names. There is no separate `setup` command. `doctor` reports:
 
 - binary version, OS/arch
 - vault path and whether it is a directory
@@ -85,7 +89,7 @@ Today:
 - GitHub repo is `lapis-lattice`.
 - `cargo add lapis-lattice` gets the engine library.
 - The CLI package in this repo is still named `lapis` (binary `lapis`). It still talks HTTP lattice by default.
-- `lapis init` does **not** yet write `<vault>/.lapis/lattice.sqlite` via the library.
+- `lapis init` writes `<vault>/.lapis/lattice.sqlite` via the library and records the vault in the config.
 
 0.2 makes the one-command true:
 
