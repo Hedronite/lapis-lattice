@@ -4,7 +4,7 @@
 use ratatui::text::{Line, Span};
 
 use super::theme;
-use crate::lattice::Neighbor;
+use crate::http::Neighbor;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {

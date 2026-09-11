@@ -6,9 +6,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent
 use ratatui::DefaultTerminal;
 use ratatui_textarea::Input;
 
-use crate::lattice::Mode as SearchMode;
 use crate::templates;
 use crate::write;
+use lapis_lattice::Mode as SearchMode;
 
 use super::app::{App, Focus, Overlay, PromptKind, Split, tab_label};
 use super::leader::{self, Cmd};

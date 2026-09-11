@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::lattice::Document;
+use crate::http::Document;
 use crate::tasks::Task;
 
 #[derive(Debug, Default, Clone)]

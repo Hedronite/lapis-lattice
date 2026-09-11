@@ -12,10 +12,11 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui_textarea::TextArea;
 
-use crate::lattice::{Document, Hit, ListParams, Mode as SearchMode, Neighbor, SearchParams};
+use crate::http::{Document, ListParams, Neighbor};
 use crate::ops::Ctx;
 use crate::tasks::Task;
 use crate::{hal, notes, tasks, templates, write};
+use lapis_lattice::{Hit, Mode as SearchMode, SearchParams};
 
 use super::mouse::Regions;
 use super::omarchy;
@@ -356,16 +357,7 @@ impl App {
         let seq = p.seq;
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let params = SearchParams {
-                query: q,
-                top_k: 25,
-                domain: None,
-                mode,
-                per_doc: true,
-                mmr: false,
-                include_archives: false,
-                embedder: None,
-            };
+            let params = SearchParams { query: q, limit: 25, mode, per_doc: true, ..Default::default() };
             let r = backend.search(&params).await.map(|r| r.hits).map_err(|e| e.to_string());
             let _ = tx.send(Msg::Search(seq, r));
         });

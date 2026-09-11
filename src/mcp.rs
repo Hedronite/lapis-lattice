@@ -20,9 +20,10 @@ use serde_json::{Value, json};
 
 use crate::envelope::{self, Meta};
 use crate::error::LapisError;
-use crate::lattice::{Hit, ListParams, Mode, SearchParams};
+use crate::http::{ListParams, Mode};
 use crate::ops::{self, Ctx};
 use crate::{notes, resolve, tasks, write};
+use lapis_lattice::{Hit, SearchParams};
 
 pub const INSTRUCTIONS: &str = "\
 Lapis: a local Markdown notes vault with Lapis Lattice retrieval.
@@ -294,9 +295,10 @@ pub fn search_params(
     Ok((
         SearchParams {
             query: a.query,
-            top_k: offset + limit,
+            limit: offset + limit,
+            offset: 0,
             domain: a.domain,
-            mode,
+            mode: mode.into(),
             per_doc: a.per_doc.unwrap_or(default_per_doc),
             mmr: false,
             include_archives: false,
@@ -457,13 +459,11 @@ impl LapisServer {
         let limit = a.limit.unwrap_or(5).clamp(1, 20);
         let p = SearchParams {
             query: a.query.clone(),
-            top_k: limit,
+            limit,
             domain: a.domain,
-            mode: parse_mode(a.mode.as_deref())?,
+            mode: parse_mode(a.mode.as_deref())?.into(),
             per_doc: true,
-            mmr: false,
-            include_archives: false,
-            embedder: None,
+            ..Default::default()
         };
         let r = self.ctx.client().map_err(fail)?.search(&p).await.map_err(fail)?;
         let max = a.snippet_chars.unwrap_or(600);
@@ -750,7 +750,7 @@ mod tests {
     fn mcp_search_defaults_to_per_doc() {
         let (p, limit, offset) = search_params(arg(r#"{"query":"lattice"}"#), true).unwrap();
         assert!(p.per_doc);
-        assert_eq!((p.top_k, p.mode, limit, offset), (10, Mode::Hybrid, 10, 0));
+        assert_eq!((p.limit, p.mode, limit, offset), (10, lapis_lattice::Mode::Hybrid, 10, 0));
         let (p, ..) = search_params(arg(r#"{"query":"lattice"}"#), false).unwrap();
         assert!(!p.per_doc, "[agent] per_doc=false is honoured");
         let (p, limit, offset) = search_params(
@@ -759,7 +759,7 @@ mod tests {
         )
         .unwrap();
         assert!(!p.per_doc);
-        assert_eq!((p.top_k, p.mode, limit, offset), (9, Mode::Bm25, 3, 6));
+        assert_eq!((p.limit, p.mode, limit, offset), (9, lapis_lattice::Mode::Bm25, 3, 6));
         assert!(search_params(arg(r#"{"query":"x","mode":"sideways"}"#), true).is_err());
         assert!(search_params(arg(r#"{"query":"x","limit":30,"offset":30}"#), true).is_err());
     }

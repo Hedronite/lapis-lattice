@@ -6,7 +6,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::error::LapisError;
-use crate::lattice::Latency;
+use crate::http::Latency;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Meta {

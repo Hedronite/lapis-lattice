@@ -2,7 +2,7 @@
 
 use clap::{Args, Parser, Subcommand};
 
-use crate::lattice::Mode;
+use crate::http::Mode;
 
 const AFTER_HELP: &str = "\
 Exit codes:

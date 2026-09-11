@@ -227,7 +227,7 @@ pub fn search(conn: &Connection, p: &SearchParams, embedder: Option<&dyn Embedde
             let mut sql = String::from(
                 "SELECT c.chunk_id, c.path, d.title, c.heading, \
                  snippet(chunks_fts, 0, '', '', '…', 12), bm25(chunks_fts), d.domain, d.doc_type, \
-                 d.kind \
+                 d.kind, d.tags_json, c.chunk_index \
                  FROM chunks_fts JOIN chunks c ON c.chunk_id = chunks_fts.rowid \
                  JOIN documents d ON d.path = c.path WHERE chunks_fts MATCH ?1",
             );
@@ -246,18 +246,20 @@ pub fn search(conn: &Connection, p: &SearchParams, embedder: Option<&dyn Embedde
                 fts_rank.push(id);
                 fts_hits.insert(
                     id,
-                    Hit {
-                        path: row.get(1)?,
-                        kind: row.get::<_, Option<String>>(8)?.unwrap_or_else(|| "markdown".into()),
-                        title: row.get(2)?,
-                        heading: row.get(3)?,
-                        snippet: row.get(4)?,
-                        rank: 0,
+                    hit_from_row(
+                        id,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
                         // bm25() is lower-is-better; invert for a friendlier score.
-                        score: if score == 0.0 { 0.0 } else { 1.0 / (1.0 + score.abs()) },
-                        domain: row.get(6)?,
-                        doc_type: row.get(7)?,
-                    },
+                        if score == 0.0 { 0.0 } else { 1.0 / (1.0 + score.abs()) },
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                    ),
                 );
             }
         }
@@ -325,7 +327,8 @@ pub fn search(conn: &Connection, p: &SearchParams, embedder: Option<&dyn Embedde
 /// snippet is a plain text head: `snippet()` only exists inside an FTS query.
 fn hydrate_chunk(conn: &Connection, chunk_id: i64, domain: Option<&str>) -> Result<Option<Hit>> {
     let mut stmt = conn.prepare(
-        "SELECT c.path, d.title, c.heading, c.text, d.domain, d.doc_type, d.kind \
+        "SELECT c.path, d.title, c.heading, c.text, d.domain, d.doc_type, d.kind, \
+         d.tags_json, c.chunk_index \
          FROM chunks c JOIN documents d ON d.path = c.path WHERE c.chunk_id = ?1",
     )?;
     let mut rows = stmt.query(params![chunk_id])?;
@@ -338,17 +341,51 @@ fn hydrate_chunk(conn: &Connection, chunk_id: i64, domain: Option<&str>) -> Resu
     }
     let text: String = row.get(3)?;
     let snippet: String = text.chars().take(160).collect();
-    Ok(Some(Hit {
-        path: row.get(0)?,
-        kind: row.get::<_, Option<String>>(6)?.unwrap_or_else(|| "markdown".into()),
-        title: row.get(1)?,
-        heading: row.get(2)?,
-        snippet: Some(snippet),
+    Ok(Some(hit_from_row(
+        chunk_id,
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        Some(snippet),
+        0.0,
+        dom,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+    )))
+}
+
+fn hit_from_row(
+    chunk_id: i64,
+    path: String,
+    title: Option<String>,
+    heading: Option<String>,
+    snippet: Option<String>,
+    score: f64,
+    domain: Option<String>,
+    doc_type: Option<String>,
+    kind: Option<String>,
+    tags_json: String,
+    chunk_index: Option<i64>,
+) -> Hit {
+    let title = title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| {
+        Path::new(&path).file_stem().and_then(|s| s.to_str()).unwrap_or(&path).to_string()
+    });
+    Hit {
+        kind: kind.unwrap_or_else(|| "markdown".into()),
+        title,
+        heading: heading.filter(|s| !s.is_empty()),
+        snippet: snippet.filter(|s| !s.is_empty()),
         rank: 0,
-        score: 0.0,
-        domain: dom,
-        doc_type: row.get(5)?,
-    }))
+        score,
+        domain,
+        doc_type,
+        tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+        chunk_id: Some(chunk_id),
+        chunk_index,
+        path,
+    }
 }
 
 /// `lapis list`: documents table, filtered and paged.

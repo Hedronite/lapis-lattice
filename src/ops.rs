@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::backend::Backend;
 use crate::error::{LapisError, Result};
-use crate::lattice::{Client, Document, ListParams, Reindex};
+use crate::http::{Client, Document, ListParams, Reindex};
 use crate::{config, notes, overlay, tasks, vault, write};
 
 pub struct Ctx {

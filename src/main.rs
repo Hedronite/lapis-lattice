@@ -10,7 +10,7 @@ mod config;
 mod envelope;
 mod error;
 mod hal;
-mod lattice;
+mod http;
 mod mcp;
 mod notes;
 mod ops;
@@ -38,7 +38,8 @@ use cli::{
 };
 use envelope::Meta;
 use error::{LapisError, Result};
-use lattice::{ListParams, SearchParams};
+use http::ListParams;
+use lapis_lattice::SearchParams;
 use ops::Ctx;
 
 // Multi-thread so the TUI can block its thread while lattice requests run.
@@ -202,16 +203,17 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
     if requested > 50 {
         return Err(LapisError::Usage(format!("offset + limit must be ≤ 50 (got {requested})")));
     }
-    if args.embedder.as_deref() == Some("none") && matches!(args.mode, lattice::Mode::Vector) {
+    if args.embedder.as_deref() == Some("none") && matches!(args.mode, http::Mode::Vector) {
         return Err(LapisError::Usage(
             "vector mode needs an embedder; got --embedder none. Use --mode bm25|hybrid.".into(),
         ));
     }
     let params = SearchParams {
         query: args.query_text(),
-        top_k: requested,
+        limit: requested,
+        offset: 0,
         domain: args.domain.clone(),
-        mode: args.mode,
+        mode: args.mode.into(),
         per_doc: args.effective_per_doc(ctx.cfg.agent.per_doc),
         mmr: args.mmr,
         include_archives: args.include_archives,
@@ -240,13 +242,13 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
         return Ok(());
     }
     for h in &result.hits {
-        let rank = h.rank.map(|r| format!("{r:>2}.")).unwrap_or_else(|| "  ".into());
+        let rank = format!("{:>2}.", h.rank);
         println!("{rank} {}", h.path);
         let heading = h.heading.clone().filter(|hd| hd != &h.title);
         let meta = meta_line(&[
             heading,
             h.domain.as_ref().map(|d| format!("domain={d}")),
-            h.score.map(|s| format!("score={s:.4}")),
+            Some(format!("score={:.4}", h.score)),
         ]);
         println!("    {}{meta}", h.title);
     }
@@ -738,13 +740,11 @@ async fn doctor(ctx: &Ctx) -> Result<()> {
         .backend()?
         .search(&SearchParams {
             query: "lapis".into(),
-            top_k: 1,
-            domain: None,
-            mode: lattice::Mode::Bm25,
+            limit: 1,
+            mode: lapis_lattice::Mode::Bm25,
             per_doc: true,
-            mmr: false,
-            include_archives: false,
             embedder: Some("none".into()),
+            ..Default::default()
         })
         .await;
     match &probe {
