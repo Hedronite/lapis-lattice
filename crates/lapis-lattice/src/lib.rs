@@ -91,6 +91,26 @@ pub struct SearchResult {
     pub modalities: Vec<String>,
 }
 
+/// How `paths_search` matches against the documents path column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathMatch {
+    /// Exact filename (`AGENTS.md` hits `AGENTS.md` and `agents/AGENTS.md`).
+    Basename,
+    /// SQL GLOB / glob semantics (`*.md`, `**/AGENTS.md`). `**` is treated as `*`.
+    Glob,
+    /// `path` contains `pattern`.
+    Substring,
+}
+
+/// One row from the documents path table (`pathsSearchPost`).
+#[derive(Debug, Clone, Serialize)]
+pub struct PathHit {
+    pub path: String,
+    pub kind: String,
+    /// File mtime in milliseconds; `None` when the column is zero.
+    pub mtime_ms: Option<u64>,
+}
+
 /// Filters for the documents table (`lapis list`).
 #[derive(Debug, Clone, Default)]
 pub struct ListParams {
@@ -264,6 +284,11 @@ impl Engine {
     /// `lapis list`: the documents table, filtered and paged.
     pub fn documents(&self, p: &ListParams) -> Result<Vec<Document>> {
         sqlite::documents(&self.conn, p)
+    }
+
+    /// Filename / path inventory from the documents path table. Never walks the vault.
+    pub fn paths_search(&self, pattern: &str, match_kind: PathMatch, limit: u32) -> Result<Vec<PathHit>> {
+        sqlite::paths_search(&self.conn, pattern, match_kind, limit)
     }
 
     /// Whole-vault graph for the canvas: one node per indexed document plus one
@@ -452,6 +477,27 @@ mod tests {
         let page = e.documents(&ListParams { limit: 1, offset: 1, ..Default::default() }).unwrap();
         assert_eq!(page.len(), 1);
         assert_ne!(page[0].path, all[0].path);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Path table answers `AGENTS.md` by basename even when FTS folds the dot.
+    #[test]
+    fn paths_search_basename_agents_md() {
+        let d = vault();
+        std::fs::write(d.join("AGENTS.md"), "# AGENTS\n\nRoot agents file.\n").unwrap();
+        std::fs::create_dir_all(d.join("agents")).unwrap();
+        std::fs::write(d.join("agents/AGENTS.md"), "# nested AGENTS\n").unwrap();
+        let mut e = Engine::open(&d).unwrap();
+        e.reindex().unwrap();
+
+        let hits = e.paths_search("AGENTS.md", PathMatch::Basename, 50).unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert!(paths.contains(&"AGENTS.md"), "{paths:?}");
+        assert!(paths.contains(&"agents/AGENTS.md"), "{paths:?}");
+        assert!(hits.iter().all(|h| h.kind == "markdown"));
+
+        let glob = e.paths_search("*.md", PathMatch::Glob, 50).unwrap();
+        assert!(glob.iter().any(|h| h.path == "AGENTS.md"), "{:?}", glob);
         let _ = std::fs::remove_dir_all(&d);
     }
 

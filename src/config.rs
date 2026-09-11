@@ -13,7 +13,7 @@ use crate::error::{LapisError, Result};
 pub const DEFAULT_LATTICE_URL: &str = "http://127.0.0.1:8080";
 pub const DEFAULT_TIMEOUT_MS: u64 = 8000;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct Config {
     #[serde(default)]
     pub lattice: LatticeConfig,
@@ -27,6 +27,34 @@ pub struct Config {
     /// TUI palette: `name` picks a built-in, `custom` overrides roles with `#RRGGBB`.
     #[serde(default)]
     pub theme: ThemeConfig,
+    /// Operator HTTP API (`lapis api` / `/v1`).
+    #[serde(default)]
+    pub api: ApiConfig,
+}
+
+pub const DEFAULT_API_BIND: &str = "127.0.0.1";
+pub const DEFAULT_API_PORT: u16 = 18765;
+
+/// `[api]`: bind/port for the operator HTTP face. Distinct from lattice `:8080`.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ApiConfig {
+    #[serde(default = "default_api_bind")]
+    pub bind: String,
+    #[serde(default = "default_api_port")]
+    pub port: u16,
+}
+
+fn default_api_bind() -> String {
+    DEFAULT_API_BIND.to_string()
+}
+fn default_api_port() -> u16 {
+    DEFAULT_API_PORT
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self { bind: default_api_bind(), port: default_api_port() }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -116,13 +144,13 @@ impl AgentConfig {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct OperatorConfig {
     #[serde(default)]
     pub name: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct LatticeConfig {
     /// `embedded` (default) or `http`. Embedded needs no daemon.
     #[serde(default = "default_mode")]

@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::error::{LapisError, Result};
-use crate::lattice::{self, Client, Hit, ListParams, Mode, Neighbors, SearchParams, SearchResult};
+use crate::lattice::{self, Client, Hit, ListParams, Mode, Neighbors, PathHit, SearchParams, SearchResult};
 use crate::notes;
 
 /// What `lapis doctor` and `vault info` report, per `schema/v0.2/health.schema.json`.
@@ -45,6 +45,7 @@ pub struct Graph {
 /// MCP hands its futures to a runtime that requires `Send`, so the engine lives
 /// behind a mutex: every embedded arm below locks, works, and releases without
 /// ever holding the guard across an `await`.
+#[derive(Clone)]
 pub enum Backend {
     Embedded(Arc<Mutex<Engine>>),
     Http(Client),
@@ -142,6 +143,24 @@ impl Backend {
                     hits,
                 })
             }
+        }
+    }
+
+    /// Filename / path inventory from the index path table.
+    pub async fn paths_search(
+        &self,
+        pattern: &str,
+        match_kind: lapis_lattice::PathMatch,
+        limit: u32,
+    ) -> Result<Vec<PathHit>> {
+        match self {
+            Backend::Embedded(e) => Ok(lock(e)
+                .paths_search(pattern, match_kind, limit)
+                .map_err(engine_err)?
+                .into_iter()
+                .map(path_hit_from_engine)
+                .collect()),
+            Backend::Http(c) => http_paths_search(c, pattern, match_kind, limit).await,
         }
     }
 
@@ -308,6 +327,111 @@ impl Backend {
             }
         }
     }
+}
+
+fn path_hit_from_engine(h: lapis_lattice::PathHit) -> PathHit {
+    PathHit {
+        kind: kind_from_engine(&h.kind, &h.path),
+        mtime: h.mtime_ms.map(|ms| ms as f64 / 1000.0),
+        path: h.path,
+    }
+}
+
+fn kind_from_engine(kind: &str, path: &str) -> notes::Kind {
+    match kind {
+        lapis_lattice::HTML => notes::Kind::Html,
+        lapis_lattice::YAML => notes::Kind::Yaml,
+        lapis_lattice::MARKDOWN => notes::Kind::Markdown,
+        _ => notes::kind_of(path),
+    }
+}
+
+fn path_matches(path: &str, pattern: &str, kind: lapis_lattice::PathMatch) -> bool {
+    match kind {
+        lapis_lattice::PathMatch::Basename => path == pattern || path.rsplit('/').next() == Some(pattern),
+        lapis_lattice::PathMatch::Substring => path.contains(pattern),
+        lapis_lattice::PathMatch::Glob => {
+            let glob = pattern.replace("**", "*");
+            glob_match(&glob, path) || path.rsplit('/').next().is_some_and(|base| glob_match(&glob, base))
+        }
+    }
+}
+
+fn glob_match(pat: &str, text: &str) -> bool {
+    glob_rec(pat.as_bytes(), text.as_bytes())
+}
+
+fn glob_rec(pat: &[u8], text: &[u8]) -> bool {
+    let mut pi = 0;
+    let mut ti = 0;
+    while pi < pat.len() {
+        match pat[pi] {
+            b'*' => {
+                while pi < pat.len() && pat[pi] == b'*' {
+                    pi += 1;
+                }
+                if pi == pat.len() {
+                    return true;
+                }
+                while ti <= text.len() {
+                    if glob_rec(&pat[pi..], &text[ti..]) {
+                        return true;
+                    }
+                    if ti == text.len() {
+                        break;
+                    }
+                    ti += 1;
+                }
+                return false;
+            }
+            b'?' => {
+                if ti >= text.len() {
+                    return false;
+                }
+                pi += 1;
+                ti += 1;
+            }
+            c => {
+                if ti >= text.len() || text[ti] != c {
+                    return false;
+                }
+                pi += 1;
+                ti += 1;
+            }
+        }
+    }
+    ti == text.len()
+}
+
+async fn http_paths_search(
+    c: &Client,
+    pattern: &str,
+    match_kind: lapis_lattice::PathMatch,
+    limit: u32,
+) -> Result<Vec<PathHit>> {
+    let limit = limit.clamp(1, 1000);
+    let mut offset = 0u32;
+    let mut hits = Vec::new();
+    loop {
+        let page = c.documents(&ListParams { limit: 1000, offset, ..ListParams::default() }).await?;
+        if page.is_empty() {
+            break;
+        }
+        let n = page.len() as u32;
+        for d in page {
+            if path_matches(&d.path, pattern, match_kind) {
+                hits.push(PathHit { kind: notes::kind_of(&d.path), mtime: d.mtime, path: d.path });
+                if hits.len() as u32 >= limit {
+                    return Ok(hits);
+                }
+            }
+        }
+        if n < 1000 {
+            break;
+        }
+        offset = offset.saturating_add(1000);
+    }
+    Ok(hits)
 }
 
 /// Engine errors carry the CLI exit contract: usage is 1, sqlite trouble is 2

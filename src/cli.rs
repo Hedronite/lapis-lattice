@@ -136,6 +136,20 @@ pub enum Command {
 
     /// MCP server over stdio (tools: vault_info, search, read_note, list_notes, neighbors, create_note, append_to_note, list_tasks, toggle_task).
     Mcp,
+
+    /// Serve the operator HTTP API (`/v1`) on loopback. Default 127.0.0.1:18765.
+    Api(ApiArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ApiArgs {
+    /// Bind address. Default config `api.bind` (`127.0.0.1`). Loopback only this GOAL.
+    #[arg(long, value_name = "ADDR")]
+    pub bind: Option<String>,
+
+    /// Port. Default config `api.port` (`18765`).
+    #[arg(long, value_name = "PORT")]
+    pub port: Option<u16>,
 }
 
 #[derive(Debug, Args)]
@@ -632,6 +646,14 @@ mod tests {
         assert!(matches!(c.command(), Command::Task { command: TaskCommand::Toggle(a) } if a.id == "a.md#3"));
         assert!(matches!(Cli::try_parse_from(["lapis", "mcp"]).unwrap().command(), Command::Mcp));
         assert!(matches!(Cli::try_parse_from(["lapis", "tui"]).unwrap().command(), Command::Tui));
+        let c = Cli::try_parse_from(["lapis", "api", "--port", "18765"]).unwrap();
+        match c.command() {
+            Command::Api(a) => {
+                assert_eq!(a.port, Some(18765));
+                assert!(a.bind.is_none());
+            }
+            _ => panic!("expected api"),
+        }
         // bare `lapis` (and bare `lapis --vault …`) default to the TUI
         let c = Cli::try_parse_from(["lapis"]).unwrap();
         assert!(c.subcommand.is_none());

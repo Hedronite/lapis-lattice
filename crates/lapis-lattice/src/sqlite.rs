@@ -6,7 +6,8 @@ use rusqlite::types::Value as SqlValue;
 
 use crate::embed::{self, Embedder};
 use crate::{
-    Document, Error, Graph, Health, Hit, ListParams, Mode, PRODUCER, Result, SearchParams, SearchResult,
+    Document, Error, Graph, Health, Hit, ListParams, Mode, PRODUCER, PathHit, PathMatch, Result,
+    SearchParams, SearchResult,
 };
 
 /// Name of the `vec0` virtual table holding chunk embeddings. It lives in the
@@ -401,6 +402,56 @@ pub fn documents(conn: &Connection, p: &ListParams) -> Result<Vec<Document>> {
             tags: serde_json::from_str(&tags_json).unwrap_or_default(),
             updated_at: if mtime > 0 { Some(mtime as u64) } else { None },
             hash: row.get(9)?,
+        });
+    }
+    Ok(out)
+}
+
+/// Path-table inventory. Basename uses exact suffix, not GLOB, so a pattern
+/// with `*` is literal. Cannot answer (sqlite error) is the caller's `index_gap`.
+pub fn paths_search(
+    conn: &Connection,
+    pattern: &str,
+    match_kind: PathMatch,
+    limit: u32,
+) -> Result<Vec<PathHit>> {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return Err(Error::Usage("pattern is required".into()));
+    }
+    let limit = limit.clamp(1, 1000) as i64;
+    let glob;
+    let (sql, pat): (&str, &str) = match match_kind {
+        PathMatch::Basename => (
+            "SELECT path, kind, mtime FROM documents \
+             WHERE path = ?1 OR substr(path, -length(?1) - 1) = '/' || ?1 \
+             ORDER BY path LIMIT ?2",
+            pattern,
+        ),
+        PathMatch::Substring => (
+            "SELECT path, kind, mtime FROM documents \
+             WHERE instr(path, ?1) > 0 ORDER BY path LIMIT ?2",
+            pattern,
+        ),
+        PathMatch::Glob => {
+            glob = pattern.replace("**", "*");
+            (
+                "SELECT path, kind, mtime FROM documents \
+                 WHERE path GLOB ?1 OR path GLOB '*/' || ?1 \
+                 ORDER BY path LIMIT ?2",
+                glob.as_str(),
+            )
+        }
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let mut rows = stmt.query(params![pat, limit])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let mtime: i64 = row.get(2).unwrap_or(0);
+        out.push(PathHit {
+            path: row.get(0)?,
+            kind: row.get::<_, Option<String>>(1)?.unwrap_or_else(|| "markdown".into()),
+            mtime_ms: if mtime > 0 { Some(mtime as u64) } else { None },
         });
     }
     Ok(out)

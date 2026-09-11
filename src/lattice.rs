@@ -43,7 +43,7 @@ pub struct Health {
 }
 
 /// CLI-facing search mode. Maps onto serve.py's `hybrid|bm25_only|vector_only`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     #[default]
@@ -319,6 +319,15 @@ pub struct Tree {
 
 pub const TREE_MAX_DEPTH: u32 = 3;
 pub const TREE_MAX_NODES: u32 = 200;
+
+/// One row from the index path table (`pathsSearchPost`).
+#[derive(Debug, Clone, Serialize)]
+pub struct PathHit {
+    pub path: String,
+    pub kind: Kind,
+    /// Unix seconds from the index, `null` when the table has no mtime.
+    pub mtime: Option<f64>,
+}
 
 /// One row from `GET /documents` (metadata only, no chunks or embeddings).
 #[derive(Debug, Clone, Serialize, Deserialize)]

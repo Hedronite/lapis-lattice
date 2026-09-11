@@ -4,6 +4,7 @@
 //! currently read an HTTP lattice; an embedded index is the 0.2 path.
 //! This binary never writes `lattice.db`.
 
+mod api;
 mod backend;
 mod cli;
 mod config;
@@ -131,6 +132,7 @@ async fn dispatch(ctx: Ctx, cmd: Command) -> Result<()> {
         Command::Doctor => doctor(&ctx).await,
         Command::Tui => tui::run(ctx).await,
         Command::Desktop(args) => desktop(&ctx, args),
+        Command::Api(args) => api::serve(ctx, args).await,
     }
 }
 

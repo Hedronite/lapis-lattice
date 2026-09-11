@@ -1,12 +1,16 @@
 //! The `--json` envelope every command prints (and MCP returns as
 //! `structuredContent`): `{ok, data, error, meta}`. `meta` always carries
 //! `latency_ms`, `truncated`, `next`; paged and search results add more.
+//! HTTP `/v1` uses the same four keys; LapisProblem fields on `error` are extra.
 
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::error::LapisError;
 use crate::lattice::Latency;
+
+/// Frozen `meta.api_version` for the operator HTTP API.
+pub const API_VERSION: &str = "1.0.0";
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Meta {
@@ -25,6 +29,17 @@ pub struct Meta {
     pub limit: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<u32>,
+    /// HTTP `/v1` only: const `"1.0.0"`. Omitted on CLI so existing envelopes stay small.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_version: Option<&'static str>,
+    /// HTTP search: every required backend for this query actually ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_capable: Option<bool>,
+    /// Present when a page or body is a prefix. Not a substitute for `index_gap`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incomplete: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 impl Meta {
@@ -44,13 +59,43 @@ impl Meta {
         self.latency_ms = ms;
         self
     }
+    /// Stamp the HTTP API version. CLI envelopes leave `api_version` unset.
+    pub fn with_api_version(mut self) -> Self {
+        self.api_version = Some(API_VERSION);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Diagnostic {
+    pub fact: String,
+    pub value: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Recovery {
+    pub action: &'static str,
+    pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_inventory_allowed: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ErrorBody {
+    /// Forensic code (HTTP LapisProblem). Omitted on legacy CLI errors.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<&'static str>,
     pub kind: &'static str,
     pub message: String,
     pub exit: i32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<Diagnostic>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recovery: Vec<Recovery>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub miss_id: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,7 +114,15 @@ pub fn err(e: &LapisError, latency_ms: f64) -> Envelope<Value> {
     Envelope {
         ok: false,
         data: None,
-        error: Some(ErrorBody { kind: e.kind(), message: e.message().to_string(), exit: e.exit_code() }),
+        error: Some(ErrorBody {
+            code: None,
+            kind: e.kind(),
+            message: e.message().to_string(),
+            exit: e.exit_code(),
+            diagnostics: vec![],
+            recovery: vec![],
+            miss_id: None,
+        }),
         meta: Meta { latency_ms, ..Meta::default() },
     }
 }
