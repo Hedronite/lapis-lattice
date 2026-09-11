@@ -47,8 +47,10 @@ Or:
 ```bash
 cargo install --git https://github.com/VirtualMachinist/lapis-lattice --locked --bin lapis
 lapis init ~/Notes
-export LAPIS_VAULT=~/Notes
 ```
+
+`init` records the vault in `~/.config/lapis/config.toml`, so a bare `lapis`
+finds it. `--vault` and `$LAPIS_VAULT` override it per command.
 
 Do **not** run `cargo install lapis` (someone else’s yanked crate), `brew install lapis` (no formula yet), or anything from `lapis.sh` (not us).
 
@@ -56,7 +58,7 @@ Full contract: [docs/install.md](docs/install.md).
 
 ## First run
 
-There is **no default vault**. A bare `lapis` without `--vault`, `$LAPIS_VAULT`, or config `vault` exits 1 and tells you to `lapis init`.
+There is **no implicit default vault**: nothing is guessed. A bare `lapis` with no `--vault`, no `$LAPIS_VAULT` and no config `vault` exits 1 and tells you to run `lapis init <path>`, which creates a vault and records it so the next run resolves.
 
 Default search, list, neighbors (hop-1), and doctor talk to the embedded index. They open **no listening socket**. Hop-2 ego and `tree-retrieve` on embedded say they require `lattice.mode = http` rather than failing empty.
 

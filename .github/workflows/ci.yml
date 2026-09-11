@@ -30,11 +30,30 @@ jobs:
       - name: no vault configured is usage (exit 1), not lattice-down
         run: |
           unset LAPIS_VAULT
+          # An empty config home, so this asserts the resolver and not whatever
+          # a previous step left in the runner's real config.
+          export XDG_CONFIG_HOME="$(mktemp -d)"
           set +e
           ./target/release/lapis --json vault info
           code=$?
           set -e
           test "$code" -eq 1
+      - name: init records the vault, so a bare lapis resolves it
+        run: |
+          unset LAPIS_VAULT
+          export XDG_CONFIG_HOME="$(mktemp -d)"
+          tmp=$(mktemp -d)
+          ./target/release/lapis init "$tmp" | tee init.txt
+          grep -q 'configured:' init.txt
+          grep -q 'vault = ' "$XDG_CONFIG_HOME/lapis/config.toml"
+          # no --vault, no environment: the config alone has to carry it
+          ./target/release/lapis --json vault info | tee info.json
+          grep -q '"ok": true' info.json
+          ./target/release/lapis --json search welcome --embedder none | grep -q '"ok": true'
+          # a second init somewhere else never steals the configured vault
+          other=$(mktemp -d)
+          ./target/release/lapis init "$other" | grep -q 'left alone'
+          grep -q "$tmp" "$XDG_CONFIG_HOME/lapis/config.toml"
       - name: init then read without HTTP
         run: |
           tmp=$(mktemp -d)
@@ -48,6 +67,12 @@ jobs:
           ./target/release/lapis --vault "$tmp" --json search welcome --embedder none | grep -q '"ok": true'
           ./target/release/lapis --vault "$tmp" --json list | grep -q '"hash"'
           ./target/release/lapis --vault "$tmp" doctor
+      - name: TUI and desktop subcommands are wired in the shipped binary
+        run: |
+          ./target/release/lapis tui --help | grep -q 'Terminal UI'
+          tmp=$(mktemp -d)
+          ./target/release/lapis init "$tmp"
+          ./target/release/lapis --vault "$tmp" desktop --check | grep -q 'gpui='
       - name: hop-2 is honest, not silently empty (B11)
         run: |
           tmp=$(mktemp -d)

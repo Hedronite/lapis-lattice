@@ -3,7 +3,7 @@
 //! Unknown sections are ignored so later slices can add theirs without
 //! breaking this parser.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -187,6 +187,115 @@ pub fn load() -> Result<Config> {
     }
 }
 
+/// What [`remember_vault`] did, so the caller can say it out loud.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Remembered {
+    /// `vault` was written into the config file at this path.
+    Wrote(PathBuf),
+    /// The config already names a vault. An existing choice is never
+    /// overwritten by an `init` of somewhere else.
+    AlreadySet(String),
+    /// There is no home or `XDG_CONFIG_HOME` to write into.
+    NoConfigDir,
+}
+
+/// Record `vault` as the configured default, so the next bare `lapis` resolves.
+///
+/// Creating a vault and then leaving nothing behind that points at it is what
+/// made `no vault configured` a loop: the error told you to run `lapis init`,
+/// and running it changed nothing the resolver reads. This closes that.
+///
+/// It is not an implicit default: the operator named the path. An existing
+/// `vault` key is left alone.
+pub fn remember_vault(vault: &str) -> Result<Remembered> {
+    let Some(path) = config_path() else {
+        return Ok(Remembered::NoConfigDir);
+    };
+    remember_vault_at(&path, vault)
+}
+
+/// [`remember_vault`] against an explicit config path.
+///
+/// An existing file is edited rather than rewritten: the `vault` line is
+/// inserted above the first table header so it lands in the top-level table,
+/// and every other byte, comment and ordering included, is kept.
+pub fn remember_vault_at(path: &Path, vault: &str) -> Result<Remembered> {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(LapisError::Usage(format!("config {}: {e}", path.display()))),
+    };
+
+    if let Some(text) = &existing {
+        let parsed: Config =
+            toml::from_str(text).map_err(|e| LapisError::Usage(format!("config {}: {e}", path.display())))?;
+        if let Some(v) = parsed.vault.filter(|v| !v.trim().is_empty()) {
+            return Ok(Remembered::AlreadySet(v));
+        }
+    }
+
+    let line = format!(
+        "vault = {}
+",
+        toml_string(vault)
+    );
+    let next = match existing {
+        None => format!(
+            "# Written by `lapis init`.\n\
+             # Remove this line to go back to naming a vault every time; both\n\
+             # --vault and $LAPIS_VAULT still win over it.\n\
+             {line}"
+        ),
+        Some(text) => insert_top_level(&text, &line),
+    };
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, next)?;
+    Ok(Remembered::Wrote(path.to_path_buf()))
+}
+
+/// Put `line` in the top-level table: above the first `[section]`, or at the
+/// end when the file has none.
+fn insert_top_level(text: &str, line: &str) -> String {
+    match text.lines().position(|l| l.trim_start().starts_with('[')) {
+        Some(i) => {
+            let mut out: Vec<&str> = text.lines().collect();
+            out.splice(i..i, [line.trim_end(), ""]);
+            let mut joined = out.join("\n");
+            joined.push('\n');
+            joined
+        }
+        None => {
+            let mut out = text.to_string();
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(line);
+            out
+        }
+    }
+}
+
+/// A TOML basic string. Paths are the only thing we write, and a path may
+/// contain a quote or a backslash on a bad day.
+fn toml_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Expand a leading `~` to the home directory. No other shell expansion.
 pub fn expand_tilde(p: &str) -> PathBuf {
     if let Some(rest) = p.strip_prefix("~/") {
@@ -204,6 +313,77 @@ pub fn expand_tilde(p: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("lapis-cfg-{name}-{}-{n}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d.join("config.toml")
+    }
+
+    /// `init` has to leave something behind that the resolver reads, or
+    /// "no vault configured" sends you to a command that changes nothing.
+    #[test]
+    fn remember_vault_writes_a_config_the_loader_reads_back() {
+        let path = scratch("fresh");
+        let wrote = remember_vault_at(&path, "/home/x/Notes").unwrap();
+        assert_eq!(wrote, Remembered::Wrote(path.clone()));
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let cfg: Config = toml::from_str(&text).unwrap();
+        assert_eq!(cfg.vault.as_deref(), Some("/home/x/Notes"));
+        assert!(text.starts_with('#'), "the file says who wrote it and how to undo it");
+
+        // Running init again never overwrites a vault the operator already has.
+        let again = remember_vault_at(&path, "/home/x/Somewhere-Else").unwrap();
+        assert_eq!(again, Remembered::AlreadySet("/home/x/Notes".into()));
+        let after: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after.vault.as_deref(), Some("/home/x/Notes"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// An existing config is edited, not rewritten: the new key has to land in
+    /// the top-level table, above the first section, with everything else kept.
+    #[test]
+    fn remember_vault_preserves_an_existing_config() {
+        let path = scratch("existing");
+        let before = "# my notes\ntimeout_scratch = 1\n\n[lattice]\nmode = \"http\"\nurl = \"http://127.0.0.1:9999\"\n";
+        std::fs::write(&path, before).unwrap();
+        assert_eq!(remember_vault_at(&path, "/vaults/a").unwrap(), Remembered::Wrote(path.clone()));
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# my notes"), "comments survive");
+        let cfg: Config = toml::from_str(&text).unwrap();
+        assert_eq!(cfg.vault.as_deref(), Some("/vaults/a"));
+        assert_eq!(cfg.lattice.mode, "http", "the other sections are untouched");
+        assert_eq!(cfg.lattice.url, "http://127.0.0.1:9999");
+        assert!(
+            text.find("vault = ").unwrap() < text.find("[lattice]").unwrap(),
+            "the key is in the top-level table, not inside [lattice]"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn remember_vault_refuses_to_touch_a_malformed_config() {
+        let path = scratch("broken");
+        std::fs::write(&path, "this is not toml = = =\n").unwrap();
+        let e = remember_vault_at(&path, "/vaults/a").unwrap_err();
+        assert_eq!(e.exit_code(), 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "this is not toml = = =\n");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_path_with_a_quote_round_trips() {
+        let path = scratch("quote");
+        remember_vault_at(&path, r#"/vaults/od"d\path"#).unwrap();
+        let cfg: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cfg.vault.as_deref(), Some(r#"/vaults/od"d\path"#));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
 
     #[test]
     fn defaults_when_sections_missing() {

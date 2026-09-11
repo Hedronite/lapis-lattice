@@ -21,7 +21,7 @@ use serde::Serialize;
 
 pub use analytics::{ANALYTICS_QUERIES, Analytics};
 pub use embed::Embedder;
-pub use graph::Neighbor;
+pub use graph::{GraphEdge, GraphNode, GraphSnapshot, Neighbor, SNAPSHOT_NODE_CAP};
 pub use kinds::{HTML, MARKDOWN, YAML, kind_for};
 
 /// Written into `meta.producer` at creation; asserted on open.
@@ -260,6 +260,15 @@ impl Engine {
     /// `lapis list`: the documents table, filtered and paged.
     pub fn documents(&self, p: &ListParams) -> Result<Vec<Document>> {
         sqlite::documents(&self.conn, p)
+    }
+
+    /// Whole-vault graph for the canvas: one node per indexed document plus one
+    /// per dangling link target, one edge per wikilink, degree = in + out.
+    ///
+    /// This is the **global** graph. [`Engine::neighbors`] is hop-1 and the
+    /// desktop's hop-ring walk is a local view; neither is this.
+    pub fn graph_snapshot(&self) -> Result<GraphSnapshot> {
+        graph::snapshot(&self.conn, &self.vault.display().to_string(), SNAPSHOT_NODE_CAP)
     }
 
     pub fn neighbors(&self, path: &str, direction: &str) -> Result<Vec<Neighbor>> {

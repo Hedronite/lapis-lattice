@@ -159,8 +159,10 @@ else
   exit 0
 fi
 
+# `init` creates the vault, indexes it, and records it in the config, so the
+# commands printed below work as typed with no environment to set first.
 "$BIN_DIR/lapis" init "$VAULT"
-echo "lapis-install: export LAPIS_VAULT=$VAULT"
+echo "lapis-install: vault $VAULT is configured; override per command with --vault or \$LAPIS_VAULT"
 echo
 echo "  lapis                     terminal UI"
 echo "  lapis search \"welcome\"    keyword search, no daemon"

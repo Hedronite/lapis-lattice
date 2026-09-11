@@ -319,3 +319,47 @@ fn engine_err(e: lapis_lattice::Error) -> LapisError {
         lapis_lattice::Error::Sqlite(s) => LapisError::LatticeDown(format!("index: {s}")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// B11, and G2f in v0.3: the desktop may walk the whole index, but the CLI
+    /// must not quietly grow a hop-2 answer on the embedded backend. It names
+    /// the setting that would give one, and it fails with the usage exit code
+    /// rather than returning an empty graph that looks like "no neighbours".
+    #[tokio::test]
+    async fn embedded_hop2_and_tree_still_require_http_mode() {
+        let d = std::env::temp_dir().join(format!(
+            "lapis-b11-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("Welcome.md"), "# Welcome\n\nSee [[Alpha]].\n").unwrap();
+        std::fs::write(d.join("Alpha.md"), "# Alpha\n\nBack to [[Welcome]].\n").unwrap();
+        let mut e = lapis_lattice::Engine::open(&d).unwrap();
+        e.reindex().unwrap();
+        let b = Backend::Embedded(std::sync::Arc::new(std::sync::Mutex::new(e)));
+        assert_eq!(b.mode(), "embedded");
+
+        // hop-1 is answered locally, so this is not "the backend does nothing".
+        let hop1 = b.neighbors("Welcome.md", "both", false).await.unwrap();
+        assert_eq!(hop1.hop, 1);
+        assert!(!hop1.neighbors.is_empty());
+
+        for err in [
+            b.ego("Welcome.md", 2, "both", false).await.err(),
+            b.tree(Some("Welcome.md"), None, 2, 50).await.err(),
+        ] {
+            match err {
+                Some(LapisError::Usage(m)) => {
+                    assert!(m.contains("lattice.mode"), "names the setting: {m}");
+                    assert!(m.contains("http"), "names the mode: {m}");
+                }
+                other => panic!("expected a usage error naming lattice.mode, got {other:?}"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
