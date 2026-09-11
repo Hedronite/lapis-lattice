@@ -98,8 +98,8 @@ mod window {
     use gpui_kit::{
         App, AppContext, Bounds, Context, Corners, Edges, FocusHandle, Hsla, InteractiveElement, IntoElement,
         KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, ParentElement,
-        PathBuilder, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, Size, StatefulInteractiveElement,
-        Styled, Window, WindowOptions, canvas, div, point, px,
+        Path, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, Size, StatefulInteractiveElement, Styled,
+        Window, WindowOptions, canvas, div, point, px,
     };
     use gpui_omarchy::{ActiveTheme, panel};
 
@@ -568,6 +568,56 @@ mod window {
         }
     }
 
+    /// One path holding every hairline as a pair of triangles.
+    ///
+    /// `PathBuilder` runs each segment through lyon's stroke tessellator, which
+    /// costs about a microsecond apiece; at four thousand edges that was most of
+    /// the frame budget. A straight hairline is a rectangle and a rectangle is
+    /// two triangles, so the geometry goes to gpui directly instead of being
+    /// derived by a tessellator that is built for curves we do not draw. The
+    /// `st` coordinates are the ones gpui's own `line_to` uses for a solid
+    /// triangle, and every quad is wound the same way.
+    fn segments_path(segs: &[[f32; 4]], width: f32, origin: Point<Pixels>) -> Option<Path<Pixels>> {
+        let first = segs.first()?;
+        let at = |x: f32, y: f32| Point { x: origin.x + px(x), y: origin.y + px(y) };
+        let solid = (point(0., 1.), point(0., 1.), point(0., 1.));
+        let mut path = Path::new(at(first[0], first[1]));
+        let half = (width / 2.0).max(0.35);
+        for s in segs {
+            let (dx, dy) = (s[2] - s[0], s[3] - s[1]);
+            let len = (dx * dx + dy * dy).sqrt();
+            if len <= f32::EPSILON || !len.is_finite() {
+                continue;
+            }
+            let (nx, ny) = (-dy / len * half, dx / len * half);
+            let a = at(s[0] + nx, s[1] + ny);
+            let b = at(s[0] - nx, s[1] - ny);
+            let c = at(s[2] - nx, s[3] - ny);
+            let d = at(s[2] + nx, s[3] + ny);
+            path.push_triangle((a, b, c), solid);
+            path.push_triangle((a, c, d), solid);
+        }
+        Some(path)
+    }
+
+    /// Cut a segment into dash runs. A link that resolves to nothing is drawn
+    /// dashed, and a hand-built path has to produce the gaps itself.
+    fn dashes(seg: [f32; 4], on: f32, off: f32, out: &mut Vec<[f32; 4]>) {
+        let (dx, dy) = (seg[2] - seg[0], seg[3] - seg[1]);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len <= f32::EPSILON || !len.is_finite() {
+            return;
+        }
+        let (ux, uy) = (dx / len, dy / len);
+        let step = (on + off).max(0.5);
+        let mut t = 0.0f32;
+        while t < len {
+            let end = (t + on).min(len);
+            out.push([seg[0] + ux * t, seg[1] + uy * t, seg[0] + ux * end, seg[1] + uy * end]);
+            t += step;
+        }
+    }
+
     /// A hollow rectangle, for the debug overlay's label boxes.
     fn outline(x: f32, y: f32, w: f32, h: f32, origin: Point<Pixels>, colour: Hsla) -> PaintQuad {
         PaintQuad {
@@ -637,33 +687,30 @@ mod window {
                     board_px.set((f32::from(bounds.size.width), f32::from(bounds.size.height)));
                     let at = |x: f32, y: f32| point(bounds.origin.x + px(x), bounds.origin.y + px(y));
 
-                    // Every stroke of one colour goes into one path. Tessellating
-                    // four thousand separate hairlines per frame was the whole
-                    // frame budget; four subpath batches is a rounding error.
-                    // The buckets are (solid|dashed) x (lit|dimmed), which is
-                    // every distinct colour a stroke can have.
-                    let mut batch: [Option<PathBuilder>; 4] = [None, None, None, None];
+                    // Every stroke of one colour goes into one path. The
+                    // buckets are (solid|dashed) x (lit|dimmed), which is every
+                    // distinct colour a stroke can have.
+                    let mut batch: [Vec<[f32; 4]>; 4] = Default::default();
+                    let mut width = super::view::STROKE_PX;
                     for p in &prims {
-                        if let Prim::Stroke { x0, y0, x1, y1, width, dashed, alpha } = p {
+                        if let Prim::Stroke { x0, y0, x1, y1, width: w, dashed, alpha } = p {
+                            width = *w;
                             let slot = usize::from(*dashed) | (usize::from(*alpha < FULL_ALPHA) << 1);
-                            let b = batch[slot].get_or_insert_with(|| {
-                                let mut b = PathBuilder::stroke(px(*width));
-                                if *dashed {
-                                    b = b.dash_array(&[
-                                        px(super::view::DASH_PX[0]),
-                                        px(super::view::DASH_PX[1]),
-                                    ]);
-                                }
-                                b
-                            });
-                            b.move_to(at(*x0, *y0));
-                            b.line_to(at(*x1, *y1));
+                            if *dashed {
+                                dashes(
+                                    [*x0, *y0, *x1, *y1],
+                                    super::view::DASH_PX[0],
+                                    super::view::DASH_PX[1],
+                                    &mut batch[slot],
+                                );
+                            } else {
+                                batch[slot].push([*x0, *y0, *x1, *y1]);
+                            }
                         }
                     }
-                    for (slot, b) in batch.into_iter().enumerate() {
-                        let Some(b) = b else { continue };
+                    for (slot, segs) in batch.iter().enumerate() {
                         let alpha = if slot & 2 != 0 { DIM_ALPHA } else { FULL_ALPHA };
-                        if let Ok(path) = b.build() {
+                        if let Some(path) = segments_path(segs, width, bounds.origin) {
                             window.paint_path(path, with_alpha(edge_c, alpha));
                         }
                     }
@@ -1009,8 +1056,8 @@ mod tests {
         assert!(src.contains("view::paint"), "window consumes the view paint list");
         assert!(src.contains("gpui_omarchy::init"), "window is gpui-omarchy, not Zed-gpui");
         assert!(src.contains("Prim::Stroke"), "edges are strokes, not dot runs");
-        assert!(src.contains("PathBuilder::stroke"), "hairlines, not dotted quads");
-        assert!(src.contains("dash_array"), "a dangling link is dashed by the tessellator");
+        assert!(src.contains("push_triangle"), "hairlines are geometry, not dotted quads");
+        assert!(src.contains("fn dashes"), "a dangling link is drawn dashed");
         assert!(src.contains("on_scroll_wheel"), "wheel zooms");
         assert!(src.contains("on_key_down"), "+/- zoom and arrows pan");
         assert!(src.contains("pan_by"), "drag on empty space pans the camera");
