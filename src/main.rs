@@ -1,8 +1,8 @@
 //! `lapis` — one Rust binary: CLI, MCP (`lapis mcp`), Ratatui TUI.
 //!
 //! Files on disk are the write source of truth. Search, list, and graph
-//! currently read an HTTP lattice; an embedded index is the 0.2 path.
-//! This binary never writes `lattice.db`.
+//! read the embedded SQLite index by default. HTTP lattice is opt-in
+//! (`lattice.mode = "http"` or `--lattice`). This binary never writes `lattice.db`.
 
 mod backend;
 mod cli;
