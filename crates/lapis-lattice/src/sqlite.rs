@@ -125,15 +125,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             path TEXT NOT NULL REFERENCES documents(path) ON DELETE CASCADE,
             chunk_index INTEGER NOT NULL,
             heading TEXT,
-            text TEXT NOT NULL
-        );
-        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-            text,
-            path UNINDEXED,
-            heading UNINDEXED,
-            content='chunks',
-            content_rowid='chunk_id',
-            tokenize = 'porter'
+            text TEXT NOT NULL,
+            title TEXT
         );
         CREATE TABLE IF NOT EXISTS edges (
             src TEXT NOT NULL,
@@ -152,6 +145,47 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1');
         INSERT OR IGNORE INTO meta(key, value) VALUES ('embed_model', 'none');
         "#,
+    )?;
+    // Pre-G1 vaults have chunks without title and FTS with path UNINDEXED.
+    let _ = conn.execute("ALTER TABLE chunks ADD COLUMN title TEXT", []);
+    ensure_chunks_fts(conn)?;
+    Ok(())
+}
+
+/// Body BM25 plus identifier columns. `path` and HAL `title` are indexed;
+/// `heading` stays UNINDEXED. External content still points at `chunks`.
+pub fn create_chunks_fts(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+            text,
+            path,
+            heading UNINDEXED,
+            title,
+            content='chunks',
+            content_rowid='chunk_id',
+            tokenize = 'porter'
+        );"#,
+    )?;
+    Ok(())
+}
+
+fn chunks_fts_is_identifier_schema(sql: &str) -> bool {
+    let l = sql.to_lowercase();
+    !l.contains("path unindexed") && l.contains("title") && !l.contains("title unindexed")
+}
+
+/// Rebuild FTS when an older file still has `path UNINDEXED` and no title column.
+fn ensure_chunks_fts(conn: &Connection) -> Result<()> {
+    let sql: Option<String> =
+        conn.query_row("SELECT sql FROM sqlite_master WHERE name = 'chunks_fts'", [], |r| r.get(0)).ok();
+    if sql.as_deref().is_some_and(chunks_fts_is_identifier_schema) {
+        return Ok(());
+    }
+    conn.execute_batch("DROP TABLE IF EXISTS chunks_fts;")?;
+    create_chunks_fts(conn)?;
+    conn.execute_batch(
+        "INSERT INTO chunks_fts(rowid, text, path, heading, title)
+         SELECT chunk_id, text, path, heading, COALESCE(title, '') FROM chunks;",
     )?;
     Ok(())
 }
