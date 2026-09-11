@@ -438,6 +438,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// G0b: query `AGENTS.md` through the shipped `search_with` on a temp vault
+    /// that indexes that file. Empty hits while it is indexed is a fail.
+    #[test]
+    fn search_agents_md_hits_indexed_file() {
+        let d = vault();
+        std::fs::write(
+            d.join("AGENTS.md"),
+            "---\nname: AGENTS\n---\n# AGENTS.md\n\nHalo copilot notes for this vault.\n",
+        )
+        .unwrap();
+        let mut e = Engine::open(&d).unwrap();
+        e.reindex().unwrap();
+        let indexed = e.documents(&ListParams { limit: 50, ..Default::default() }).unwrap();
+        assert!(
+            indexed.iter().any(|r| r.path == "AGENTS.md"),
+            "fixture AGENTS.md must be in the index before search"
+        );
+
+        let res = e
+            .search_with(&SearchParams {
+                query: "AGENTS.md".into(),
+                limit: 10,
+                embedder: Some("none".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            res.hits.iter().any(|h| h.path == "AGENTS.md"),
+            "AGENTS.md must be in hits while indexed, got {:?}",
+            res.hits.iter().map(|h| &h.path).collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// B10: documents query with filters and paging, carrying hash.
     #[test]
     fn documents_filter_and_page() {

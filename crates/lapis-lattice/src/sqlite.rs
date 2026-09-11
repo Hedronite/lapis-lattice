@@ -189,12 +189,14 @@ pub fn meta_set(conn: &Connection, key: &str, value: &str) -> Result<()> {
 }
 
 /// Turn a user query into an FTS5 MATCH expression: keep word characters,
-/// quote each term, AND them together.
+/// quote each term, AND them together. `.` is a separator (`AGENTS.md` →
+/// `"AGENTS" "md"`); stripping it would concatenate into `AGENTSmd`.
 fn fts_expr(q: &str) -> String {
     q.split_whitespace()
-        .map(|w| {
+        .flat_map(|w| w.split('.'))
+        .filter_map(|w| {
             let t: String = w.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-').collect();
-            if t.is_empty() { w.to_string() } else { format!("\"{t}\"") }
+            if t.is_empty() { None } else { Some(format!("\"{t}\"")) }
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -469,4 +471,19 @@ pub fn health(conn: &Connection, db_path: &Path) -> Result<Health> {
         embed_dim,
         graph: Graph { built, edges, dangling_links },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fts_expr;
+
+    /// G0a: dotted filenames must not fold into a single synthetic token.
+    #[test]
+    fn dotted_tokens_are_not_concatenated() {
+        let expr = fts_expr("AGENTS.md");
+        assert!(!expr.contains("AGENTSmd"), "fold must not synthesize AGENTSmd: {expr}");
+        assert_eq!(expr, "\"AGENTS\" \"md\"");
+        assert_eq!(fts_expr("find AGENTS.md now"), "\"find\" \"AGENTS\" \"md\" \"now\"");
+        assert_eq!(fts_expr("GOAL-struct"), "\"GOAL-struct\"", "hyphens stay inside a token");
+    }
 }
