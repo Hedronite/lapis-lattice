@@ -475,7 +475,11 @@ pub fn list(root: &Path, filter: &Filter) -> Result<Vec<Task>> {
 mod tests {
     use super::*;
 
-    const NOTE: &str = "---\nname: Plan\ntags: [x]\n---\n# Plan\n\n- [ ] Write spec due:2026-09-10 !high #lapis @owner:fable\n- [x] Old one\n> - [/] quoted in progress @waiting\n1. [-] cancelled numbered\n```\n- [ ] not a task (fenced)\n```\n- [>] forwarded @waiting\n* plain bullet\n";
+    /// The due dates here are deliberately far from any real "today". A fixture
+    /// dated the day it was written passes until the clock rolls over: this one
+    /// failed on a UTC runner the first midnight after it was added, because a
+    /// task due "today" became overdue while the same suite passed locally.
+    const NOTE: &str = "---\nname: Plan\ntags: [x]\n---\n# Plan\n\n- [ ] Write spec due:2099-12-31 !high #lapis @owner:fable\n- [x] Old one\n> - [/] quoted in progress @waiting\n1. [-] cancelled numbered\n```\n- [ ] not a task (fenced)\n```\n- [>] forwarded @waiting\n* plain bullet\n";
 
     #[test]
     fn parses_lines_with_tokens_and_skips_fences() {
@@ -484,7 +488,7 @@ mod tests {
         let first = &t[0];
         assert_eq!(first.id, "a/plan.md#0");
         assert_eq!(first.content, "Write spec");
-        assert_eq!(first.due.as_deref(), Some("2026-09-10"));
+        assert_eq!(first.due.as_deref(), Some("2099-12-31"));
         assert_eq!(first.priority.as_deref(), Some("high"));
         assert_eq!(first.tags, ["lapis"]);
         assert_eq!(first.fields["owner"], "fable");
@@ -502,7 +506,7 @@ mod tests {
     fn toggle_flips_only_the_checkbox() {
         let (next, checked) = toggle_in_text(NOTE, 0).unwrap();
         assert!(checked);
-        assert!(next.contains("- [x] Write spec due:2026-09-10 !high #lapis @owner:fable"));
+        assert!(next.contains("- [x] Write spec due:2099-12-31 !high #lapis @owner:fable"));
         let (back, checked) = toggle_in_text(&next, 0).unwrap();
         assert!(!checked);
         assert_eq!(back, NOTE);
@@ -601,9 +605,13 @@ mod tests {
         assert_eq!(list(&v, &f).unwrap().len(), 6);
         let open = list(&v, &Filter { status: Some("open".into()), ..Default::default() }).unwrap();
         assert_eq!(open.len(), 3);
+        // Only the 2020 task is past due, whatever day this runs on.
         let overdue = list(&v, &Filter { due: Some("overdue".into()), ..Default::default() }).unwrap();
         assert_eq!(overdue.len(), 1);
         assert_eq!(overdue[0].id, "inbox/q.md#0");
+        // And "today" is computed, never a date baked into a fixture.
+        let today_due = list(&v, &Filter { due: Some("today".into()), ..Default::default() }).unwrap();
+        assert!(today_due.is_empty(), "no fixture task is due on the day the suite happens to run");
 
         let t = toggle(&v, "notes/plan.md#0").unwrap();
         assert!(t.checked);
