@@ -93,9 +93,9 @@ paths:
                 ok: true
                 data:
                   ready: true
-                  vaultRoot: /Users/evan/Notes
+                  vaultRoot: /home/notes
                   backend: embedded
-                  source: /Users/evan/Notes/.lapis/lattice.sqlite
+                  source: /home/notes/.lapis/lattice.sqlite
                   reachable: true
                 error: null
                 meta:
@@ -184,12 +184,12 @@ paths:
                       modalities: [bm25, title]
                       count: 1
                       hits:
-                        - path: foundry/lapis/SPEC-api.md
+                        - path: notes/SPEC.md
                           kind: markdown
-                          title: SPEC-api
+                          title: SPEC
                           rank: 1
-                          domain: foundry
-                          doc_type: foundry-doc
+                          domain: notes
+                          doc_type: note
                     error: null
                     meta:
                       latency_ms: 12.4

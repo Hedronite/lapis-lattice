@@ -11,8 +11,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::body::Bytes;
-use axum::extract::{Path as AxumPath, RawQuery, State};
-use axum::http::StatusCode;
+use axum::extract::{Path as AxumPath, RawQuery, Request, State};
+use axum::http::{StatusCode, header::AUTHORIZATION};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -35,15 +36,26 @@ const FORENSIC_TREE: &str = "lapis.forensic.tree_retrieve.embedded";
 struct ApiState {
     ctx: Arc<Ctx>,
     backend: Backend,
+    /// Some when bind is not loopback; requests must send `Authorization: Bearer`.
+    token: Option<String>,
 }
 
-/// Serve `/v1` on loopback. Blocks until the listener fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindClass {
+    Loopback,
+    Private,
+    Public,
+}
+
+/// Serve `/v1`. Loopback needs no token. Private/Tailscale bind requires
+/// `LAPIS_API_TOKEN`. Public bind is out of scope.
 pub async fn serve(ctx: Ctx, args: ApiArgs) -> Result<()> {
     let bind = args.bind.unwrap_or_else(|| ctx.cfg.api.bind.clone());
     let port = args.port.unwrap_or(ctx.cfg.api.port);
-    let addr = listen_addr(&bind, port)?;
+    let env_token = std::env::var("LAPIS_API_TOKEN").ok().filter(|s| !s.is_empty());
+    let (addr, token) = bind_policy(&bind, port, env_token.as_deref())?;
     let backend = ctx.backend()?;
-    let state = ApiState { ctx: Arc::new(ctx), backend };
+    let state = ApiState { ctx: Arc::new(ctx), backend, token };
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| LapisError::Internal(format!("bind {addr}: {e}")))?;
@@ -56,14 +68,77 @@ fn listen_addr(bind: &str, port: u16) -> Result<SocketAddr> {
     let ip: IpAddr = host
         .parse()
         .map_err(|_| LapisError::Usage(format!("invalid api.bind {bind:?}; expected an IP address")))?;
-    if !ip.is_loopback() {
-        return Err(LapisError::Usage(
-            "api.bind must be loopback (127.0.0.1 / ::1). Non-loopback needs LAPIS_API_TOKEN; \
-             public bind is out of scope."
-                .into(),
-        ));
-    }
     Ok(SocketAddr::new(ip, port))
+}
+
+fn bind_class(ip: IpAddr) -> BindClass {
+    match ip {
+        IpAddr::V4(v) if v.is_loopback() => BindClass::Loopback,
+        IpAddr::V6(v) if v.is_loopback() => BindClass::Loopback,
+        IpAddr::V4(v) if v.is_private() || v.is_link_local() || is_cgnat(v) => BindClass::Private,
+        IpAddr::V6(v) if v.is_unique_local() || v.is_unicast_link_local() => BindClass::Private,
+        _ => BindClass::Public,
+    }
+}
+
+fn is_cgnat(ip: std::net::Ipv4Addr) -> bool {
+    let o = ip.octets();
+    o[0] == 100 && (64..128).contains(&o[1])
+}
+
+fn bind_policy(bind: &str, port: u16, token: Option<&str>) -> Result<(SocketAddr, Option<String>)> {
+    let addr = listen_addr(bind, port)?;
+    match bind_class(addr.ip()) {
+        BindClass::Loopback => Ok((addr, None)),
+        BindClass::Public => Err(LapisError::Usage(
+            "public bind is out of scope; api.bind must be loopback or a private/Tailscale address".into(),
+        )),
+        BindClass::Private => match token {
+            Some(t) => Ok((addr, Some(t.to_string()))),
+            None => Err(LapisError::Usage(
+                "LAPIS_API_TOKEN required when api.bind is not loopback (set the env or bind 127.0.0.1)"
+                    .into(),
+            )),
+        },
+    }
+}
+
+async fn require_token(State(st): State<ApiState>, req: Request, next: Next) -> Response {
+    let Some(expect) = st.token.as_deref() else {
+        return next.run(req).await;
+    };
+    let got = req
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    if got == Some(expect) {
+        return next.run(req).await;
+    }
+    err_json(
+        StatusCode::UNAUTHORIZED,
+        ErrorBody {
+            code: Some("unauthorized"),
+            kind: "auth",
+            message: "LAPIS_API_TOKEN required when api.bind is not loopback".into(),
+            exit: 1,
+            diagnostics: vec![],
+            recovery: vec![
+                Recovery {
+                    action: "set_token",
+                    detail: "set LAPIS_API_TOKEN (Halo secret store or env)".into(),
+                    disk_inventory_allowed: None,
+                },
+                Recovery {
+                    action: "bind_loopback",
+                    detail: "default api.bind=127.0.0.1 does not require a token".into(),
+                    disk_inventory_allowed: None,
+                },
+            ],
+            miss_id: None,
+        },
+        Meta::default().with_api_version(),
+    )
 }
 
 fn router(state: ApiState) -> Router {
@@ -80,6 +155,7 @@ fn router(state: ApiState) -> Router {
         .route("/v1/reindex", post(reindex_handler))
         .fallback(unknown)
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
+        .layer(middleware::from_fn_with_state(state.clone(), require_token))
         .with_state(state)
 }
 
@@ -156,9 +232,9 @@ struct ReadyData {
 }
 
 #[derive(Serialize)]
-struct PathsSearchData {
-    count: usize,
-    hits: Vec<PathHit>,
+pub(crate) struct PathsSearchData {
+    pub count: usize,
+    pub hits: Vec<PathHit>,
 }
 
 #[derive(Debug, Default)]
@@ -485,12 +561,12 @@ pub async fn search_v1(backend: &Backend, req: SearchRequest) -> SearchV1 {
     SearchV1::Ok { data, meta }
 }
 
-enum PathsV1 {
+pub(crate) enum PathsV1 {
     Ok { data: PathsSearchData, meta: Meta },
     Err { status: StatusCode, error: ErrorBody, meta: Meta },
 }
 
-async fn paths_search_v1(backend: &Backend, req: &PathsSearchRequest) -> PathsV1 {
+pub(crate) async fn paths_search_v1(backend: &Backend, req: &PathsSearchRequest) -> PathsV1 {
     match backend.paths_search(&req.pattern, req.match_kind.into(), req.limit).await {
         Ok(hits) => {
             let count = hits.len();
@@ -599,7 +675,7 @@ async fn neighbors_v1(backend: &Backend, path: &str, q: &NeighborsQuery) -> ApiV
 }
 
 /// Shipped treeRetrievePost entry point. Embedded is a forensic miss, never a string-only usage.
-async fn tree_retrieve_v1(backend: &Backend, req: TreeRetrieveRequest) -> ApiV1<lattice::Tree> {
+pub(crate) async fn tree_retrieve_v1(backend: &Backend, req: TreeRetrieveRequest) -> ApiV1<lattice::Tree> {
     if backend.mode() == "embedded" {
         return ApiV1::Err {
             status: StatusCode::CONFLICT,
@@ -1084,11 +1160,10 @@ mod tests {
     use tower::ServiceExt;
 
     fn temp_vault() -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "lapis-a1-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let d = std::env::temp_dir().join(format!("lapis-a1-{}-{n}-{seq}", std::process::id()));
         std::fs::create_dir_all(d.join("agents")).unwrap();
         std::fs::write(
             d.join("Welcome.md"),
@@ -1156,8 +1231,13 @@ mod tests {
     fn listen_addr_loopback_only() {
         assert!(listen_addr("127.0.0.1", 18765).is_ok());
         assert!(listen_addr("localhost", 18765).is_ok());
-        assert!(listen_addr("0.0.0.0", 18765).is_err());
-        assert!(listen_addr("100.89.131.70", 18765).is_err());
+        let loopback = bind_policy("127.0.0.1", 18765, None).unwrap();
+        assert!(loopback.1.is_none());
+        assert!(bind_policy("0.0.0.0", 18765, None).is_err());
+        assert!(bind_policy("8.8.8.8", 18765, Some("tok")).is_err());
+        assert!(bind_policy("100.89.131.70", 18765, None).is_err());
+        let ts = bind_policy("100.89.131.70", 18765, Some("secret")).unwrap();
+        assert_eq!(ts.1.as_deref(), Some("secret"));
     }
 
     #[test]
@@ -1416,6 +1496,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[tokio::test]
+    async fn bearer_required_when_token_configured() {
+        let mut st = dummy_state();
+        st.token = Some("secret".into());
+        let app = router(st);
+        let res =
+            app.oneshot(Request::builder().uri("/v1/health").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"]["code"], "unauthorized");
+        assert_eq!(v["error"]["kind"], "auth");
+    }
+
     fn dummy_state() -> ApiState {
         let d = temp_vault();
         let backend = backend_for(&d);
@@ -1429,6 +1524,6 @@ mod tests {
             lattice_url: crate::config::DEFAULT_LATTICE_URL.into(),
             force_http: false,
         };
-        ApiState { ctx: Arc::new(ctx), backend }
+        ApiState { ctx: Arc::new(ctx), backend, token: None }
     }
 }

@@ -110,6 +110,7 @@ async fn dispatch(ctx: Ctx, cmd: Command) -> Result<()> {
         Command::Init(_) => unreachable!("init is handled before vault resolve"),
         Command::Vault { command: VaultCommand::Info } => vault_info(&ctx).await,
         Command::Search(args) => search(&ctx, args).await,
+        Command::PathsSearch(args) => paths_search(&ctx, args).await,
         Command::Read(args) => read(&ctx, args),
         Command::Neighbors(args) => neighbors(&ctx, args).await,
         Command::Resolve(args) => resolve_link(&ctx, args),
@@ -209,6 +210,29 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
             "vector mode needs an embedder; got --embedder none. Use --mode bm25|hybrid.".into(),
         ));
     }
+    // Extra CLI flags (embedder/mmr/archives) still hit Engine search; filename-like
+    // queries share searchPost's path-channel fuse via search_v1 when those are off.
+    if args.embedder.is_none() && !args.mmr && !args.include_archives {
+        let req = api::SearchRequest {
+            query: args.query_text(),
+            limit,
+            offset,
+            domain: args.domain.clone(),
+            mode: args.mode,
+            per_doc: args.effective_per_doc(ctx.cfg.agent.per_doc),
+        };
+        return match api::search_v1(&ctx.backend()?, req).await {
+            api::SearchV1::Ok { data, meta } => {
+                if ctx.json {
+                    emit_with(&data, meta)
+                } else {
+                    print_search_hits(&data);
+                    Ok(())
+                }
+            }
+            api::SearchV1::Err { error, .. } => Err(lapis_from_problem(&error)),
+        };
+    }
     let params = SearchParams {
         query: args.query_text(),
         top_k: requested,
@@ -220,7 +244,6 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
         embedder: args.embedder.clone(),
     };
     let mut result = ctx.backend()?.search(&params).await?;
-    // The lattice has no offset; ask for offset+limit and drop the head. Ranks stay absolute.
     let total = result.hits.len();
     result.hits = result.hits.into_iter().skip(offset as usize).collect();
     result.count = result.hits.len();
@@ -237,9 +260,14 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
         };
         return emit_with(&result, meta);
     }
+    print_search_hits(&result);
+    Ok(())
+}
+
+fn print_search_hits(result: &lattice::SearchResult) {
     if result.hits.is_empty() {
         println!("No lattice hits for {:?}.", result.query);
-        return Ok(());
+        return;
     }
     for h in &result.hits {
         let rank = h.rank.map(|r| format!("{r:>2}.")).unwrap_or_else(|| "  ".into());
@@ -255,7 +283,45 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
     if let Some(ms) = result.latency_ms {
         eprintln!("{} hits · lattice {:.0} ms · {}", result.count, ms, result.modalities.join("+"));
     }
-    Ok(())
+}
+
+fn lapis_from_problem(e: &envelope::ErrorBody) -> LapisError {
+    match e.code {
+        Some("not_found") => LapisError::Path(e.message.clone()),
+        Some("lattice_unreachable") | Some("index_gap") => LapisError::LatticeDown(e.message.clone()),
+        _ => LapisError::Usage(e.message.clone()),
+    }
+}
+
+async fn paths_search(ctx: &Ctx, args: cli::PathsSearchArgs) -> Result<()> {
+    if !(1..=1000).contains(&args.limit) {
+        return Err(LapisError::Usage("limit must be 1..1000".into()));
+    }
+    let req = api::PathsSearchRequest {
+        pattern: args.pattern,
+        match_kind: match args.match_kind {
+            cli::PathMatchArg::Basename => api::PathMatchWire::Basename,
+            cli::PathMatchArg::Glob => api::PathMatchWire::Glob,
+            cli::PathMatchArg::Substring => api::PathMatchWire::Substring,
+        },
+        limit: args.limit,
+    };
+    match api::paths_search_v1(&ctx.backend()?, &req).await {
+        api::PathsV1::Ok { data, meta } => {
+            if ctx.json {
+                emit_with(&data, meta)
+            } else if data.hits.is_empty() {
+                println!("No path hits for {:?}.", req.pattern);
+                Ok(())
+            } else {
+                for h in &data.hits {
+                    println!("{}", h.path);
+                }
+                Ok(())
+            }
+        }
+        api::PathsV1::Err { error, .. } => Err(lapis_from_problem(&error)),
+    }
 }
 
 // ----------------------------------------------------------------------- read

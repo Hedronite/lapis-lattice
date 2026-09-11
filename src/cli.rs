@@ -65,6 +65,9 @@ pub enum Command {
     /// Search the vault index (BM25; vectors only if an embedder is configured).
     Search(SearchArgs),
 
+    /// Filename / path inventory from the index path table. Never walks the vault.
+    PathsSearch(PathsSearchArgs),
+
     /// Read one note: body plus parsed HAL frontmatter.
     Read(ReadArgs),
 
@@ -137,13 +140,36 @@ pub enum Command {
     /// MCP server over stdio (tools: vault_info, search, read_note, list_notes, neighbors, create_note, append_to_note, list_tasks, toggle_task).
     Mcp,
 
-    /// Serve the operator HTTP API (`/v1`) on loopback. Default 127.0.0.1:18765.
+    /// Serve the operator HTTP API (`/v1`). Default 127.0.0.1:18765. Loopback needs no token.
     Api(ApiArgs),
 }
 
 #[derive(Debug, Args)]
+pub struct PathsSearchArgs {
+    /// Basename, glob, or substring to match against indexed paths.
+    #[arg(value_name = "PATTERN")]
+    pub pattern: String,
+
+    /// `basename` (default), `glob`, or `substring`.
+    #[arg(long = "match", value_enum, default_value_t = PathMatchArg::Basename)]
+    pub match_kind: PathMatchArg,
+
+    /// Max rows (1..1000).
+    #[arg(long, short = 'n', default_value_t = 50, value_name = "N")]
+    pub limit: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum PathMatchArg {
+    #[default]
+    Basename,
+    Glob,
+    Substring,
+}
+
+#[derive(Debug, Args)]
 pub struct ApiArgs {
-    /// Bind address. Default config `api.bind` (`127.0.0.1`). Loopback only this GOAL.
+    /// Bind address. Default config `api.bind` (`127.0.0.1`). Non-loopback needs LAPIS_API_TOKEN.
     #[arg(long, value_name = "ADDR")]
     pub bind: Option<String>,
 
@@ -646,6 +672,14 @@ mod tests {
         assert!(matches!(c.command(), Command::Task { command: TaskCommand::Toggle(a) } if a.id == "a.md#3"));
         assert!(matches!(Cli::try_parse_from(["lapis", "mcp"]).unwrap().command(), Command::Mcp));
         assert!(matches!(Cli::try_parse_from(["lapis", "tui"]).unwrap().command(), Command::Tui));
+        let c = Cli::try_parse_from(["lapis", "paths-search", "AGENTS.md", "--match", "basename"]).unwrap();
+        match c.command() {
+            Command::PathsSearch(a) => {
+                assert_eq!(a.pattern, "AGENTS.md");
+                assert!(matches!(a.match_kind, PathMatchArg::Basename));
+            }
+            _ => panic!("expected paths-search"),
+        }
         let c = Cli::try_parse_from(["lapis", "api", "--port", "18765"]).unwrap();
         match c.command() {
             Command::Api(a) => {

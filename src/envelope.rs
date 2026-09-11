@@ -114,16 +114,29 @@ pub fn err(e: &LapisError, latency_ms: f64) -> Envelope<Value> {
     Envelope {
         ok: false,
         data: None,
-        error: Some(ErrorBody {
-            code: None,
-            kind: e.kind(),
+        error: Some(ErrorBody::from_lapis(e)),
+        meta: Meta { latency_ms, ..Meta::default() },
+    }
+}
+
+impl ErrorBody {
+    /// CLI `--json` and MCP share these codes with HTTP LapisProblem.
+    pub fn from_lapis(e: &LapisError) -> Self {
+        let (code, kind) = match e {
+            LapisError::Path(_) => ("not_found", e.kind()),
+            LapisError::LatticeDown(_) => ("lattice_unreachable", e.kind()),
+            LapisError::Usage(m) if m.contains("lattice.mode") => ("lattice_mode_unsupported", e.kind()),
+            LapisError::Usage(_) | LapisError::Internal(_) => ("invalid_request", e.kind()),
+        };
+        ErrorBody {
+            code: Some(code),
+            kind,
             message: e.message().to_string(),
             exit: e.exit_code(),
             diagnostics: vec![],
             recovery: vec![],
             miss_id: None,
-        }),
-        meta: Meta { latency_ms, ..Meta::default() },
+        }
     }
 }
 
@@ -163,6 +176,7 @@ mod tests {
         assert_eq!(e["ok"], false);
         assert!(e["data"].is_null());
         assert_eq!(e["error"]["kind"], "path");
+        assert_eq!(e["error"]["code"], "not_found");
         assert_eq!(e["error"]["exit"], 3);
         assert_eq!(e["error"]["message"], "not found: x.md");
         assert_eq!(e["meta"]["truncated"], false);

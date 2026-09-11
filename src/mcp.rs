@@ -18,6 +18,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::api::{self, SearchRequest, SearchV1, TreeRetrieveRequest};
 use crate::envelope::{self, Meta};
 use crate::error::LapisError;
 use crate::lattice::{Hit, ListParams, Mode, SearchParams};
@@ -428,22 +429,18 @@ impl LapisServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let t0 = Instant::now();
         let (p, limit, offset) = search_params(a, self.ctx.cfg.agent.per_doc)?;
-        let mut r = self.ctx.client().map_err(fail)?.search(&p).await.map_err(fail)?;
-        let total = r.hits.len();
-        r.hits = r.hits.into_iter().skip(offset as usize).collect();
-        r.count = r.hits.len();
-        let requested = offset + limit;
-        let truncated = total as u32 >= requested && requested < 50;
-        let meta = Meta {
-            truncated,
-            next: if truncated { Some(requested) } else { None },
-            latency: Some(r.latency),
-            count: Some(r.count),
-            limit: Some(limit),
-            offset: Some(offset),
-            ..Meta::default()
+        let req = SearchRequest {
+            query: p.query,
+            limit,
+            offset,
+            domain: p.domain,
+            mode: p.mode,
+            per_doc: p.per_doc,
         };
-        ok_meta(t0, &r, meta)
+        match api::search_v1(&self.ctx.backend().map_err(fail)?, req).await {
+            SearchV1::Ok { data, meta } => ok_meta(t0, &data, meta),
+            SearchV1::Err { error, .. } => Err(fail(LapisError::Usage(error.message))),
+        }
     }
 
     #[tool(
@@ -455,17 +452,18 @@ impl LapisServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let t0 = Instant::now();
         let limit = a.limit.unwrap_or(5).clamp(1, 20);
-        let p = SearchParams {
+        let req = SearchRequest {
             query: a.query.clone(),
-            top_k: limit,
-            domain: a.domain,
+            limit,
+            offset: 0,
+            domain: a.domain.clone(),
             mode: parse_mode(a.mode.as_deref())?,
             per_doc: true,
-            mmr: false,
-            include_archives: false,
-            embedder: None,
         };
-        let r = self.ctx.client().map_err(fail)?.search(&p).await.map_err(fail)?;
+        let r = match api::search_v1(&self.ctx.backend().map_err(fail)?, req).await {
+            SearchV1::Ok { data, .. } => data,
+            SearchV1::Err { error, .. } => return Err(fail(LapisError::Usage(error.message))),
+        };
         let max = a.snippet_chars.unwrap_or(600);
         let root = self.ctx.vault.root.clone();
         let mut any_truncated = false;
@@ -512,27 +510,45 @@ impl LapisServer {
     }
 
     #[tool(
-        description = "List notes from the lattice documents table (metadata only). Never walks the vault. Page with limit / offset; meta.next is the next offset."
+        description = "List notes from the index path table (pathsSearchPost). Prefix/substring match; never walks the vault. Extra HAL filters (domain/type/status/tag) still use the documents table."
     )]
     async fn list_notes(
         &self,
         Parameters(a): Parameters<ListArg>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let t0 = Instant::now();
-        let limit = a.limit.unwrap_or(50);
+        let limit = a.limit.unwrap_or(50).clamp(1, 1000);
         let offset = a.offset.unwrap_or(0);
-        let p = ListParams {
-            domain: a.domain,
-            doc_type: a.doc_type,
-            status: a.status,
-            tag: a.tag,
-            prefix: a.prefix,
-            limit,
-            offset,
-            include_archives: false,
+        let extra_filters =
+            a.domain.is_some() || a.doc_type.is_some() || a.status.is_some() || a.tag.is_some();
+        if extra_filters {
+            let p = ListParams {
+                domain: a.domain,
+                doc_type: a.doc_type,
+                status: a.status,
+                tag: a.tag,
+                prefix: a.prefix,
+                limit,
+                offset,
+                include_archives: false,
+            };
+            let rows = ops::list(&self.ctx, p).await.map_err(fail)?;
+            return ok_meta(t0, &rows, Meta::page(rows.len(), limit, offset));
+        }
+        let (pattern, match_kind) = match a.prefix.filter(|s| !s.is_empty()) {
+            Some(prefix) => (prefix, api::PathMatchWire::Substring),
+            None => ("*".into(), api::PathMatchWire::Glob),
         };
-        let rows = ops::list(&self.ctx, p).await.map_err(fail)?;
-        ok_meta(t0, &rows, Meta::page(rows.len(), limit, offset))
+        let req = api::PathsSearchRequest { pattern, match_kind, limit: limit.saturating_add(offset).max(1) };
+        match api::paths_search_v1(&self.ctx.backend().map_err(fail)?, &req).await {
+            api::PathsV1::Ok { mut data, meta } => {
+                let hits: Vec<_> = data.hits.into_iter().skip(offset as usize).take(limit as usize).collect();
+                data.hits = hits;
+                data.count = data.hits.len();
+                ok_meta(t0, &data, meta)
+            }
+            api::PathsV1::Err { error, .. } => Err(fail(LapisError::LatticeDown(error.message))),
+        }
     }
 
     #[tool(
@@ -548,10 +564,11 @@ impl LapisServer {
         let dir = a.direction.unwrap_or_else(|| self.ctx.cfg.agent.direction().to_string());
         let resolved_only = !a.dangling.unwrap_or(false);
         if hop_of(a.hop)? == 2 {
-            let e = self.ctx.client().map_err(fail)?.ego(&rel, 2, &dir, resolved_only).await.map_err(fail)?;
+            let e =
+                self.ctx.backend().map_err(fail)?.ego(&rel, 2, &dir, resolved_only).await.map_err(fail)?;
             return ok_meta(t0, &e, Meta { truncated: e.truncated, count: Some(e.count), ..Meta::default() });
         }
-        let n = self.ctx.client().map_err(fail)?.neighbors(&rel, &dir, resolved_only).await.map_err(fail)?;
+        let n = self.ctx.backend().map_err(fail)?.neighbors(&rel, &dir, resolved_only).await.map_err(fail)?;
         ok_meta(t0, &n, Meta { count: Some(n.neighbors.len()), ..Meta::default() })
     }
 
@@ -563,7 +580,7 @@ impl LapisServer {
         Parameters(a): Parameters<AnalyticsArg>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let t0 = Instant::now();
-        let r = self.ctx.client().map_err(fail)?.analytics(&a.query).await.map_err(fail)?;
+        let r = self.ctx.backend().map_err(fail)?.analytics(&a.query).await.map_err(fail)?;
         ok_meta(t0, &r, Meta { truncated: r.truncated, count: Some(r.count), ..Meta::default() })
     }
 
@@ -582,14 +599,20 @@ impl LapisServer {
             }
             None => None,
         };
-        let t = self
-            .ctx
-            .client()
-            .map_err(fail)?
-            .tree(rel.as_deref(), a.query.as_deref(), a.depth.unwrap_or(2), a.max_nodes.unwrap_or(60))
-            .await
-            .map_err(fail)?;
-        ok_meta(t0, &t, Meta { truncated: t.truncated, count: Some(t.count), ..Meta::default() })
+        match api::tree_retrieve_v1(
+            &self.ctx.backend().map_err(fail)?,
+            TreeRetrieveRequest {
+                path: rel,
+                query: a.query,
+                depth: a.depth.unwrap_or(2),
+                max_nodes: a.max_nodes.unwrap_or(60),
+            },
+        )
+        .await
+        {
+            api::ApiV1::Ok { data, meta } => ok_meta(t0, &data, meta),
+            api::ApiV1::Err { error, .. } => Err(fail(LapisError::Usage(error.message))),
+        }
     }
 
     #[tool(
