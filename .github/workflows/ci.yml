@@ -48,6 +48,12 @@ jobs:
           ./target/release/lapis --vault "$tmp" --json search welcome --embedder none | grep -q '"ok": true'
           ./target/release/lapis --vault "$tmp" --json list | grep -q '"hash"'
           ./target/release/lapis --vault "$tmp" doctor
+      - name: TUI and desktop subcommands are wired in the shipped binary
+        run: |
+          ./target/release/lapis tui --help | grep -q 'Terminal UI'
+          tmp=$(mktemp -d)
+          ./target/release/lapis init "$tmp"
+          ./target/release/lapis --vault "$tmp" desktop --check | grep -q 'gpui='
       - name: hop-2 is honest, not silently empty (B11)
         run: |
           tmp=$(mktemp -d)
