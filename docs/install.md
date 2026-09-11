@@ -5,7 +5,7 @@ Repo: [VirtualMachinist/lapis-lattice](https://github.com/VirtualMachinist/lapis
 Library crate: [`lapis-lattice`](https://crates.io/crates/lapis-lattice) on crates.io (embedded SQLite+FTS5 engine).
 
 This is the contract for a stranger’s first minute. The one-command path
-downloads a GitHub Release (`v0.3.1` as of 2026-09-11) on Apple Silicon and
+downloads a GitHub Release (`v0.4.0` as of 2026-09-11) on Apple Silicon and
 Linux. Homebrew, Developer ID notarization, and Intel Mac prebuilts are still
 open. Names that look convenient and are **wrong** are listed first so we do
 not bake them in.
@@ -101,17 +101,23 @@ or `$LAPIS_VAULT`. There is no `lapis config set vault`. There is no separate
 
 Exit codes stay: 0 ok, 1 usage, 2 lattice/index down, 3 path.
 
-## Wiring (what is true on `v0.3.1`)
+## Wiring — live vs next
 
-Shipped:
+| | Live today | Next (after `v0.4.1` tag + `cargo publish`) |
+|---|---|---|
+| GitHub Release binary | `v0.4.0` (`lapis --version` → `0.1.0`; not rewritten) | `v0.4.1` asset (`--version` → `0.4.1`) |
+| crates.io `lapis-lattice` | `0.1.0` (`cargo add lapis-lattice`) | `0.4.1` (`cargo add lapis-lattice@0.4.1`) |
+| `main` | — | Cargo `0.4.1` |
 
-- GitHub repo is `lapis-lattice`. Tagged Releases attach `lapis-darwin-arm64`, `lapis-linux-x64`, `lapis-linux-arm64`, plus `SHA256SUMS`.
-- `cargo add lapis-lattice` gets the engine library (crates.io `0.1.0`).
+Shipped today:
+
+- GitHub repo is `lapis-lattice`. Latest binary Release is `v0.4.0` (crate `0.1.0` in that asset — not rewritten). Future tags attach `lapis-darwin-arm64`, `lapis-linux-x64`, `lapis-linux-arm64`, plus `SHA256SUMS`.
+- `cargo add lapis-lattice` resolves to crates.io **`0.1.0` today**. After publish: `cargo add lapis-lattice@0.4.1`. Neither installs the `lapis` app binary.
 - CLI binary `lapis` defaults to the **embedded** index. HTTP is opt-in (`lattice.mode = "http"` or `--lattice`).
 - `lapis init` writes `<vault>/.lapis/lattice.sqlite` and records the vault in the config (first time only).
 - `lapis doctor` exists.
 - `scripts/install.sh` downloads the matching asset.
-- `pack-release` CI: macOS + Linux, desktop **off** on the CLI asset.
+- `pack-release` CI: macOS + Linux, desktop **off** on the CLI asset; fails if `lapis` crate version ≠ git tag.
 
 Still open (not a reason to claim search needs `:8080`):
 
@@ -119,7 +125,6 @@ Still open (not a reason to claim search needs `:8080`):
 - Developer ID + notarization (browser-downloaded macOS assets fail Gatekeeper).
 - Intel Mac prebuilt.
 - TUI palette search still uses the HTTP client, so a first-run TUI shows `lattice ✗` and Ctrl+P dies on `:8080` even when CLI search is green. File browsing still works.
-- `lapis --version` prints crate `0.1.0`, not the Git tag.
 
 ## Click-path copy for a future landing page
 
@@ -136,8 +141,8 @@ cargo install --git https://github.com/VirtualMachinist/lapis-lattice --locked -
 lapis init ~/Notes
 ```
 
-Engine only (library, not the app):
+Engine only (library, not the app). Live today: `cargo add lapis-lattice` → `0.1.0`. After publish:
 
 ```bash
-cargo add lapis-lattice
+cargo add lapis-lattice@0.4.1
 ```

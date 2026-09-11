@@ -823,8 +823,8 @@ mod tests {
         }
     }
 
-    /// The lathe shot that failed was a small vault at 238%, not the fit zoom,
-    /// so the guarantee is checked across the range a reader actually uses.
+    /// A small vault at 238% zoom failed once; the guarantee is checked across
+    /// the range a reader actually uses, not only at the fit zoom.
     #[test]
     fn no_two_labels_overlap_at_any_zoom() {
         for n in [40usize, 68, 400] {

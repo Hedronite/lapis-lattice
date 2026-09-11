@@ -34,19 +34,31 @@ No hosted notes service. Files are the source of truth.
 
 ## Install
 
-Repo: [VirtualMachinist/lapis-lattice](https://github.com/VirtualMachinist/lapis-lattice). Binary: `lapis`. Engine library: [`lapis-lattice`](https://crates.io/crates/lapis-lattice) on crates.io.
+Repo: [VirtualMachinist/lapis-lattice](https://github.com/VirtualMachinist/lapis-lattice).
 
-**One command** — `install.sh` downloads the latest GitHub Release for Apple Silicon, Linux x64, or Linux arm64. Rust is only needed if there is no asset for your machine (Intel Mac today):
+| Artifact | Install | What you get |
+|---|---|---|
+| **CLI / TUI / MCP** (`lapis` binary) | `install.sh` or `cargo install --git … --bin lapis` | The app: vault, TUI, JSON CLI, MCP |
+| **Engine library** (`lapis-lattice`) | `cargo add lapis-lattice` (live: `0.1.0`) | Embedded SQLite+FTS5 index crate — no `lapis` binary |
+
+**One command** — `install.sh` downloads the latest GitHub Release binary (currently `v0.4.0`, which reports `--version` `0.1.0` — no rewrite) for Apple Silicon, Linux x64, or Linux arm64. Rust is only needed if there is no asset for your machine (Intel Mac today):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/VirtualMachinist/lapis-lattice/main/scripts/install.sh | bash
 ```
 
-Or, from source:
+Or, from source (app binary):
 
 ```bash
 cargo install --git https://github.com/VirtualMachinist/lapis-lattice --locked --bin lapis
 lapis init ~/Notes
+```
+
+Engine only (library, not the app). Live on crates.io today: `0.1.0`. After
+`v0.4.1` is tagged and published:
+
+```bash
+cargo add lapis-lattice@0.4.1
 ```
 
 `init` records the vault in `~/.config/lapis/config.toml`, so a bare `lapis`
@@ -96,7 +108,15 @@ lapis --vault ~/Notes doctor
 
 ## Status
 
-**Beta** (`v0.3.1` tagged). Embedded index is the default. `lapis --version` still prints the crate version (`0.1.0`); believe the Git tag, not that string.
+**Beta**.
+
+| | Live today | Next (after `v0.4.1` tag + `cargo publish`) |
+|---|---|---|
+| GitHub Release binary | `v0.4.0` (`lapis --version` → `0.1.0`; shipped as-is) | `v0.4.1` binary asset (`--version` → `0.4.1`) |
+| crates.io `lapis-lattice` | [`0.1.0`](https://crates.io/crates/lapis-lattice/0.1.0) | `0.4.1` (`cargo add lapis-lattice@0.4.1`) |
+| `main` (this repo) | — | Cargo `0.4.1`; `lapis --version` → `0.4.1` |
+
+The `v0.4.0` Release binary lag is real: that asset still reports crate `0.1.0` and is not rewritten. crates.io is also still `0.1.0` until publish lands.
 
 Requirements: macOS (Apple Silicon prebuilt) or Linux. Embeddings (Ollama / ONNX) are optional. Do **not** install Turso, DuckDB, Xcode, or Python to use the default binary.
 

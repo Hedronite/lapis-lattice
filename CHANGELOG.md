@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.1 — unreleased (crates.io truth cut)
+
+First Cargo/crates.io version aligned with the product line. The `v0.4.0`
+GitHub Release already shipped with crate `0.1.0` in the binary — that asset is
+not rewritten. After merge: tag `v0.4.1`, publish `lapis-lattice@0.4.1`.
+
+- `lapis` and `lapis-lattice` crate versions → `0.4.1` (`lapis --version` matches).
+- Root `lapis` crate: `publish = false` (name squatted on crates.io); only `lapis-lattice` is publishable.
+- Stranger README/install: live vs next table (crates.io `0.1.0` today; `cargo add lapis-lattice@0.4.1` after publish) vs Release/git for the `lapis` binary.
+- Operator-topology scrub: private build-host references removed from the public tree; `scrub-gate.sh` enforces.
+- `pack-release` fails when root `lapis` crate version ≠ git tag.
+
 ## 0.4.0 — 2026-09-11
 
 Tagged `v0.4.0`. Operator GO 2026-09-11.
@@ -229,7 +241,7 @@ Not tagged. Do not treat this as a GitHub Release until the operator says GO.
 
 - Window is **gpui-omarchy** + gpui-kit. Zed-gpui `mod window` is gone.
 - Hop-1/hop-2 canvas paints: discs, labels, straight edges, dashed dangling, click opens the note, domain and dangling filters.
-- Linux binary is compiled on GitHub Actions `ubuntu-latest`. Smoke on lathe via `steam-run`. A missing `libxcb` / `libwayland` / `libvulkan` `.so` **without** steam-run is host config, not a product fail.
+- Linux binary is compiled on GitHub Actions `ubuntu-latest`. A missing `libxcb` / `libwayland` / `libvulkan` `.so` on the target machine is host config, not a product fail.
 
 ### Not in this tag
 

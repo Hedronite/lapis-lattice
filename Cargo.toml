@@ -3,11 +3,12 @@ members = [".", "crates/lapis-desktop", "crates/lapis-lattice"]
 
 [package]
 name = "lapis"
-version = "0.1.0"
+version = "0.4.1"
 edition = "2024"
 description = "Agent-first notes vault: JSON CLI, MCP, and TUI over Markdown files indexed by Lapis Lattice."
 license = "MIT"
 repository = "https://github.com/VirtualMachinist/lapis-lattice"
+publish = false
 default-run = "lapis"
 
 [[bin]]
@@ -21,7 +22,7 @@ desktop = ["lapis-desktop/gpui"]
 
 [dependencies]
 lapis-desktop = { path = "crates/lapis-desktop" }
-lapis-lattice = { path = "crates/lapis-lattice", version = "0.1.0" }
+lapis-lattice = { path = "crates/lapis-lattice", version = "0.4.1" }
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 gray_matter = "0.3"

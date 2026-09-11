@@ -260,8 +260,8 @@ impl App {
         let root = self.root();
         self.watch_dir(&root);
         // Watch the parent `current/`, not the theme directory or a link target:
-        // the swap mechanism differs per Omarchy flavour (symlink on stock, a
-        // real directory on Omahedron), and watching the parent covers all of them.
+        // the swap mechanism differs per Omarchy flavour (symlink vs real
+        // directory), and watching the parent covers all of them.
         if self.ctx.cfg.theme.is_omarchy()
             && let Some(state) = omarchy::state_root()
             && state.is_dir()

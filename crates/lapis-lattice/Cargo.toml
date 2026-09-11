@@ -1,6 +1,6 @@
 [package]
 name = "lapis-lattice"
-version = "0.1.0"
+version = "0.4.1"
 edition = "2024"
 description = "Embedded SQLite index for a local Markdown vault: FTS5 BM25, sqlite-vec KNN, wikilink graph, allowlisted analytics. No HTTP daemon, no Turso, no DuckDB."
 license = "MIT"

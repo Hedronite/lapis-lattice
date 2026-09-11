@@ -22,6 +22,9 @@ pats = [
     r"Hedronite",
     r"~/Developer",
     r"~/Obsidian",
+    r"\blathe\b",
+    r"Omahedron",
+    r"steam-run",
 ]
 skip_dirs = {".git", "target", "testdata"}
 skip_files = {"docs/internal-history.md", "scripts/scrub-gate.sh"}
