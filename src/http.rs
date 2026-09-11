@@ -1,8 +1,8 @@
-//! HTTP client for Lapis Lattice (`projects/atrium-lattice/serve.py`).
+//! HTTP client for an opt-in lattice daemon (`serve.py`).
 //!
-//! Read-only by construction: this module only issues `GET`s to `/healthz`,
-//! `/search`, and `/neighbors`. It never opens `lattice.db`. Index writes
-//! (`POST /reindex`) arrive in L1/L2 and still go through HTTP.
+//! Hit and SearchParams live in `lapis_lattice`; this module deserializes the
+//! wire into those types. It never opens `lattice.db`. Index writes
+//! (`POST /reindex`) still go through HTTP.
 //!
 //! Any transport failure, timeout, or non-2xx maps to
 //! [`LapisError::LatticeDown`] (exit 2).
@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use crate::error::{LapisError, Result};
 use crate::notes::{Kind, kind_of};
+use lapis_lattice::{Hit, SearchParams};
 
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -62,17 +63,24 @@ impl Mode {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct SearchParams {
-    pub query: String,
-    pub top_k: u32,
-    pub domain: Option<String>,
-    pub mode: Mode,
-    pub per_doc: bool,
-    pub mmr: bool,
-    pub include_archives: bool,
-    /// `none` skips the vector arm for this query (no Ollama connect).
-    pub embedder: Option<String>,
+impl From<Mode> for lapis_lattice::Mode {
+    fn from(m: Mode) -> Self {
+        match m {
+            Mode::Hybrid => Self::Hybrid,
+            Mode::Bm25 => Self::Bm25,
+            Mode::Vector => Self::Vector,
+        }
+    }
+}
+
+impl From<lapis_lattice::Mode> for Mode {
+    fn from(m: lapis_lattice::Mode) -> Self {
+        match m {
+            lapis_lattice::Mode::Hybrid => Self::Hybrid,
+            lapis_lattice::Mode::Bm25 => Self::Bm25,
+            lapis_lattice::Mode::Vector => Self::Vector,
+        }
+    }
 }
 
 /// One raw chunk row from `/search`. Field names are serve.py's.
@@ -131,36 +139,10 @@ pub struct Latency {
     pub fuse: f64,
 }
 
-/// Search hit per `schema/search-hit.schema.json`.
-#[derive(Debug, Clone, Serialize)]
-pub struct Hit {
-    pub path: String,
-    pub kind: Kind,
-    pub title: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub heading: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub snippet: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub score: Option<f64>,
-    /// 1-based position in this result list; always present.
-    pub rank: Option<u32>,
-    /// Always present (`null` when the note has no HAL domain).
-    pub domain: Option<String>,
-    /// Always present (`null` when the note has no HAL type).
-    pub doc_type: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub chunk_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub chunk_index: Option<i64>,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchResult {
     pub query: String,
-    pub mode: Mode,
+    pub mode: lapis_lattice::Mode,
     /// Modalities the lattice fused for this query (`bm25`, `vector`, `title`).
     pub modalities: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -169,6 +151,51 @@ pub struct SearchResult {
     pub latency: Latency,
     pub count: usize,
     pub hits: Vec<Hit>,
+}
+
+impl SearchResult {
+    /// Embedded engine result → the same envelope the HTTP client returns.
+    pub fn from_engine(p: &SearchParams, r: lapis_lattice::SearchResult, latency_ms: f64) -> Self {
+        let hits = r.hits;
+        Self {
+            query: p.query.trim().to_string(),
+            mode: p.mode,
+            modalities: r.modalities,
+            latency_ms: Some(latency_ms),
+            latency: Latency::default(),
+            count: hits.len(),
+            hits,
+        }
+    }
+}
+
+impl From<RawHit> for Hit {
+    fn from(r: RawHit) -> Self {
+        let path = r.path;
+        let title = r.title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| {
+            std::path::Path::new(&path).file_stem().and_then(|s| s.to_str()).unwrap_or(&path).to_string()
+        });
+        Hit {
+            kind: match kind_of(&path) {
+                Kind::Html => lapis_lattice::HTML.into(),
+                Kind::Yaml => lapis_lattice::YAML.into(),
+                Kind::Markdown => lapis_lattice::MARKDOWN.into(),
+                Kind::Pdf => "pdf".into(),
+                Kind::Source => "source".into(),
+            },
+            title,
+            heading: r.heading.filter(|h| !h.is_empty()),
+            snippet: r.text.filter(|t| !t.is_empty()),
+            score: r.rrf_score.or(r.score).unwrap_or(0.0),
+            rank: r.rank.unwrap_or(0),
+            domain: r.domain,
+            doc_type: r.doc_type,
+            tags: r.tags,
+            chunk_id: r.chunk_id,
+            chunk_index: r.chunk_index,
+            path,
+        }
+    }
 }
 
 /// One row from `/neighbors`.
@@ -193,6 +220,19 @@ impl Neighbor {
     /// What to show for this edge: the resolved path, else the raw link target.
     pub fn label(&self) -> &str {
         self.path.as_deref().or(self.dst_raw.as_deref()).unwrap_or("?")
+    }
+}
+
+impl From<lapis_lattice::Neighbor> for Neighbor {
+    fn from(n: lapis_lattice::Neighbor) -> Self {
+        Self {
+            path: n.path,
+            dst_raw: Some(n.dst_raw),
+            alias: n.alias,
+            anchor: n.anchor,
+            resolved: n.resolved,
+            direction: n.dir,
+        }
     }
 }
 
@@ -344,6 +384,22 @@ pub struct Document {
     pub hash: Option<String>,
 }
 
+impl From<lapis_lattice::Document> for Document {
+    fn from(d: lapis_lattice::Document) -> Self {
+        Self {
+            path: d.path,
+            title: d.title,
+            domain: d.domain,
+            doc_type: d.doc_type,
+            status: d.status,
+            priority: d.priority,
+            tags: d.tags,
+            mtime: d.updated_at.map(|ms| ms as f64 / 1000.0),
+            hash: d.hash,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ListParams {
     pub domain: Option<String>,
@@ -354,6 +410,20 @@ pub struct ListParams {
     pub limit: u32,
     pub offset: u32,
     pub include_archives: bool,
+}
+
+impl From<&ListParams> for lapis_lattice::ListParams {
+    fn from(p: &ListParams) -> Self {
+        Self {
+            domain: p.domain.clone(),
+            doc_type: p.doc_type.clone(),
+            status: p.status.clone(),
+            tag: p.tag.clone(),
+            prefix: p.prefix.clone(),
+            limit: p.limit,
+            offset: p.offset,
+        }
+    }
 }
 
 /// `POST /reindex` result. `ok=false` with a 500 is surfaced as an error by
@@ -466,8 +536,9 @@ impl Client {
         if q.is_empty() {
             return Err(LapisError::Usage("search requires a query".into()));
         }
-        let top_k = p.top_k.clamp(1, 50);
-        let mode_wire = if p.embedder.as_deref() == Some("none") { Mode::Bm25.wire() } else { p.mode.wire() };
+        let top_k = p.limit.clamp(1, 50);
+        let mode_wire =
+            if p.embedder.as_deref() == Some("none") { Mode::Bm25.wire() } else { Mode::from(p.mode).wire() };
         let mut query: Vec<(&str, String)> =
             vec![("q", q.to_string()), ("top_k", top_k.to_string()), ("mode", mode_wire.to_string())];
         if let Some(d) = &p.domain {
@@ -488,25 +559,11 @@ impl Client {
             .into_iter()
             .enumerate()
             .map(|(i, r)| {
-                let kind = kind_of(&r.path);
-                let title = r
-                    .title
-                    .filter(|t| !t.trim().is_empty())
-                    .unwrap_or_else(|| crate::notes::stem_of(&r.path));
-                Hit {
-                    kind,
-                    title,
-                    heading: r.heading.filter(|h| !h.is_empty()),
-                    snippet: r.text.filter(|t| !t.is_empty()),
-                    score: r.rrf_score.or(r.score),
-                    rank: Some(r.rank.unwrap_or(i as u32 + 1)),
-                    domain: r.domain,
-                    doc_type: r.doc_type,
-                    tags: r.tags,
-                    chunk_id: r.chunk_id,
-                    chunk_index: r.chunk_index,
-                    path: r.path,
+                let mut h = Hit::from(r);
+                if h.rank == 0 {
+                    h.rank = i as u32 + 1;
                 }
+                h
             })
             .collect();
         Ok(SearchResult {
@@ -709,12 +766,12 @@ mod tests {
         assert_eq!(l, Latency { embed: 12.0, bm25: 3.5, vector: 0.0, title: 0.0, fuse: 1.0 });
         let hit = Hit {
             path: "a.md".into(),
-            kind: Kind::Markdown,
+            kind: lapis_lattice::MARKDOWN.into(),
             title: "A".into(),
             heading: None,
             snippet: None,
-            score: None,
-            rank: Some(1),
+            score: 0.0,
+            rank: 1,
             domain: None,
             doc_type: None,
             tags: vec![],
@@ -725,7 +782,7 @@ mod tests {
         assert_eq!(j["rank"], 1);
         assert!(j.get("domain").is_some() && j["domain"].is_null());
         assert!(j.get("doc_type").is_some() && j["doc_type"].is_null());
-        assert!(j.get("score").is_none());
+        assert_eq!(j["score"], 0.0);
         let empty = serde_json::to_value(Latency::default()).unwrap();
         assert_eq!(empty["vector"], 0.0);
     }

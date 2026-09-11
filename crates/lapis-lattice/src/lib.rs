@@ -17,7 +17,7 @@ mod sqlite;
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub use analytics::{ANALYTICS_QUERIES, Analytics};
 pub use embed::Embedder;
@@ -46,25 +46,34 @@ pub struct Engine {
     embedder: Option<std::sync::Arc<dyn Embedder>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hit {
     pub path: String,
     /// `markdown` | `html` | `yaml`, as recorded at index time rather than
     /// re-derived from the extension by every consumer.
     pub kind: String,
-    pub title: Option<String>,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub heading: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
     pub rank: u32,
     pub score: f64,
     pub domain: Option<String>,
     pub doc_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_index: Option<i64>,
 }
 
 /// Retrieval arm selection. The embedded engine is FTS-only in 0.2, so
 /// `Hybrid` runs BM25 alone and reports that in [`SearchResult::modalities`];
 /// `Vector` is refused rather than silently downgraded.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Mode {
     #[default]
     Hybrid,
@@ -72,7 +81,7 @@ pub enum Mode {
     Vector,
 }
 
-/// Everything the CLI can ask of search. Flags must not silently no-op.
+/// Everything a surface can ask of search. Flags must not silently no-op.
 #[derive(Debug, Clone, Default)]
 pub struct SearchParams {
     pub query: String,
@@ -82,6 +91,12 @@ pub struct SearchParams {
     /// Collapse to the best-scoring chunk per document.
     pub per_doc: bool,
     pub mode: Mode,
+    /// HTTP lattice only; the embedded index has no MMR arm.
+    pub mmr: bool,
+    /// HTTP lattice only; the embedded walk already skips `_archives/`.
+    pub include_archives: bool,
+    /// `none` skips the vector arm for this query (no embedder round-trip).
+    pub embedder: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -226,7 +241,11 @@ impl Engine {
     }
 
     pub fn search_with(&self, p: &SearchParams) -> Result<SearchResult> {
-        sqlite::search(&self.conn, p, self.embedder.as_deref())
+        let mut p = p.clone();
+        if p.embedder.as_deref() == Some("none") {
+            p.mode = Mode::Bm25;
+        }
+        sqlite::search(&self.conn, &p, self.embedder.as_deref())
     }
 
     /// Embed any chunk that has no vector yet. No-op without an embedder.

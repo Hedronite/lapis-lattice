@@ -14,8 +14,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::error::{LapisError, Result};
-use crate::lattice::{self, Client, Hit, ListParams, Mode, Neighbors, SearchParams, SearchResult};
-use crate::notes;
+use crate::http::{self, Client, ListParams, Neighbors, SearchResult};
+use lapis_lattice::SearchParams;
 
 /// What `lapis doctor` and `vault info` report, per `schema/v0.2/health.schema.json`.
 #[derive(Debug, Clone, Serialize)]
@@ -56,13 +56,9 @@ fn lock(e: &Arc<Mutex<Engine>>) -> std::sync::MutexGuard<'_, Engine> {
     e.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Message for surfaces the embedded engine does not implement in v0.2.
-/// B11: never a vague empty result, always this sentence.
-fn http_only(what: &str) -> LapisError {
-    LapisError::Usage(format!(
-        "{what} is not implemented by the embedded index in v0.2; it requires `lattice.mode = \"http\"` \
-         (set it in ~/.config/lapis/config.toml or pass --lattice <url>)"
-    ))
+/// B11: never a vague empty result. `kind` is `http_only`, not a Usage paragraph.
+fn http_only(op: &'static str) -> LapisError {
+    LapisError::HttpOnly { op }
 }
 
 impl Backend {
@@ -85,97 +81,22 @@ impl Backend {
         match self {
             Backend::Http(c) => c.search(p).await,
             Backend::Embedded(e) => {
-                let mode = if p.embedder.as_deref() == Some("none") {
-                    // BM25 only: do not invoke the stored embedder (no Ollama TCP).
-                    lapis_lattice::Mode::Bm25
-                } else {
-                    match p.mode {
-                        Mode::Bm25 => lapis_lattice::Mode::Bm25,
-                        Mode::Vector => lapis_lattice::Mode::Vector,
-                        Mode::Hybrid => lapis_lattice::Mode::Hybrid,
-                    }
-                };
-                let q = lapis_lattice::SearchParams {
-                    query: p.query.clone(),
-                    limit: p.top_k,
-                    offset: 0,
-                    domain: p.domain.clone(),
-                    per_doc: p.per_doc,
-                    mode,
-                };
                 let t0 = std::time::Instant::now();
-                let r = lock(e).search_with(&q).map_err(engine_err)?;
-                let hits: Vec<Hit> = r
-                    .hits
-                    .into_iter()
-                    .map(|h| Hit {
-                        // recorded at index time, not re-derived per consumer
-                        kind: match h.kind.as_str() {
-                            lapis_lattice::HTML => notes::Kind::Html,
-                            lapis_lattice::YAML => notes::Kind::Yaml,
-                            lapis_lattice::MARKDOWN => notes::Kind::Markdown,
-                            _ => notes::kind_of(&h.path),
-                        },
-                        title: h
-                            .title
-                            .filter(|t| !t.trim().is_empty())
-                            .unwrap_or_else(|| crate::notes::stem_of(&h.path)),
-                        heading: h.heading.filter(|s| !s.is_empty()),
-                        snippet: h.snippet.filter(|s| !s.is_empty()),
-                        score: Some(h.score),
-                        rank: Some(h.rank),
-                        domain: h.domain,
-                        doc_type: h.doc_type,
-                        tags: vec![],
-                        chunk_id: None,
-                        chunk_index: None,
-                        path: h.path,
-                    })
-                    .collect();
-                Ok(SearchResult {
-                    query: p.query.trim().to_string(),
-                    mode: p.mode,
-                    modalities: r.modalities,
-                    latency_ms: Some(t0.elapsed().as_secs_f64() * 1000.0),
-                    latency: lattice::Latency::default(),
-                    count: hits.len(),
-                    hits,
-                })
+                let r = lock(e).search_with(p).map_err(LapisError::from)?;
+                Ok(SearchResult::from_engine(p, r, t0.elapsed().as_secs_f64() * 1000.0))
             }
         }
     }
 
-    pub async fn documents(&self, p: &ListParams) -> Result<Vec<lattice::Document>> {
+    pub async fn documents(&self, p: &ListParams) -> Result<Vec<http::Document>> {
         match self {
             Backend::Http(c) => c.documents(p).await,
-            Backend::Embedded(e) => {
-                let q = lapis_lattice::ListParams {
-                    domain: p.domain.clone(),
-                    doc_type: p.doc_type.clone(),
-                    status: p.status.clone(),
-                    tag: p.tag.clone(),
-                    prefix: p.prefix.clone(),
-                    limit: p.limit,
-                    offset: p.offset,
-                };
-                Ok(lock(e)
-                    .documents(&q)
-                    .map_err(engine_err)?
-                    .into_iter()
-                    .map(|d| lattice::Document {
-                        path: d.path,
-                        title: d.title,
-                        domain: d.domain,
-                        doc_type: d.doc_type,
-                        status: d.status,
-                        priority: d.priority,
-                        tags: d.tags,
-                        // the engine stores millisecond mtime; Document carries seconds
-                        mtime: d.updated_at.map(|ms| ms as f64 / 1000.0),
-                        hash: d.hash,
-                    })
-                    .collect())
-            }
+            Backend::Embedded(e) => Ok(lock(e)
+                .documents(&p.into())
+                .map_err(LapisError::from)?
+                .into_iter()
+                .map(Into::into)
+                .collect()),
         }
     }
 
@@ -183,18 +104,12 @@ impl Backend {
         match self {
             Backend::Http(c) => c.neighbors(path, direction, resolved_only).await,
             Backend::Embedded(e) => {
-                let rows = lock(e).neighbors(path, direction).map_err(engine_err)?;
-                let neighbors = rows
+                let neighbors = lock(e)
+                    .neighbors(path, direction)
+                    .map_err(LapisError::from)?
                     .into_iter()
                     .filter(|n| !resolved_only || n.resolved)
-                    .map(|n| lattice::Neighbor {
-                        path: n.path,
-                        dst_raw: Some(n.dst_raw),
-                        alias: n.alias,
-                        anchor: n.anchor,
-                        resolved: n.resolved,
-                        direction: n.dir,
-                    })
+                    .map(Into::into)
                     .collect();
                 Ok(Neighbors { path: path.to_string(), direction: direction.to_string(), hop: 1, neighbors })
             }
@@ -208,7 +123,7 @@ impl Backend {
         hops: u32,
         direction: &str,
         resolved_only: bool,
-    ) -> Result<lattice::Ego> {
+    ) -> Result<http::Ego> {
         match self {
             Backend::Http(c) => c.ego(path, hops, direction, resolved_only).await,
             Backend::Embedded(_) => Err(http_only("`neighbors --hop 2` (the hop-2 ego graph)")),
@@ -222,21 +137,21 @@ impl Backend {
         query: Option<&str>,
         depth: u32,
         max_nodes: u32,
-    ) -> Result<lattice::Tree> {
+    ) -> Result<http::Tree> {
         match self {
             Backend::Http(c) => c.tree(path, query, depth, max_nodes).await,
             Backend::Embedded(_) => Err(http_only("`tree-retrieve`")),
         }
     }
 
-    pub async fn analytics(&self, query: &str) -> Result<lattice::Analytics> {
+    pub async fn analytics(&self, query: &str) -> Result<http::Analytics> {
         match self {
             Backend::Http(c) => c.analytics(query).await,
             Backend::Embedded(e) => {
-                lattice::check_analytics_query(query)?;
+                http::check_analytics_query(query)?;
                 let t0 = std::time::Instant::now();
-                let a = lock(e).analytics(query).map_err(engine_err)?;
-                Ok(lattice::Analytics {
+                let a = lock(e).analytics(query).map_err(LapisError::from)?;
+                Ok(http::Analytics {
                     query: a.query,
                     columns: a.columns,
                     rows: a.rows.into_iter().map(|r| r.into_iter().map(Value::String).collect()).collect(),
@@ -252,7 +167,7 @@ impl Backend {
     pub async fn health(&self) -> Result<Health> {
         match self {
             Backend::Embedded(e) => {
-                let h = lock(e).health().map_err(engine_err)?;
+                let h = lock(e).health().map_err(LapisError::from)?;
                 Ok(Health {
                     status: h.status,
                     documents_indexed: h.documents_indexed,
@@ -289,13 +204,13 @@ impl Backend {
     }
 
     /// Index one path after a write. Embedded does it in-process; HTTP kicks serve.py.
-    pub async fn reindex(&self, rel: &str) -> Result<lattice::Reindex> {
+    pub async fn reindex(&self, rel: &str) -> Result<http::Reindex> {
         match self {
             Backend::Http(c) => c.reindex(rel).await,
             Backend::Embedded(e) => {
                 let t0 = std::time::Instant::now();
-                let r = lock(e).reindex_path(rel).map_err(engine_err)?;
-                Ok(lattice::Reindex {
+                let r = lock(e).reindex_path(rel).map_err(LapisError::from)?;
+                Ok(http::Reindex {
                     ok: true,
                     path: rel.to_string(),
                     changed: Some(r.documents > 0),
@@ -307,16 +222,6 @@ impl Backend {
                 })
             }
         }
-    }
-}
-
-/// Engine errors carry the CLI exit contract: usage is 1, sqlite trouble is 2
-/// (the index is down, the same class as the lattice being unreachable).
-fn engine_err(e: lapis_lattice::Error) -> LapisError {
-    match e {
-        lapis_lattice::Error::Usage(m) => LapisError::Usage(m),
-        lapis_lattice::Error::Io(io) => LapisError::from(io),
-        lapis_lattice::Error::Sqlite(s) => LapisError::LatticeDown(format!("index: {s}")),
     }
 }
 
@@ -353,13 +258,95 @@ mod tests {
             b.tree(Some("Welcome.md"), None, 2, 50).await.err(),
         ] {
             match err {
-                Some(LapisError::Usage(m)) => {
+                Some(e @ LapisError::HttpOnly { .. }) => {
+                    assert_eq!(e.kind(), "http_only");
+                    assert_eq!(e.exit_code(), 1);
+                    let m = e.message();
                     assert!(m.contains("lattice.mode"), "names the setting: {m}");
                     assert!(m.contains("http"), "names the mode: {m}");
                 }
-                other => panic!("expected a usage error naming lattice.mode, got {other:?}"),
+                other => panic!("expected HttpOnly naming lattice.mode, got {other:?}"),
             }
         }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// G0b: the TUI palette calls this same `Backend::search`. Embedded mode
+    /// with `--embedder none` must return hits from the vault index with no
+    /// HTTP listener. Empty-because-:8080-is-down is a failure, not a miss.
+    #[tokio::test]
+    async fn embedded_search_answers_without_http() {
+        let d = std::env::temp_dir().join(format!(
+            "lapis-g0b-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("Welcome.md"), "# Welcome\n\nThe quokka is a small macropod.\n").unwrap();
+        let mut e = lapis_lattice::Engine::open(&d).unwrap();
+        e.reindex().unwrap();
+        drop(e);
+
+        let ctx = crate::ops::Ctx {
+            json: false,
+            vault: crate::vault::Vault { root: d.clone(), source: "test" },
+            cfg: crate::config::Config::default(),
+            lattice_url: crate::config::DEFAULT_LATTICE_URL.into(),
+            force_http: false,
+        };
+        let b = ctx.backend().expect("embedded backend opens without a lattice listener");
+        assert_eq!(b.mode(), "embedded");
+        assert!(b.health().await.is_ok(), "health must not depend on HTTP :8080 in embedded mode");
+
+        let r = b
+            .search(&SearchParams {
+                query: "quokka".into(),
+                limit: 10,
+                mode: lapis_lattice::Mode::Bm25,
+                per_doc: true,
+                embedder: Some("none".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("embedded search must be an error or hits, never a silent HTTP miss");
+        assert!(
+            r.hits.iter().any(|h| h.path == "Welcome.md"),
+            "expected Welcome.md in hits, got {:?}",
+            r.hits.iter().map(|h| &h.path).collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// G2c: a tagged note's hits carry tags and chunk_id from the index.
+    #[tokio::test]
+    async fn embedded_search_carries_tags_and_chunk_id() {
+        let d = std::env::temp_dir().join(format!(
+            "lapis-g2c-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join("Tagged.md"),
+            "---\nname: Tagged\ntags: [intro, lattice]\n---\n# Tagged\n\nQuokka tags live here.\n",
+        )
+        .unwrap();
+        let mut e = lapis_lattice::Engine::open(&d).unwrap();
+        e.reindex().unwrap();
+        let b = Backend::Embedded(std::sync::Arc::new(std::sync::Mutex::new(e)));
+        let r = b
+            .search(&SearchParams {
+                query: "quokka".into(),
+                limit: 10,
+                mode: lapis_lattice::Mode::Bm25,
+                embedder: Some("none".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let h = r.hits.iter().find(|h| h.path == "Tagged.md").expect("Tagged.md hit");
+        assert!(h.tags.iter().any(|t| t == "intro"), "tags from the index, got {:?}", h.tags);
+        assert!(h.chunk_id.is_some(), "chunk_id from the index");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

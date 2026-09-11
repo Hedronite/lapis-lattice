@@ -227,7 +227,7 @@ pub fn search(conn: &Connection, p: &SearchParams, embedder: Option<&dyn Embedde
             let mut sql = String::from(
                 "SELECT c.chunk_id, c.path, d.title, c.heading, \
                  snippet(chunks_fts, 0, '', '', '…', 12), bm25(chunks_fts), d.domain, d.doc_type, \
-                 d.kind \
+                 d.kind, d.tags_json, c.chunk_index \
                  FROM chunks_fts JOIN chunks c ON c.chunk_id = chunks_fts.rowid \
                  JOIN documents d ON d.path = c.path WHERE chunks_fts MATCH ?1",
             );
@@ -246,18 +246,20 @@ pub fn search(conn: &Connection, p: &SearchParams, embedder: Option<&dyn Embedde
                 fts_rank.push(id);
                 fts_hits.insert(
                     id,
-                    Hit {
+                    hit_from_row(HitRow {
+                        chunk_id: id,
                         path: row.get(1)?,
-                        kind: row.get::<_, Option<String>>(8)?.unwrap_or_else(|| "markdown".into()),
                         title: row.get(2)?,
                         heading: row.get(3)?,
                         snippet: row.get(4)?,
-                        rank: 0,
                         // bm25() is lower-is-better; invert for a friendlier score.
                         score: if score == 0.0 { 0.0 } else { 1.0 / (1.0 + score.abs()) },
                         domain: row.get(6)?,
                         doc_type: row.get(7)?,
-                    },
+                        kind: row.get(8)?,
+                        tags_json: row.get(9)?,
+                        chunk_index: row.get(10)?,
+                    }),
                 );
             }
         }
@@ -325,7 +327,8 @@ pub fn search(conn: &Connection, p: &SearchParams, embedder: Option<&dyn Embedde
 /// snippet is a plain text head: `snippet()` only exists inside an FTS query.
 fn hydrate_chunk(conn: &Connection, chunk_id: i64, domain: Option<&str>) -> Result<Option<Hit>> {
     let mut stmt = conn.prepare(
-        "SELECT c.path, d.title, c.heading, c.text, d.domain, d.doc_type, d.kind \
+        "SELECT c.path, d.title, c.heading, c.text, d.domain, d.doc_type, d.kind, \
+         d.tags_json, c.chunk_index \
          FROM chunks c JOIN documents d ON d.path = c.path WHERE c.chunk_id = ?1",
     )?;
     let mut rows = stmt.query(params![chunk_id])?;
@@ -338,17 +341,53 @@ fn hydrate_chunk(conn: &Connection, chunk_id: i64, domain: Option<&str>) -> Resu
     }
     let text: String = row.get(3)?;
     let snippet: String = text.chars().take(160).collect();
-    Ok(Some(Hit {
+    Ok(Some(hit_from_row(HitRow {
+        chunk_id,
         path: row.get(0)?,
-        kind: row.get::<_, Option<String>>(6)?.unwrap_or_else(|| "markdown".into()),
         title: row.get(1)?,
         heading: row.get(2)?,
         snippet: Some(snippet),
-        rank: 0,
         score: 0.0,
         domain: dom,
         doc_type: row.get(5)?,
-    }))
+        kind: row.get(6)?,
+        tags_json: row.get(7)?,
+        chunk_index: row.get(8)?,
+    })))
+}
+
+struct HitRow {
+    chunk_id: i64,
+    path: String,
+    title: Option<String>,
+    heading: Option<String>,
+    snippet: Option<String>,
+    score: f64,
+    domain: Option<String>,
+    doc_type: Option<String>,
+    kind: Option<String>,
+    tags_json: String,
+    chunk_index: Option<i64>,
+}
+
+fn hit_from_row(r: HitRow) -> Hit {
+    let title = r.title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| {
+        Path::new(&r.path).file_stem().and_then(|s| s.to_str()).unwrap_or(&r.path).to_string()
+    });
+    Hit {
+        kind: r.kind.unwrap_or_else(|| "markdown".into()),
+        title,
+        heading: r.heading.filter(|s| !s.is_empty()),
+        snippet: r.snippet.filter(|s| !s.is_empty()),
+        rank: 0,
+        score: r.score,
+        domain: r.domain,
+        doc_type: r.doc_type,
+        tags: serde_json::from_str(&r.tags_json).unwrap_or_default(),
+        chunk_id: Some(r.chunk_id),
+        chunk_index: r.chunk_index,
+        path: r.path,
+    }
 }
 
 /// `lapis list`: documents table, filtered and paged.

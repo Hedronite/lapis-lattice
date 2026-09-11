@@ -1,7 +1,7 @@
 //! Ctrl+P palette: lattice search by default, `>` prefix for commands.
 
 use super::leader::{self, Cmd};
-use crate::lattice::Hit;
+use lapis_lattice::Hit;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
@@ -101,12 +101,12 @@ mod tests {
     fn lattice_hit_becomes_note_item() {
         let hit = Hit {
             path: "notes/SPEC.md".into(),
-            kind: crate::notes::Kind::Markdown,
+            kind: lapis_lattice::MARKDOWN.into(),
             title: "Lapis · SPEC".into(),
             heading: Some("Goals".into()),
             snippet: Some("ignored when a heading exists".into()),
-            score: Some(0.9),
-            rank: Some(1),
+            score: 0.9,
+            rank: 1,
             domain: None,
             doc_type: None,
             tags: vec![],

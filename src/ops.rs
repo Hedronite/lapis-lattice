@@ -4,10 +4,13 @@
 
 use serde::Serialize;
 
+use std::path::Path;
+
 use crate::backend::Backend;
 use crate::error::{LapisError, Result};
-use crate::lattice::{Client, Document, ListParams, Reindex};
+use crate::http::{self, Client, Document, ListParams, Reindex, SearchResult};
 use crate::{config, notes, overlay, tasks, vault, write};
+use lapis_lattice::SearchParams;
 
 pub struct Ctx {
     pub json: bool,
@@ -27,11 +30,7 @@ impl Ctx {
     /// operator asked for it in config or passed `--lattice`.
     pub fn backend(&self) -> Result<Backend> {
         if self.cfg.lattice.is_embedded() && !self.force_http {
-            let engine = lapis_lattice::Engine::open(&self.vault.root).map_err(|e| match e {
-                lapis_lattice::Error::Usage(m) => LapisError::Usage(m),
-                lapis_lattice::Error::Io(io) => LapisError::from(io),
-                lapis_lattice::Error::Sqlite(s) => LapisError::LatticeDown(format!("index: {s}")),
-            })?;
+            let engine = lapis_lattice::Engine::open(&self.vault.root).map_err(LapisError::from)?;
             Ok(Backend::Embedded(std::sync::Arc::new(std::sync::Mutex::new(engine))))
         } else {
             Ok(Backend::Http(self.client()?))
@@ -157,6 +156,121 @@ pub async fn list(ctx: &Ctx, mut params: ListParams) -> Result<Vec<ListRow>> {
     Ok(ctx.backend()?.documents(&params).await?.into_iter().map(ListRow::from).collect())
 }
 
+/// Search result cap: offset + limit must stay ≤ this (CLI, MCP, JSON meta).
+pub const SEARCH_CAP: u32 = 50;
+
+/// What a search surface asks of [`search`]. Offset/limit live here, not in main/mcp.
+#[derive(Debug, Clone)]
+pub struct SearchQuery {
+    pub query: String,
+    pub limit: u32,
+    pub offset: u32,
+    pub domain: Option<String>,
+    pub mode: lapis_lattice::Mode,
+    pub per_doc: bool,
+    pub mmr: bool,
+    pub include_archives: bool,
+    pub embedder: Option<String>,
+}
+
+impl Default for SearchQuery {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            limit: 10,
+            offset: 0,
+            domain: None,
+            mode: lapis_lattice::Mode::Hybrid,
+            per_doc: true,
+            mmr: false,
+            include_archives: false,
+            embedder: None,
+        }
+    }
+}
+
+pub struct SearchPage {
+    pub result: SearchResult,
+    pub truncated: bool,
+    pub next: Option<u32>,
+    pub limit: u32,
+    pub offset: u32,
+}
+
+fn prepare_search(q: SearchQuery) -> Result<(SearchParams, u32, u32)> {
+    let limit = q.limit.max(1);
+    let offset = q.offset;
+    let requested = offset.saturating_add(limit);
+    if requested > SEARCH_CAP {
+        return Err(LapisError::Usage(format!("offset + limit must be ≤ {SEARCH_CAP} (got {requested})")));
+    }
+    if q.embedder.as_deref() == Some("none") && q.mode == lapis_lattice::Mode::Vector {
+        return Err(LapisError::Usage(
+            "vector mode needs an embedder; got --embedder none. Use --mode bm25|hybrid.".into(),
+        ));
+    }
+    Ok((
+        SearchParams {
+            query: q.query,
+            limit: requested,
+            offset: 0,
+            domain: q.domain,
+            mode: q.mode,
+            per_doc: q.per_doc,
+            mmr: q.mmr,
+            include_archives: q.include_archives,
+            embedder: q.embedder,
+        },
+        limit,
+        offset,
+    ))
+}
+
+pub async fn search(ctx: &Ctx, q: SearchQuery) -> Result<SearchPage> {
+    let (params, limit, offset) = prepare_search(q)?;
+    let mut result = ctx.backend()?.search(&params).await?;
+    let total = result.hits.len();
+    result.hits = result.hits.into_iter().skip(offset as usize).collect();
+    result.count = result.hits.len();
+    let requested = offset + limit;
+    let truncated = total as u32 >= requested && requested < SEARCH_CAP;
+    Ok(SearchPage { result, truncated, next: if truncated { Some(requested) } else { None }, limit, offset })
+}
+
+pub enum NeighborView {
+    Direct(http::Neighbors),
+    Ego(http::Ego),
+}
+
+fn note_rel(path: &str) -> Result<String> {
+    let rel = notes::clean_rel(path)?;
+    Ok(if Path::new(&rel).extension().is_none() { format!("{rel}.md") } else { rel })
+}
+
+pub async fn neighbors(
+    ctx: &Ctx,
+    path: &str,
+    direction: Option<&str>,
+    dangling: bool,
+    hop: u32,
+) -> Result<NeighborView> {
+    if hop != 1 && hop != 2 {
+        return Err(LapisError::Usage(format!("hop must be 1 or 2, got {hop}")));
+    }
+    let rel = note_rel(path)?;
+    let dir = direction.unwrap_or_else(|| ctx.cfg.agent.direction());
+    let resolved_only = !dangling;
+    if hop == 2 {
+        return Ok(NeighborView::Ego(ctx.backend()?.ego(&rel, 2, dir, resolved_only).await?));
+    }
+    Ok(NeighborView::Direct(ctx.backend()?.neighbors(&rel, dir, resolved_only).await?))
+}
+
+pub async fn reindex(ctx: &Ctx, path: &str) -> Result<Reindex> {
+    let (rel, _) = notes::resolve(&ctx.vault.root, path)?;
+    ctx.backend()?.reindex(&rel).await
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WriteReport {
@@ -269,4 +383,47 @@ pub async fn restore(
         }
     };
     Ok((t, reindex, err))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_offset_plus_limit_cap_lives_here() {
+        let q = SearchQuery { query: "x".into(), limit: 30, offset: 30, ..Default::default() };
+        match prepare_search(q) {
+            Err(LapisError::Usage(m)) => assert!(m.contains("≤ 50"), "{m}"),
+            other => panic!("expected usage, got {other:?}"),
+        }
+        let (p, limit, offset) = prepare_search(SearchQuery {
+            query: "lattice".into(),
+            limit: 3,
+            offset: 6,
+            mode: lapis_lattice::Mode::Bm25,
+            per_doc: false,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!((p.limit, p.mode, limit, offset), (9, lapis_lattice::Mode::Bm25, 3, 6));
+        assert!(!p.per_doc);
+        let (p, limit, offset) =
+            prepare_search(SearchQuery { query: "lattice".into(), ..Default::default() }).unwrap();
+        assert!(p.per_doc);
+        assert_eq!((p.limit, limit, offset), (10, 10, 0));
+    }
+
+    #[test]
+    fn vector_plus_embedder_none_is_usage() {
+        let q = SearchQuery {
+            query: "x".into(),
+            mode: lapis_lattice::Mode::Vector,
+            embedder: Some("none".into()),
+            ..Default::default()
+        };
+        match prepare_search(q) {
+            Err(LapisError::Usage(m)) => assert!(m.contains("embedder"), "{m}"),
+            other => panic!("expected usage, got {other:?}"),
+        }
+    }
 }

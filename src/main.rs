@@ -10,7 +10,7 @@ mod config;
 mod envelope;
 mod error;
 mod hal;
-mod lattice;
+mod http;
 mod mcp;
 mod notes;
 mod ops;
@@ -38,8 +38,8 @@ use cli::{
 };
 use envelope::Meta;
 use error::{LapisError, Result};
-use lattice::{ListParams, SearchParams};
-use ops::Ctx;
+use http::ListParams;
+use ops::{Ctx, SearchQuery};
 
 // Multi-thread so the TUI can block its thread while lattice requests run.
 /// Process start, for `meta.latency_ms` in every envelope.
@@ -196,41 +196,30 @@ async fn vault_info(ctx: &Ctx) -> Result<()> {
 // --------------------------------------------------------------------- search
 
 async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
-    let limit = args.limit.max(1);
-    let offset = args.offset;
-    let requested = offset + limit;
-    if requested > 50 {
-        return Err(LapisError::Usage(format!("offset + limit must be ≤ 50 (got {requested})")));
-    }
-    if args.embedder.as_deref() == Some("none") && matches!(args.mode, lattice::Mode::Vector) {
-        return Err(LapisError::Usage(
-            "vector mode needs an embedder; got --embedder none. Use --mode bm25|hybrid.".into(),
-        ));
-    }
-    let params = SearchParams {
-        query: args.query_text(),
-        top_k: requested,
-        domain: args.domain.clone(),
-        mode: args.mode,
-        per_doc: args.effective_per_doc(ctx.cfg.agent.per_doc),
-        mmr: args.mmr,
-        include_archives: args.include_archives,
-        embedder: args.embedder.clone(),
-    };
-    let mut result = ctx.backend()?.search(&params).await?;
-    // The lattice has no offset; ask for offset+limit and drop the head. Ranks stay absolute.
-    let total = result.hits.len();
-    result.hits = result.hits.into_iter().skip(offset as usize).collect();
-    result.count = result.hits.len();
-    let truncated = total as u32 >= requested && requested < 50;
+    let page = ops::search(
+        ctx,
+        SearchQuery {
+            query: args.query_text(),
+            limit: args.limit,
+            offset: args.offset,
+            domain: args.domain.clone(),
+            mode: args.mode.into(),
+            per_doc: args.effective_per_doc(ctx.cfg.agent.per_doc),
+            mmr: args.mmr,
+            include_archives: args.include_archives,
+            embedder: args.embedder.clone(),
+        },
+    )
+    .await?;
+    let result = page.result;
     if ctx.json {
         let meta = Meta {
-            truncated,
-            next: if truncated { Some(requested) } else { None },
+            truncated: page.truncated,
+            next: page.next,
             latency: Some(result.latency),
             count: Some(result.count),
-            limit: Some(limit),
-            offset: Some(offset),
+            limit: Some(page.limit),
+            offset: Some(page.offset),
             ..Meta::default()
         };
         return emit_with(&result, meta);
@@ -240,13 +229,13 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
         return Ok(());
     }
     for h in &result.hits {
-        let rank = h.rank.map(|r| format!("{r:>2}.")).unwrap_or_else(|| "  ".into());
+        let rank = format!("{:>2}.", h.rank);
         println!("{rank} {}", h.path);
         let heading = h.heading.clone().filter(|hd| hd != &h.title);
         let meta = meta_line(&[
             heading,
             h.domain.as_ref().map(|d| format!("domain={d}")),
-            h.score.map(|s| format!("score={s:.4}")),
+            Some(format!("score={:.4}", h.score)),
         ]);
         println!("    {}{meta}", h.title);
     }
@@ -326,9 +315,7 @@ async fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
 // -------------------------------------------------------------------- reindex
 
 async fn reindex(ctx: &Ctx, args: ReindexArgs) -> Result<()> {
-    // Validate locally first so an escape is exit 3 before any HTTP.
-    let (rel, _abs) = notes::resolve(&ctx.vault.root, &args.path)?;
-    let r = ctx.backend()?.reindex(&rel).await?;
+    let r = ops::reindex(ctx, &args.path).await?;
     if ctx.json {
         return emit_json(&r);
     }
@@ -734,21 +721,20 @@ async fn doctor(ctx: &Ctx) -> Result<()> {
     );
 
     // A probe that returns nothing is fine. A probe that errors is not.
-    let probe = ctx
-        .backend()?
-        .search(&SearchParams {
+    let probe = ops::search(
+        ctx,
+        SearchQuery {
             query: "lapis".into(),
-            top_k: 1,
-            domain: None,
-            mode: lattice::Mode::Bm25,
+            limit: 1,
+            mode: lapis_lattice::Mode::Bm25,
             per_doc: true,
-            mmr: false,
-            include_archives: false,
             embedder: Some("none".into()),
-        })
-        .await;
+            ..Default::default()
+        },
+    )
+    .await;
     match &probe {
-        Ok(r) => check!("search", "ok", format!("{} hit(s) for a probe query", r.count)),
+        Ok(p) => check!("search", "ok", format!("{} hit(s) for a probe query", p.result.count)),
         Err(e) => check!("search", "fail", e.to_string()),
     }
 
@@ -840,48 +826,46 @@ fn resolve_link(ctx: &Ctx, args: ResolveArgs) -> Result<()> {
 // ------------------------------------------------------------------ neighbors
 
 async fn neighbors(ctx: &Ctx, args: NeighborsArgs) -> Result<()> {
-    // Path escape rules apply even though the lattice, not the disk, answers.
-    let rel = notes::clean_rel(&args.path)?;
-    let rel = if std::path::Path::new(&rel).extension().is_none() { format!("{rel}.md") } else { rel };
-    let dir = args.direction.clone().unwrap_or_else(|| ctx.cfg.agent.direction().to_string());
-    if args.hop == 2 {
-        let e = ctx.backend()?.ego(&rel, 2, &dir, !args.dangling).await?;
-        if ctx.json {
-            let meta = Meta { truncated: e.truncated, count: Some(e.count), ..Meta::default() };
-            return emit_with(&e, meta);
+    match ops::neighbors(ctx, &args.path, args.direction.as_deref(), args.dangling, args.hop).await? {
+        ops::NeighborView::Ego(e) => {
+            if ctx.json {
+                let meta = Meta { truncated: e.truncated, count: Some(e.count), ..Meta::default() };
+                return emit_with(&e, meta);
+            }
+            if e.rows.is_empty() {
+                println!("No {} neighbors within 2 hops of {}.", e.direction, e.path);
+                return Ok(());
+            }
+            for r in &e.rows {
+                let arrow = if r.direction == "in" { "<-" } else { "->" };
+                let shown = r.path.clone().or_else(|| r.dst_raw.clone()).unwrap_or_else(|| "?".into());
+                let flag = if r.resolved { "" } else { "  (dangling)" };
+                let via = if r.depth > 1 {
+                    format!("  via {}", r.via.clone().unwrap_or_default())
+                } else {
+                    String::new()
+                };
+                println!("{}{arrow} {shown}{flag}{via}", "  ".repeat(r.depth as usize - 1));
+            }
+            if e.truncated {
+                eprintln!("lapis: ego graph truncated at {} rows", e.count);
+            }
+            Ok(())
         }
-        if e.rows.is_empty() {
-            println!("No {} neighbors within 2 hops of {}.", e.direction, e.path);
-            return Ok(());
+        ops::NeighborView::Direct(n) => {
+            if ctx.json {
+                return emit_json(&n);
+            }
+            if n.neighbors.is_empty() {
+                println!("No {} neighbors for {}.", n.direction, n.path);
+                return Ok(());
+            }
+            for e in &n.neighbors {
+                let arrow = if e.direction == "in" { "<-" } else { "->" };
+                let flag = if e.resolved { "" } else { "  (dangling)" };
+                println!("{arrow} {}{flag}", e.label());
+            }
+            Ok(())
         }
-        for r in &e.rows {
-            let arrow = if r.direction == "in" { "<-" } else { "->" };
-            let shown = r.path.clone().or_else(|| r.dst_raw.clone()).unwrap_or_else(|| "?".into());
-            let flag = if r.resolved { "" } else { "  (dangling)" };
-            let via = if r.depth > 1 {
-                format!("  via {}", r.via.clone().unwrap_or_default())
-            } else {
-                String::new()
-            };
-            println!("{}{arrow} {shown}{flag}{via}", "  ".repeat(r.depth as usize - 1));
-        }
-        if e.truncated {
-            eprintln!("lapis: ego graph truncated at {} rows", e.count);
-        }
-        return Ok(());
     }
-    let n = ctx.backend()?.neighbors(&rel, &dir, !args.dangling).await?;
-    if ctx.json {
-        return emit_json(&n);
-    }
-    if n.neighbors.is_empty() {
-        println!("No {} neighbors for {}.", n.direction, n.path);
-        return Ok(());
-    }
-    for e in &n.neighbors {
-        let arrow = if e.direction == "in" { "<-" } else { "->" };
-        let flag = if e.resolved { "" } else { "  (dangling)" };
-        println!("{arrow} {}{flag}", e.label());
-    }
-    Ok(())
 }

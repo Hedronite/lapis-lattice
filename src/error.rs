@@ -15,15 +15,16 @@ pub enum LapisError {
     Path(String),
     /// Anything else (I/O on a file we were allowed to touch, JSON encode).
     Internal(String),
+    /// Embedded index does not implement this op. `kind` is `http_only` (B11).
+    HttpOnly { op: &'static str },
 }
 
 impl LapisError {
     pub fn exit_code(&self) -> i32 {
         match self {
-            LapisError::Usage(_) => 1,
+            LapisError::Usage(_) | LapisError::Internal(_) | LapisError::HttpOnly { .. } => 1,
             LapisError::LatticeDown(_) => 2,
             LapisError::Path(_) => 3,
-            LapisError::Internal(_) => 1,
         }
     }
 
@@ -33,15 +34,20 @@ impl LapisError {
             LapisError::LatticeDown(_) => "lattice_down",
             LapisError::Path(_) => "path",
             LapisError::Internal(_) => "internal",
+            LapisError::HttpOnly { .. } => "http_only",
         }
     }
 
-    pub fn message(&self) -> &str {
+    pub fn message(&self) -> String {
         match self {
             LapisError::Usage(m)
             | LapisError::LatticeDown(m)
             | LapisError::Path(m)
-            | LapisError::Internal(m) => m,
+            | LapisError::Internal(m) => m.clone(),
+            LapisError::HttpOnly { op } => format!(
+                "{op} is not implemented by the embedded index; it requires `lattice.mode = \"http\"` \
+                 (set it in ~/.config/lapis/config.toml or pass --lattice <url>)"
+            ),
         }
     }
 }
@@ -66,6 +72,16 @@ impl From<std::io::Error> for LapisError {
 impl From<serde_json::Error> for LapisError {
     fn from(e: serde_json::Error) -> Self {
         LapisError::Internal(format!("json: {e}"))
+    }
+}
+
+impl From<lapis_lattice::Error> for LapisError {
+    fn from(e: lapis_lattice::Error) -> Self {
+        match e {
+            lapis_lattice::Error::Usage(m) => LapisError::Usage(m),
+            lapis_lattice::Error::Io(io) => LapisError::from(io),
+            lapis_lattice::Error::Sqlite(s) => LapisError::LatticeDown(format!("index: {s}")),
+        }
     }
 }
 
