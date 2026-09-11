@@ -1,5 +1,5 @@
 # FIXTURE — not a shipped theme, not a Lapis palette.
-# Captured verbatim from lathe (Omahedron) on 2026-09-10:
+# Captured verbatim from a live Omarchy box on 2026-09-10:
 #   ~/.local/state/omarchy/current/theme/colors.toml   theme.name = hedron
 # Kept as-is on purpose: it exercises mode, all four background and foreground
 # tiers, the full ANSI set, an accent/orange collision (both #a96a38), and the

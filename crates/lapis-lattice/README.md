@@ -7,7 +7,18 @@ This is the in-process recall engine for [Lapis](https://github.com/VirtualMachi
 - No HTTP daemon required
 - No Turso / libsql
 - No DuckDB
-- Vector/ONNX embeddings are out of scope for 0.1 (search is FTS5; hybrid is later)
+- Optional sqlite-vec KNN for hybrid search when an embedder is configured (`--embedder none` is the default)
+
+## Install
+
+This crate is the engine library only — it does not ship the `lapis` CLI/TUI binary.
+For the app, see the [repo README](https://github.com/VirtualMachinist/lapis-lattice#install).
+
+Live on crates.io today: `0.1.0` (`cargo add lapis-lattice`). After `v0.4.1` is tagged and published:
+
+```bash
+cargo add lapis-lattice@0.4.1
+```
 
 ```rust,no_run
 use lapis_lattice::Engine;

@@ -40,6 +40,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: crate version matches git tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          want="${tag#v}"
+          got="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; pkgs=json.load(sys.stdin)["packages"]; print(next(p["version"] for p in pkgs if p["name"]=="lapis"))')"
+          test "$got" = "$want" || { echo "version mismatch: Cargo has $got, tag is $tag"; exit 1; }
       - uses: Swatinem/rust-cache@v2
       - name: build (desktop off)
         run: cargo build --release --locked --bin lapis
