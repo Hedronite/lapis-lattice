@@ -14,6 +14,9 @@ mod index;
 mod kinds;
 mod sqlite;
 
+#[cfg(test)]
+mod search_ids;
+
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;

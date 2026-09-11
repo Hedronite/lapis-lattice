@@ -125,15 +125,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             path TEXT NOT NULL REFERENCES documents(path) ON DELETE CASCADE,
             chunk_index INTEGER NOT NULL,
             heading TEXT,
-            text TEXT NOT NULL
-        );
-        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-            text,
-            path UNINDEXED,
-            heading UNINDEXED,
-            content='chunks',
-            content_rowid='chunk_id',
-            tokenize = 'porter'
+            text TEXT NOT NULL,
+            title TEXT
         );
         CREATE TABLE IF NOT EXISTS edges (
             src TEXT NOT NULL,
@@ -152,6 +145,47 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1');
         INSERT OR IGNORE INTO meta(key, value) VALUES ('embed_model', 'none');
         "#,
+    )?;
+    // Pre-G1 vaults have chunks without title and FTS with path UNINDEXED.
+    let _ = conn.execute("ALTER TABLE chunks ADD COLUMN title TEXT", []);
+    ensure_chunks_fts(conn)?;
+    Ok(())
+}
+
+/// Body BM25 plus identifier columns. `path` and HAL `title` are indexed;
+/// `heading` stays UNINDEXED. External content still points at `chunks`.
+pub fn create_chunks_fts(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+            text,
+            path,
+            heading UNINDEXED,
+            title,
+            content='chunks',
+            content_rowid='chunk_id',
+            tokenize = 'porter'
+        );"#,
+    )?;
+    Ok(())
+}
+
+fn chunks_fts_is_identifier_schema(sql: &str) -> bool {
+    let l = sql.to_lowercase();
+    !l.contains("path unindexed") && l.contains("title") && !l.contains("title unindexed")
+}
+
+/// Rebuild FTS when an older file still has `path UNINDEXED` and no title column.
+fn ensure_chunks_fts(conn: &Connection) -> Result<()> {
+    let sql: Option<String> =
+        conn.query_row("SELECT sql FROM sqlite_master WHERE name = 'chunks_fts'", [], |r| r.get(0)).ok();
+    if sql.as_deref().is_some_and(chunks_fts_is_identifier_schema) {
+        return Ok(());
+    }
+    conn.execute_batch("DROP TABLE IF EXISTS chunks_fts;")?;
+    create_chunks_fts(conn)?;
+    conn.execute_batch(
+        "INSERT INTO chunks_fts(rowid, text, path, heading, title)
+         SELECT chunk_id, text, path, heading, COALESCE(title, '') FROM chunks;",
     )?;
     Ok(())
 }
@@ -189,12 +223,14 @@ pub fn meta_set(conn: &Connection, key: &str, value: &str) -> Result<()> {
 }
 
 /// Turn a user query into an FTS5 MATCH expression: keep word characters,
-/// quote each term, AND them together.
+/// quote each term, AND them together. `.` is a separator (`AGENTS.md` →
+/// `"AGENTS" "md"`); stripping it would concatenate into `AGENTSmd`.
 fn fts_expr(q: &str) -> String {
     q.split_whitespace()
-        .map(|w| {
+        .flat_map(|w| w.split('.'))
+        .filter_map(|w| {
             let t: String = w.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-').collect();
-            if t.is_empty() { w.to_string() } else { format!("\"{t}\"") }
+            if t.is_empty() { None } else { Some(format!("\"{t}\"")) }
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -469,4 +505,19 @@ pub fn health(conn: &Connection, db_path: &Path) -> Result<Health> {
         embed_dim,
         graph: Graph { built, edges, dangling_links },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fts_expr;
+
+    /// G0a: dotted filenames must not fold into a single synthetic token.
+    #[test]
+    fn dotted_tokens_are_not_concatenated() {
+        let expr = fts_expr("AGENTS.md");
+        assert!(!expr.contains("AGENTSmd"), "fold must not synthesize AGENTSmd: {expr}");
+        assert_eq!(expr, "\"AGENTS\" \"md\"");
+        assert_eq!(fts_expr("find AGENTS.md now"), "\"find\" \"AGENTS\" \"md\" \"now\"");
+        assert_eq!(fts_expr("GOAL-struct"), "\"GOAL-struct\"", "hyphens stay inside a token");
+    }
 }

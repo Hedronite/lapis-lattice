@@ -13,7 +13,7 @@ use crate::error::{LapisError, Result};
 pub const DEFAULT_LATTICE_URL: &str = "http://127.0.0.1:8080";
 pub const DEFAULT_TIMEOUT_MS: u64 = 8000;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct Config {
     #[serde(default)]
     pub lattice: LatticeConfig,
@@ -116,13 +116,13 @@ impl AgentConfig {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct OperatorConfig {
     #[serde(default)]
     pub name: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct LatticeConfig {
     /// `embedded` (default) or `http`. Embedded needs no daemon.
     #[serde(default = "default_mode")]

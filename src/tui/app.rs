@@ -13,10 +13,10 @@ use ratatui::text::Line;
 use ratatui_textarea::TextArea;
 
 use crate::http::{Document, ListParams, Neighbor};
-use crate::ops::Ctx;
+use crate::ops::{self, Ctx, SearchQuery};
 use crate::tasks::Task;
 use crate::{hal, notes, tasks, templates, write};
-use lapis_lattice::{Hit, Mode as SearchMode, SearchParams};
+use lapis_lattice::{Hit, Mode as SearchMode};
 
 use super::mouse::Regions;
 use super::omarchy;
@@ -344,21 +344,20 @@ impl App {
         if q == p.asked {
             return;
         }
-        let backend = match self.ctx.backend() {
-            Ok(b) => b,
-            Err(e) => {
-                self.set_status(format!("lattice: {e}"));
-                return;
-            }
-        };
         p.seq += 1;
         p.pending = true;
         p.asked = q.clone();
         let seq = p.seq;
         let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
         tokio::spawn(async move {
-            let params = SearchParams { query: q, limit: 25, mode, per_doc: true, ..Default::default() };
-            let r = backend.search(&params).await.map(|r| r.hits).map_err(|e| e.to_string());
+            let r = ops::search(
+                &ctx,
+                SearchQuery { query: q, limit: 25, mode, per_doc: true, ..Default::default() },
+            )
+            .await
+            .map(|p| p.result.hits)
+            .map_err(|e| e.to_string());
             let _ = tx.send(Msg::Search(seq, r));
         });
     }

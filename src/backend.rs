@@ -7,15 +7,20 @@
 //!
 //! Both arms return the same CLI wire types, so `main` and `mcp` never fork.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use lapis_lattice::Engine;
+use lapis_lattice::{Engine, Hit, SearchParams};
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::error::{LapisError, Result};
-use crate::http::{self, Client, ListParams, Neighbors, SearchResult};
-use lapis_lattice::SearchParams;
+use crate::http::{self, Client, Document, ListParams, Neighbors, SearchResult};
+use crate::notes::{self, Kind};
+
+/// Window fetched before identifier boost, matching `ops::SEARCH_CAP`.
+const IDENTIFIER_WINDOW: u32 = 50;
+const IDENTIFIER_MODALITY: &str = "identifier";
 
 /// What `lapis doctor` and `vault info` report, per `schema/v0.2/health.schema.json`.
 #[derive(Debug, Clone, Serialize)]
@@ -61,6 +66,78 @@ fn http_only(op: &'static str) -> LapisError {
     LapisError::HttpOnly { op }
 }
 
+fn query_tokens(q: &str) -> Vec<String> {
+    let mut t: Vec<String> = q
+        .split_whitespace()
+        .flat_map(|w| w.split('.'))
+        .map(|w| w.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-').collect::<String>())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_lowercase())
+        .collect();
+    if t.iter().any(|s| s.len() >= 3) {
+        t.retain(|s| s.len() >= 3);
+    }
+    t
+}
+
+fn identifier_haystack(path: &str, title: &str) -> String {
+    let name = Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or(path);
+    let stem = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or(path);
+    format!("{path} {name} {stem} {title}").to_lowercase()
+}
+
+fn is_identifier(path: &str, title: &str, tokens: &[String], q_fold: &str) -> bool {
+    if tokens.is_empty() {
+        return false;
+    }
+    let hay = identifier_haystack(path, title);
+    (!q_fold.is_empty() && hay.contains(q_fold)) || tokens.iter().all(|t| hay.contains(t))
+}
+
+fn identifier_strength(path: &str, title: &str, q_fold: &str) -> u8 {
+    let path_l = path.to_lowercase();
+    let title_l = title.to_lowercase();
+    let name = Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or(path).to_lowercase();
+    let stem = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or(path).to_lowercase();
+    let q_stem = q_fold.trim_end_matches(".md");
+    if stem == q_fold || stem == q_stem || name == q_fold {
+        3
+    } else if title_l == q_fold || title_l == q_stem || stem.contains(q_stem) || name.contains(q_stem) {
+        2
+    } else if path_l.contains(q_stem) || title_l.contains(q_stem) {
+        1
+    } else {
+        0
+    }
+}
+
+fn hit_from_doc(d: Document) -> Hit {
+    let path = d.path;
+    let title = d.title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| {
+        Path::new(&path).file_stem().and_then(|s| s.to_str()).unwrap_or(&path).to_string()
+    });
+    Hit {
+        kind: match notes::kind_of(&path) {
+            Kind::Html => lapis_lattice::HTML.into(),
+            Kind::Yaml => lapis_lattice::YAML.into(),
+            Kind::Markdown => lapis_lattice::MARKDOWN.into(),
+            Kind::Pdf => "pdf".into(),
+            Kind::Source => "source".into(),
+        },
+        title,
+        heading: None,
+        snippet: None,
+        rank: 0,
+        score: 1.0,
+        domain: d.domain,
+        doc_type: d.doc_type,
+        tags: d.tags,
+        chunk_id: None,
+        chunk_index: None,
+        path,
+    }
+}
+
 impl Backend {
     pub fn mode(&self) -> &'static str {
         match self {
@@ -78,14 +155,103 @@ impl Backend {
     }
 
     pub async fn search(&self, p: &SearchParams) -> Result<SearchResult> {
-        match self {
-            Backend::Http(c) => c.search(p).await,
+        let want = p.limit.clamp(1, IDENTIFIER_WINDOW);
+        let mut fetch = p.clone();
+        fetch.limit = IDENTIFIER_WINDOW;
+        fetch.offset = 0;
+        let mut r = match self {
+            Backend::Http(c) => c.search(&fetch).await?,
             Backend::Embedded(e) => {
                 let t0 = std::time::Instant::now();
-                let r = lock(e).search_with(p).map_err(LapisError::from)?;
-                Ok(SearchResult::from_engine(p, r, t0.elapsed().as_secs_f64() * 1000.0))
+                let eng = lock(e).search_with(&fetch).map_err(LapisError::from)?;
+                SearchResult::from_engine(p, eng, t0.elapsed().as_secs_f64() * 1000.0)
+            }
+        };
+        self.apply_identifier_boost(p, &mut r).await;
+        if r.hits.len() > want as usize {
+            r.hits.truncate(want as usize);
+        }
+        for (i, h) in r.hits.iter_mut().enumerate() {
+            h.rank = i as u32 + 1;
+        }
+        r.count = r.hits.len();
+        Ok(r)
+    }
+
+    /// Reorder (and if needed inject) hits whose path, basename, or title
+    /// contains the query tokens. Shared by HTTP and embedded.
+    async fn apply_identifier_boost(&self, p: &SearchParams, r: &mut SearchResult) {
+        let tokens = query_tokens(&p.query);
+        if tokens.is_empty() {
+            return;
+        }
+        let q_fold = p.query.trim().to_lowercase();
+        let mut idents = Vec::new();
+        let mut rest = Vec::new();
+        for h in r.hits.drain(..) {
+            if is_identifier(&h.path, &h.title, &tokens, &q_fold) {
+                idents.push(h);
+            } else {
+                rest.push(h);
             }
         }
+        if idents.is_empty()
+            && let Ok(extra) = self.inject_identifier_hits(p, &tokens, &q_fold, &rest).await
+        {
+            idents = extra;
+        }
+        if idents.is_empty() {
+            r.hits = rest;
+            return;
+        }
+        idents.sort_by(|a, b| {
+            identifier_strength(&b.path, &b.title, &q_fold)
+                .cmp(&identifier_strength(&a.path, &a.title, &q_fold))
+        });
+        if !r.modalities.iter().any(|m| m == IDENTIFIER_MODALITY) {
+            r.modalities.push(IDENTIFIER_MODALITY.into());
+        }
+        let seen: std::collections::HashSet<String> = idents.iter().map(|h| h.path.clone()).collect();
+        rest.retain(|h| !seen.contains(&h.path));
+        r.hits = idents;
+        r.hits.append(&mut rest);
+    }
+
+    async fn inject_identifier_hits(
+        &self,
+        p: &SearchParams,
+        tokens: &[String],
+        q_fold: &str,
+        rest: &[Hit],
+    ) -> Result<Vec<Hit>> {
+        let existing: std::collections::HashSet<&str> = rest.iter().map(|h| h.path.as_str()).collect();
+        let mut out = Vec::new();
+        let mut offset = 0u32;
+        for _ in 0..8 {
+            let docs = self
+                .documents(&ListParams {
+                    domain: p.domain.clone(),
+                    limit: 1000,
+                    offset,
+                    ..Default::default()
+                })
+                .await?;
+            let n = docs.len() as u32;
+            for d in docs {
+                if existing.contains(d.path.as_str()) {
+                    continue;
+                }
+                let title = d.title.clone().unwrap_or_default();
+                if is_identifier(&d.path, &title, tokens, q_fold) {
+                    out.push(hit_from_doc(d));
+                }
+            }
+            if n < 1000 {
+                break;
+            }
+            offset += 1000;
+        }
+        Ok(out)
     }
 
     pub async fn documents(&self, p: &ListParams) -> Result<Vec<http::Document>> {
@@ -347,6 +513,98 @@ mod tests {
         let h = r.hits.iter().find(|h| h.path == "Tagged.md").expect("Tagged.md hit");
         assert!(h.tags.iter().any(|t| t == "intro"), "tags from the index, got {:?}", h.tags);
         assert!(h.chunk_id.is_some(), "chunk_id from the index");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn identifier_match_is_basename_not_body() {
+        let tokens = super::query_tokens("GOAL-struct");
+        assert!(super::is_identifier("pack/GOAL-struct.md", "GOAL-struct", &tokens, "goal-struct"));
+        assert!(!super::is_identifier("notes/Skills-Paradigm.md", "Skills Paradigm", &tokens, "goal-struct"));
+        assert_eq!(super::identifier_strength("pack/GOAL-struct.md", "GOAL-struct", "goal-struct"), 3);
+    }
+
+    /// Letter-bag embedder so hybrid actually runs a vector arm. Content-dependent
+    /// so a long decoy can outrank a short identifier note before the boost.
+    struct BagEmbedder {
+        dim: usize,
+    }
+
+    impl lapis_lattice::Embedder for BagEmbedder {
+        fn model(&self) -> &str {
+            "bag-v1"
+        }
+        fn dim(&self) -> usize {
+            self.dim
+        }
+        fn provider(&self) -> &'static str {
+            "onnx"
+        }
+        fn embed_documents(&self, texts: &[String]) -> lapis_lattice::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|t| bag(t, self.dim)).collect())
+        }
+        fn embed_query(&self, text: &str) -> lapis_lattice::Result<Vec<f32>> {
+            Ok(bag(text, self.dim))
+        }
+    }
+
+    fn bag(text: &str, dim: usize) -> Vec<f32> {
+        let mut v = vec![0.0f32; dim];
+        for c in text.to_lowercase().chars().filter(|c| c.is_ascii_alphabetic()) {
+            v[(c as usize - b'a' as usize) % dim] += 1.0;
+        }
+        v
+    }
+
+    /// G2c: hybrid (BM25+vector) still ranks the identifier note first after
+    /// `Backend::search`. Empty hits while indexed is a fail.
+    #[tokio::test]
+    async fn identifier_boost_beats_hybrid_decoy() {
+        let d = std::env::temp_dir().join(format!(
+            "lapis-g2c-id-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(d.join("pack")).unwrap();
+        std::fs::create_dir_all(d.join("notes")).unwrap();
+        std::fs::write(
+            d.join("pack/GOAL-struct.md"),
+            "---\nname: GOAL-struct\ntitle: GOAL-struct\n---\n# Paste\n\n\
+             Authorized loop text. Ranking uses path and HAL name, not this body.\n",
+        )
+        .unwrap();
+        let decoy = format!(
+            "---\nname: Skills Paradigm\n---\n# Skills Paradigm\n\n{}\n",
+            "structure skills paradigm hub vibe lattice ranking. ".repeat(80)
+        );
+        std::fs::write(d.join("notes/Skills-Paradigm.md"), decoy).unwrap();
+        let mut e =
+            lapis_lattice::Engine::open_with(&d, Some(std::sync::Arc::new(BagEmbedder { dim: 8 }))).unwrap();
+        e.reindex().unwrap();
+        let b = Backend::Embedded(std::sync::Arc::new(std::sync::Mutex::new(e)));
+        let r = b
+            .search(&SearchParams {
+                query: "GOAL-struct".into(),
+                limit: 10,
+                mode: lapis_lattice::Mode::Hybrid,
+                per_doc: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(!r.hits.is_empty(), "indexed GOAL-struct.md must not silent-zero");
+        assert_eq!(
+            r.hits[0].path,
+            "pack/GOAL-struct.md",
+            "identifier must rank #1 under hybrid, got {:?}",
+            r.hits.iter().map(|h| &h.path).collect::<Vec<_>>()
+        );
+        assert_eq!(r.hits[0].rank, 1);
+        assert!(
+            r.modalities.iter().any(|m| m == "identifier"),
+            "boost must name itself, got {:?}",
+            r.modalities
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 }

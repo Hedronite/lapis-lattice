@@ -12,6 +12,15 @@ use crate::{IndexReport, Result};
 
 const SKIP: &[&str] = &[".lapis", ".git", ".obsidian", "node_modules", ".venv", "target"];
 
+/// One external-content FTS row, for the 'delete' command in [`forget_path`].
+struct FtsRow {
+    id: i64,
+    text: String,
+    path: String,
+    heading: Option<String>,
+    title: Option<String>,
+}
+
 pub fn reindex(conn: &Connection, vault: &Path) -> Result<IndexReport> {
     // The vector table carries no foreign key, so nothing cascades when the
     // chunk rows go. Clearing it here is what stops KNN from returning ids that
@@ -22,12 +31,7 @@ pub fn reindex(conn: &Connection, vault: &Path) -> Result<IndexReport> {
     // bulk is to drop and recreate. Single-path updates use the 'delete'
     // command instead (see `forget_path`), which is O(chunks in that file).
     conn.execute_batch("DROP TABLE IF EXISTS chunks_fts;")?;
-    conn.execute_batch(
-        r#"CREATE VIRTUAL TABLE chunks_fts USING fts5(
-            text, path UNINDEXED, heading UNINDEXED,
-            content='chunks', content_rowid='chunk_id', tokenize='porter'
-        );"#,
-    )?;
+    crate::sqlite::create_chunks_fts(conn)?;
 
     let files = walk(vault)?;
     let mut chunks_n = 0u64;
@@ -73,15 +77,24 @@ fn forget_path(conn: &Connection, rel: &str) -> Result<()> {
     // Same reason as the full reindex: `vec0` has no cascade of its own, and the
     // chunk ids have to go before the chunks do.
     crate::sqlite::forget_vectors_for_path(conn, rel)?;
-    let mut stmt = conn.prepare("SELECT chunk_id, text, path, heading FROM chunks WHERE path = ?1")?;
-    let rows: Vec<(i64, String, String, Option<String>)> = stmt
-        .query_map(params![rel], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+    let mut stmt = conn.prepare("SELECT chunk_id, text, path, heading, title FROM chunks WHERE path = ?1")?;
+    let rows: Vec<FtsRow> = stmt
+        .query_map(params![rel], |r| {
+            Ok(FtsRow {
+                id: r.get(0)?,
+                text: r.get(1)?,
+                path: r.get(2)?,
+                heading: r.get(3)?,
+                title: r.get(4)?,
+            })
+        })?
         .filter_map(|r| r.ok())
         .collect();
-    for (id, text, path, heading) in rows {
+    for row in rows {
         conn.execute(
-            "INSERT INTO chunks_fts(chunks_fts, rowid, text, path, heading) VALUES('delete',?1,?2,?3,?4)",
-            params![id, text, path, heading],
+            "INSERT INTO chunks_fts(chunks_fts, rowid, text, path, heading, title) \
+             VALUES('delete',?1,?2,?3,?4,?5)",
+            params![row.id, row.text, row.path, row.heading, row.title],
         )?;
     }
     conn.execute("DELETE FROM chunks WHERE path = ?1", params![rel])?;
@@ -138,13 +151,13 @@ fn index_one(conn: &Connection, vault: &Path, rel: &str) -> Result<u64> {
     let mut n = 0u64;
     for (i, (heading, chunk)) in chunks.into_iter().enumerate() {
         conn.execute(
-            "INSERT INTO chunks(path, chunk_index, heading, text) VALUES(?1,?2,?3,?4)",
-            params![rel, i as i64, heading, chunk],
+            "INSERT INTO chunks(path, chunk_index, heading, text, title) VALUES(?1,?2,?3,?4,?5)",
+            params![rel, i as i64, heading, chunk, title],
         )?;
         let id = conn.last_insert_rowid();
         conn.execute(
-            "INSERT INTO chunks_fts(rowid, text, path, heading) VALUES(?1,?2,?3,?4)",
-            params![id, chunk, rel, heading],
+            "INSERT INTO chunks_fts(rowid, text, path, heading, title) VALUES(?1,?2,?3,?4,?5)",
+            params![id, chunk, rel, heading, title],
         )?;
         n += 1;
     }
