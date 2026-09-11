@@ -561,7 +561,6 @@ mod tests {
         }
         walk(&root.join("src"), root, &mut over);
         walk(&root.join("crates"), root, &mut over);
-        over.retain(|p| !p.starts_with("crates/lapis-lattice/src/lib.rs"));
         assert!(over.is_empty(), "files ≥ 1000 lines: {over:?}");
     }
 }
