@@ -246,20 +246,20 @@ pub fn search(conn: &Connection, p: &SearchParams, embedder: Option<&dyn Embedde
                 fts_rank.push(id);
                 fts_hits.insert(
                     id,
-                    hit_from_row(
-                        id,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
+                    hit_from_row(HitRow {
+                        chunk_id: id,
+                        path: row.get(1)?,
+                        title: row.get(2)?,
+                        heading: row.get(3)?,
+                        snippet: row.get(4)?,
                         // bm25() is lower-is-better; invert for a friendlier score.
-                        if score == 0.0 { 0.0 } else { 1.0 / (1.0 + score.abs()) },
-                        row.get(6)?,
-                        row.get(7)?,
-                        row.get(8)?,
-                        row.get(9)?,
-                        row.get(10)?,
-                    ),
+                        score: if score == 0.0 { 0.0 } else { 1.0 / (1.0 + score.abs()) },
+                        domain: row.get(6)?,
+                        doc_type: row.get(7)?,
+                        kind: row.get(8)?,
+                        tags_json: row.get(9)?,
+                        chunk_index: row.get(10)?,
+                    }),
                 );
             }
         }
@@ -341,22 +341,22 @@ fn hydrate_chunk(conn: &Connection, chunk_id: i64, domain: Option<&str>) -> Resu
     }
     let text: String = row.get(3)?;
     let snippet: String = text.chars().take(160).collect();
-    Ok(Some(hit_from_row(
+    Ok(Some(hit_from_row(HitRow {
         chunk_id,
-        row.get(0)?,
-        row.get(1)?,
-        row.get(2)?,
-        Some(snippet),
-        0.0,
-        dom,
-        row.get(5)?,
-        row.get(6)?,
-        row.get(7)?,
-        row.get(8)?,
-    )))
+        path: row.get(0)?,
+        title: row.get(1)?,
+        heading: row.get(2)?,
+        snippet: Some(snippet),
+        score: 0.0,
+        domain: dom,
+        doc_type: row.get(5)?,
+        kind: row.get(6)?,
+        tags_json: row.get(7)?,
+        chunk_index: row.get(8)?,
+    })))
 }
 
-fn hit_from_row(
+struct HitRow {
     chunk_id: i64,
     path: String,
     title: Option<String>,
@@ -368,23 +368,25 @@ fn hit_from_row(
     kind: Option<String>,
     tags_json: String,
     chunk_index: Option<i64>,
-) -> Hit {
-    let title = title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| {
-        Path::new(&path).file_stem().and_then(|s| s.to_str()).unwrap_or(&path).to_string()
+}
+
+fn hit_from_row(r: HitRow) -> Hit {
+    let title = r.title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| {
+        Path::new(&r.path).file_stem().and_then(|s| s.to_str()).unwrap_or(&r.path).to_string()
     });
     Hit {
-        kind: kind.unwrap_or_else(|| "markdown".into()),
+        kind: r.kind.unwrap_or_else(|| "markdown".into()),
         title,
-        heading: heading.filter(|s| !s.is_empty()),
-        snippet: snippet.filter(|s| !s.is_empty()),
+        heading: r.heading.filter(|s| !s.is_empty()),
+        snippet: r.snippet.filter(|s| !s.is_empty()),
         rank: 0,
-        score,
-        domain,
-        doc_type,
-        tags: serde_json::from_str(&tags_json).unwrap_or_default(),
-        chunk_id: Some(chunk_id),
-        chunk_index,
-        path,
+        score: r.score,
+        domain: r.domain,
+        doc_type: r.doc_type,
+        tags: serde_json::from_str(&r.tags_json).unwrap_or_default(),
+        chunk_id: Some(r.chunk_id),
+        chunk_index: r.chunk_index,
+        path: r.path,
     }
 }
 
