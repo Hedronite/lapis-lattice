@@ -137,7 +137,10 @@ mod window {
     struct Meter {
         last: Option<Instant>,
         frames: std::collections::VecDeque<f32>,
+        /// Physics.
         tick_ms: f32,
+        /// Building the paint list.
+        build_ms: f32,
     }
 
     impl Meter {
@@ -251,6 +254,9 @@ mod window {
         /// Size the camera was last framed for, so a resize refits and a settle
         /// does not.
         fitted_for: (f32, f32),
+        /// Time spent inside the canvas last frame, written there and read by
+        /// the overlay on the next one.
+        draw_ms: Rc<Cell<f32>>,
         focus: FocusHandle,
     }
 
@@ -614,15 +620,19 @@ mod window {
                 paint(&seen, &self.camera, self.board(), &hi, &move |id| pins.contains_key(id), &groups);
             let labels: Vec<Prim> =
                 prims.iter().filter(|p| matches!(p, Prim::Label { .. })).cloned().collect();
+            let label_count = labels.len();
+            let draw_last = self.draw_ms.get();
             let origin = self.origin.clone();
             let board_px = self.board_px.clone();
             let show_boxes = debug_overlay_on();
+            let draw_ms = self.draw_ms.clone();
 
             // Strokes are real hairlines built with PathBuilder and dashed by
             // the tessellator: the v0.2 run-of-dots is gone.
             let painted = canvas(
                 move |_, _, _| {},
                 move |bounds, _, window, _| {
+                    let t_draw = Instant::now();
                     origin.set((f32::from(bounds.origin.x), f32::from(bounds.origin.y)));
                     board_px.set((f32::from(bounds.size.width), f32::from(bounds.size.height)));
                     let at = |x: f32, y: f32| point(bounds.origin.x + px(x), bounds.origin.y + px(y));
@@ -699,6 +709,7 @@ mod window {
                             window.paint_quad(dot(at(*x, *y), *r, with_alpha(colour, *alpha)));
                         }
                     }
+                    draw_ms.set(t_draw.elapsed().as_secs_f32() * 1000.0);
                 },
             )
             .absolute()
@@ -724,12 +735,16 @@ mod window {
             if debug_overlay_on() {
                 let (lo, hi) = self.sim.extent();
                 let overlay = format!(
-                    "{:.0} fps · worst {:.1} ms · tick {:.2} ms · {} nodes / {} edges · energy {:.4} · {}",
+                    "{:.0} fps · worst {:.1} ms · tick {:.2} · build {:.2} · draw {:.2} ms · \
+                     {} nodes / {} edges / {} labels · energy {:.4} · {}",
                     self.meter.fps(),
                     self.meter.worst_ms(),
                     self.meter.tick_ms,
+                    self.meter.build_ms,
+                    draw_last,
                     self.scene.nodes.len(),
                     self.scene.edges.len(),
+                    label_count,
                     self.sim.energy(),
                     if moving {
                         format!("settling, span {:.0}", (hi[0] - lo[0]).max(hi[1] - lo[1]))
@@ -949,6 +964,7 @@ mod window {
                         origin: Rc::new(Cell::new((0.0, 0.0))),
                         board_px: Rc::new(Cell::new((0.0, 0.0))),
                         fitted_for: (0.0, 0.0),
+                        draw_ms: Rc::new(Cell::new(0.0)),
                         focus: focus.clone(),
                     };
                     root.adopt(graph_data::Laid { scene: laid.scene.clone(), sim: laid.sim.clone() });
