@@ -214,6 +214,10 @@ impl Default for ForceParams {
             max_velocity: 40.0,
             dt: 0.3,
             alpha_min: 0.001,
+            // 0.8 is the reference value and it converges. A coarser angle
+            // saves a little tick time and leaves a residual energy that never
+            // falls under `alpha_min`, which `the_settle_is_damped_and_ends`
+            // catches: a graph that jitters forever is not a faster graph.
             theta: 0.8,
         }
     }

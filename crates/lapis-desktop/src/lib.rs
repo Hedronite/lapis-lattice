@@ -131,6 +131,9 @@ mod window {
     /// Ticks the sim is allowed per frame. One keeps the loop honest: the
     /// screen shows what the physics just did, not a batch of it.
     const TICKS_PER_FRAME: usize = 1;
+    /// A frame longer than this has missed its slot at 60 Hz. The next one skips
+    /// physics rather than compounding the miss.
+    const FRAME_BUDGET_MS: f32 = 14.0;
 
     /// Rolling frame timing, so the overlay reports measured fps.
     #[derive(Debug, Default)]
@@ -257,6 +260,8 @@ mod window {
         /// Time spent inside the canvas last frame, written there and read by
         /// the overlay on the next one.
         draw_ms: Rc<Cell<f32>>,
+        /// True when the last frame skipped physics to protect the frame slot.
+        skipped_tick: bool,
         focus: FocusHandle,
     }
 
@@ -307,7 +312,19 @@ mod window {
 
         /// One frame of physics. Returns true while the graph is still moving,
         /// which is what keeps the render loop alive and what stops it.
+        ///
+        /// When the previous frame overran its slot, this one draws and skips
+        /// the physics: a tick that pushes a frame past the budget costs the
+        /// operator a smooth drag and buys settling nobody can see. Never twice
+        /// in a row, so a slow machine still converges.
         fn advance(&mut self) -> bool {
+            let overran = self.meter.frames.back().copied().unwrap_or(0.0) > FRAME_BUDGET_MS;
+            if overran && !self.skipped_tick && self.sim.is_running() {
+                self.skipped_tick = true;
+                self.meter.tick_ms = 0.0;
+                return true;
+            }
+            self.skipped_tick = false;
             let t0 = Instant::now();
             let mut moving = false;
             for _ in 0..TICKS_PER_FRAME {
@@ -1012,6 +1029,7 @@ mod window {
                         board_px: Rc::new(Cell::new((0.0, 0.0))),
                         fitted_for: (0.0, 0.0),
                         draw_ms: Rc::new(Cell::new(0.0)),
+                        skipped_tick: false,
                         focus: focus.clone(),
                     };
                     root.adopt(graph_data::Laid { scene: laid.scene.clone(), sim: laid.sim.clone() });
@@ -1086,6 +1104,7 @@ mod tests {
         assert!(src.contains("overflow_hidden"), "a label cannot grow past its box");
         assert!(src.contains("view::label_box"), "the debug overlay draws the reserved boxes");
         assert!(src.contains("is_running()"), "a pointer event does not book a second render");
+        assert!(src.contains("FRAME_BUDGET_MS"), "a late frame skips physics rather than compounding");
         assert!(src.contains("board_px"), "the board reports its real size back to the camera");
         assert!(src.contains(".w_full()"), "the board fills the window, so no node is laid out off it");
         // Every colour on the board comes from the live Omarchy palette, so a
