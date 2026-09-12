@@ -76,7 +76,7 @@ impl App {
                 return;
             }
             Err(e) => {
-                self.set_status(format!("index build failed: {e} · Space i retries"));
+                self.set_status(format!("index build failed · Space i retries: {e}"));
                 self.index = IndexState::Failed(e.to_string());
                 return;
             }
@@ -119,7 +119,9 @@ impl App {
             }
             Err(e) => {
                 self.index_pending.borrow_mut().clear();
-                self.set_status(format!("index build failed: {e} · Space i retries · files unaffected"));
+                // Action before cause: a long engine error must not push the retry hint off a
+                // narrow status line.
+                self.set_status(format!("index build failed · Space i retries · files unaffected: {e}"));
                 self.index = IndexState::Failed(e);
             }
         }
