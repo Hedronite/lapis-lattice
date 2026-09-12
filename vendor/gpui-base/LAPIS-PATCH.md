@@ -14,7 +14,7 @@ Live editor must keep the (invisible) source widget rendered for focus, key cont
 and undo. That idle frame kept native idle CPU at ~1.8% of a core against a 1% gate.
 0.6.1 has no public way to turn the blink off.
 
-## Change (only these two files)
+## Change (two source files plus the manifest)
 
 - `src/input/base/blink_cursor.rs`: an `enabled` flag. `set_enabled(false)` calls the
   existing `stop()`, drops the pending timer and leaves the caret visible; `start`,
@@ -22,6 +22,8 @@ and undo. That idle frame kept native idle CPU at ~1.8% of a core against a 1% g
   keystrokes cannot restart it. Test: `disabled_cursor_stays_visible_and_never_restarts`.
 - `src/input/base/state.rs`: public `InputBaseState::set_cursor_blink(bool, cx)`
   (so `TextareaState::set_cursor_blink`). Default stays enabled.
+
+- `Cargo.toml`: an empty `[workspace]` table so the crate is its own root; `cargo test --manifest-path vendor/gpui-base/Cargo.toml --target-dir target/vendor-gpui-base --lib blink_cursor` runs its unit tests from the product tree.
 
 `.rustfmt.toml` here disables formatting so the vendored source stays upstream bytes.
 Drop this directory once upstream ships an equivalent switch.
