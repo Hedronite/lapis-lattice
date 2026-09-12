@@ -86,11 +86,19 @@ fn ui_loop(app: &mut App, term: &mut DefaultTerminal) -> Result<()> {
             redraw = false;
         }
         if event::poll(Duration::from_millis(60)).map_err(|e| LapisError::Internal(e.to_string()))? {
-            match event::read().map_err(|e| LapisError::Internal(e.to_string()))? {
-                Event::Key(k) => app.key(k, term),
-                Event::Mouse(m) => app.mouse(m),
-                Event::Paste(text) => app.paste(text),
-                _ => {}
+            // Take everything that is already waiting: a terminal without bracketed
+            // paste delivers a paste as one burst of keys, which must not run as keys.
+            let mut batch = vec![event::read().map_err(|e| LapisError::Internal(e.to_string()))?];
+            while event::poll(Duration::ZERO).map_err(|e| LapisError::Internal(e.to_string()))? {
+                batch.push(event::read().map_err(|e| LapisError::Internal(e.to_string()))?);
+            }
+            for event in paste::coalesce(batch) {
+                match event {
+                    Event::Key(k) => app.key(k, term),
+                    Event::Mouse(m) => app.mouse(m),
+                    Event::Paste(text) => app.paste(text),
+                    _ => {}
+                }
             }
             redraw = true;
         }

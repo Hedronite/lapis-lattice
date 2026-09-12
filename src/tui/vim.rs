@@ -252,6 +252,12 @@ impl Vim {
             }
             Input { key: Key::Char('l'), ctrl: true, .. } => Action::ToggleCheckbox,
             Input { key: Key::Char('s'), ctrl: true, .. } => Action::Save,
+            // A bare LF from a raw (unbracketed) terminal paste arrives as Ctrl+J. The
+            // widget would read that as delete-to-line-head; it is a newline.
+            Input { key: Key::Char('j'), ctrl: true, .. } => {
+                ta.insert_newline();
+                Action::None
+            }
             _ => {
                 ta.input(input);
                 Action::None
