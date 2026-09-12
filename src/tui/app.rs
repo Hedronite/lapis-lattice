@@ -491,6 +491,9 @@ impl App {
             ta.set_selection_style(theme::selected());
             ta.move_cursor(ratatui_textarea::CursorMove::Jump(cursor.0 as u16, cursor.1 as u16));
             t.text = ta;
+            // External replacement invalidates pending operators and visual anchors.
+            t.vim.clear_pending();
+            t.vim.mode = super::vim::Mode::Normal;
             t.hal = n.hal;
             t.hal_valid = n.hal_valid;
             t.dirty = false;

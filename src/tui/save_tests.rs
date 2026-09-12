@@ -76,3 +76,26 @@ async fn clean_yaml_reload_keeps_document_markers_and_literal_preview() {
     drop(app);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn shorter_external_reload_clears_visual_anchor_before_next_motion() {
+    use ratatui_textarea::{Input, Key};
+    let (root, mut app) = fixture();
+    std::fs::write(root.join("selection.yaml"), "one\ntwo\nthree").unwrap();
+    app.open_note("selection.yaml");
+    let tab = app.tab_mut().unwrap();
+    for c in "GVgg".chars() {
+        tab.vim.input(Input { key: Key::Char(c), ..Default::default() }, &mut tab.text);
+    }
+    assert!(tab.text.is_selecting());
+    std::fs::write(root.join("selection.yaml"), "replacement").unwrap();
+    app.reload_tab("selection.yaml");
+    let tab = app.tab_mut().unwrap();
+    assert_eq!(tab.vim.mode, crate::tui::vim::Mode::Normal);
+    assert!(!tab.text.is_selecting());
+    tab.vim.input(Input { key: Key::Char('j'), ..Default::default() }, &mut tab.text);
+    assert_eq!(tab.body(), "replacement");
+    assert!(!tab.dirty);
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
