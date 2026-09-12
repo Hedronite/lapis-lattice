@@ -196,3 +196,138 @@ fn large_native_widget_paste_round_trips_in_one_undo(cx: &mut TestAppContext) {
     visual.update(|w, cx| w.press("ctrl-r", cx));
     assert_eq!(text(handle, cx), expected);
 }
+
+fn replace_fixture(handle: WindowHandle<Workspace>, source: &str, cx: &mut TestAppContext) {
+    handle
+        .update(cx, |this, w, cx| {
+            assert!(this.tabs[0].view == View::Live);
+            this.tabs[0].editor.update(cx, |s, cx| {
+                s.set_value(source, w, cx);
+                s.set_selected_range(0..0, cx);
+            });
+            cx.notify();
+        })
+        .unwrap();
+}
+#[gpui_kit::test]
+fn live_mouse_selects_formatted_unicode_and_copies_source(cx: &mut TestAppContext) {
+    let handle = setup(cx);
+    let source = "# Title\n\nA **漢🙂** and `code`.\n\nOther note.\n";
+    replace_fixture(handle, source, cx);
+    let mut visual = VisualTestContext::from_window(handle.into(), cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    let start = source.find('漢').unwrap();
+    let end = start + "漢🙂".len();
+    let (from, to) = handle
+        .read_with(cx, |this, cx| {
+            let live = this.tabs[0].live.read(cx);
+            let from = live.point_for_source(start).expect("formatted glyph has geometry");
+            let to = live.point_for_source(end).expect("formatted glyph end has geometry");
+            assert_eq!(live.source_at_point(from), start);
+            (
+                from + gpui_kit::point(gpui_kit::px(1.), gpui_kit::px(8.)),
+                to + gpui_kit::point(gpui_kit::px(-1.), gpui_kit::px(8.)),
+            )
+        })
+        .unwrap();
+    visual.update(|w, cx| {
+        w.drag(from, to, cx);
+        w.dispatch_action(Box::new(gpui_kit::base::input::Copy), cx);
+    });
+    assert_eq!(
+        handle.read_with(cx, |this, cx| this.tabs[0].editor.read(cx).selected_range()).unwrap(),
+        start..end
+    );
+    assert_eq!(cx.update(|cx| cx.read_from_clipboard().and_then(|i| i.text())).as_deref(), Some("漢🙂"));
+    visual.update(|w, cx| {
+        cx.write_to_clipboard(ClipboardItem::new_string("first\r\n  second".into()));
+        w.dispatch_action(Box::new(gpui_kit::base::input::Paste), cx);
+        w.press("u", cx);
+    });
+    assert_eq!(text(handle, cx), source);
+}
+#[gpui_kit::test]
+fn live_empty_note_has_caret_geometry_and_accepts_native_text(cx: &mut TestAppContext) {
+    let handle = setup(cx);
+    replace_fixture(handle, "", cx);
+    let mut visual = VisualTestContext::from_window(handle.into(), cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    assert!(
+        handle.read_with(cx, |this, cx| this.tabs[0].live.read(cx).point_for_source(0).is_some()).unwrap()
+    );
+    visual.update(|w, cx| {
+        w.press("i", cx);
+        w.input("# 新しい\n\nText", cx);
+        w.press("escape", cx);
+    });
+    assert_eq!(text(handle, cx), "# 新しい\n\nText");
+}
+#[gpui_kit::test]
+fn live_ime_uses_source_utf16_and_keeps_composition(cx: &mut TestAppContext) {
+    use gpui_kit::EntityInputHandler;
+    let handle = setup(cx);
+    replace_fixture(handle, "🙂 alpha\n", cx);
+    handle
+        .update(cx, |this, w, cx| {
+            this.tabs[0].live.update(cx, |live, cx| {
+                assert_eq!(live.text_length_utf16(w, cx), Some(9));
+                live.set_selected_text_range(3..8, w, cx);
+                assert_eq!(live.selected_text_range(false, w, cx).unwrap().range, 3..8);
+                live.replace_and_mark_text_in_range(None, "か", Some(1..1), w, cx);
+                assert_eq!(live.marked_text_range(w, cx), Some(3..4));
+                live.replace_and_mark_text_in_range(None, "漢字", Some(2..2), w, cx);
+                live.unmark_text(w, cx);
+                assert!(live.marked_text_range(w, cx).is_none());
+            });
+        })
+        .unwrap();
+    assert_eq!(text(handle, cx), "🙂 漢字\n");
+}
+#[gpui_kit::test]
+fn live_cursor_follows_long_note_without_changing_text(cx: &mut TestAppContext) {
+    let handle = setup(cx);
+    let source =
+        (0..120).map(|i| format!("## Section {i}\n\nParagraph **bold** content.\n\n")).collect::<String>();
+    replace_fixture(handle, &source, cx);
+    let mut visual = VisualTestContext::from_window(handle.into(), cx);
+    visual.update(|w, cx| {
+        w.press("G", cx);
+        w.render_frame(cx);
+    });
+    let position = handle
+        .read_with(cx, |this, cx| {
+            let t = &this.tabs[0];
+            t.live.read(cx).point_for_source(t.editor.read(cx).cursor()).unwrap()
+        })
+        .unwrap();
+    visual.update(|w, _| {
+        assert!(position.y > gpui_kit::px(80.));
+        assert!(position.y < w.viewport_size().height - gpui_kit::px(30.));
+    });
+    assert_eq!(text(handle, cx), source);
+}
+
+#[gpui_kit::test]
+fn live_platform_paste_normalizes_lines_and_respects_readonly(cx: &mut TestAppContext) {
+    use gpui_kit::EntityInputHandler;
+    let handle = setup(cx);
+    for readonly in [true, false] {
+        handle
+            .update(cx, |this, w, cx| {
+                let tab = &this.tabs[0];
+                tab.editor.update(cx, |s, cx| s.set_readonly(readonly, cx));
+                tab.live.update(cx, |live, cx| {
+                    assert_eq!(live.accepts_text_input(w, cx), !readonly);
+                    live.paste(ClipboardItem::new_string("A\r\n  B\rC\n".into()), w, cx);
+                });
+            })
+            .unwrap();
+        assert_eq!(
+            text(handle, cx),
+            if readonly { "one two\nsecond\n" } else { "A\n  B\nC\none two\nsecond\n" }
+        );
+    }
+    let mut visual = VisualTestContext::from_window(handle.into(), cx);
+    visual.update(|w, cx| w.press("u", cx));
+    assert_eq!(text(handle, cx), "one two\nsecond\n");
+}

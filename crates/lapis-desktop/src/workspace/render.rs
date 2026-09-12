@@ -137,9 +137,15 @@ impl Render for Workspace {
                 .border_b_1()
                 .border_color(theme.border)
                 .text_sm();
-            for (label, choice) in
-                [("Source", View::Source), ("Reading", View::Reading), ("Split", View::Split)]
-            {
+            for (label, choice) in [
+                ("Live", View::Live),
+                ("Source", View::Source),
+                ("Reading", View::Reading),
+                ("Split", View::Split),
+            ] {
+                if choice == View::Live && kind != FileKind::Markdown {
+                    continue;
+                }
                 toolbar = toolbar.child(
                     div()
                         .id(label)
@@ -189,13 +195,17 @@ impl Render for Workspace {
                 );
             content = content.child(toolbar);
             let mut working = div().flex().flex_1().min_h_0().min_w_0();
-            if view != View::Reading {
+            if view == View::Live {
+                editor.update(cx, |s, _| s.set_editor_style(theme.input_style()));
+                working = working.child(div().flex_1().min_w_0().h_full().child(tab.live.clone()));
+            }
+            if matches!(view, View::Source | View::Split) {
                 editor.update(cx, |s, _| s.set_editor_style(theme.input_style()));
                 working = working.child(
                     div().flex_1().min_w_0().h_full().p_5().child(gpui_kit::base::Textarea::new(&editor)),
                 );
             }
-            if view != View::Source {
+            if matches!(view, View::Reading | View::Split) {
                 let reader = if kind == FileKind::Html {
                     gpui_omarchy::html("reading", source.clone(), window, cx)
                 } else {

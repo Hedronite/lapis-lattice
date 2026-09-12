@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
+    Live,
     Source,
     Reading,
     Split,
@@ -27,6 +28,7 @@ enum View {
 struct Tab {
     document: Document,
     editor: Entity<TextareaState>,
+    live: Entity<crate::live::LiveEditor>,
     _events: Subscription,
     view: View,
     vim: crate::vim::Vim,
@@ -172,11 +174,17 @@ impl Workspace {
                                 cx.notify();
                             }
                         });
-                        let view = if document.kind == FileKind::Html { View::Reading } else { View::Source };
+                        let view = match document.kind {
+                            FileKind::Markdown => View::Live,
+                            FileKind::Html => View::Reading,
+                            _ => View::Source,
+                        };
+                        let live = cx.new(|cx| crate::live::LiveEditor::new(editor.clone(), cx));
                         editor.update(cx, |s, cx| s.focus(window, cx));
                         this.tabs.push(Tab {
                             document,
                             editor,
+                            live,
                             _events: events,
                             view,
                             vim: crate::vim::Vim::default(),

@@ -19,6 +19,7 @@
 pub mod gitnexus;
 pub mod graph_data;
 pub mod html;
+pub mod live;
 mod motion;
 pub mod scene;
 pub mod services;

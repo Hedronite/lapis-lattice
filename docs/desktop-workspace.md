@@ -38,3 +38,12 @@ cargo test -p lapis-desktop --features gui-tests
 ```
 
 Those checks cover command dispatch, native-widget undo, literal CRLF paste, separate prompt focus/text input, view-switch continuity and save-close success/failure. They supplement actual macOS/Linux mouse, clipboard and IME smoke; they do not prove native platform acceptance or performance thresholds.
+
+
+### Live Markdown development checkpoint
+
+Markdown opens in Live view. The block containing the caret reveals source syntax; other blocks render headings, emphasis, code, quotes and task markers. Source, Reading and Split remain available. All editing views retain the same source editor and undo history. YAML opens in Source; HTML opens in Reading.
+
+The live surface maps pointer selection and UTF-16 input-method ranges back to source bytes. Dragging keeps the projection steady until release. Programmatic document replacements refresh the projection, and keyboard movement scrolls the caret into view. Clipboard copy contains the selected Markdown source. Both workspace Paste and platform input-handler paste normalize CRLF/lone CR to LF.
+
+This is an implementation checkpoint, not full visual/platform acceptance. Table layout, link/task interaction, image rendering, accessibility semantics, source-reveal continuity and large-document layout caching still need work. Headless GPUI tests cover formatted Unicode mouse selection/copy, literal paste/undo, empty notes, composition ranges and long-note caret scrolling. Physical macOS/Linux input, IME and performance evidence remain required.

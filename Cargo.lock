@@ -4210,6 +4210,7 @@ dependencies = [
  "gpui-kit",
  "gpui-omarchy",
  "lapis-lattice",
+ "pulldown-cmark",
  "serde",
  "serde_json",
  "unicode-segmentation",
