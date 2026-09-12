@@ -188,3 +188,7 @@ useless_conversion = "allow"
 [lints.clippy.style]
 level = "allow"
 priority = -1
+
+# Lapis patch: standalone package (its own root), so `cargo test --manifest-path` works
+# inside the product tree. See LAPIS-PATCH.md.
+[workspace]
