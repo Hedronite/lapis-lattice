@@ -367,11 +367,7 @@ impl Backend {
                 Ok(Health {
                     status: h.status,
                     documents_indexed: h.documents_indexed,
-                    stale_documents: h
-                        .extra
-                        .get("stale_documents")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
+                    stale_documents: h.extra.get("stale_documents").and_then(Value::as_u64).unwrap_or(0),
                     db_path: h.db_path.unwrap_or_else(|| c.base().to_string()),
                     // the HTTP lattice owns its own embedder; report what it says
                     embedder: h
