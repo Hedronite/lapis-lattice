@@ -245,6 +245,8 @@ impl Workspace {
         let epoch = self.open_epoch;
         if let Some(index) = self.tabs.iter().position(|t| t.document.path == path) {
             self.opening = None;
+            self.status.clear();
+            self.error = false;
             self.activate(index, travel, window, cx);
             return;
         }

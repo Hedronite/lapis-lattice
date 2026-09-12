@@ -64,6 +64,8 @@ impl Workspace {
     }
     pub(super) fn close_pane(&mut self, pane: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.panes.close(pane);
+        self.status = "Closed pane; document tabs and unsaved edits retained".into();
+        self.error = false;
         self.open_epoch += 1;
         self.opening = None;
         self.document_layout = cx.new(|_| gpui_kit::base::ResizableState::default());

@@ -61,11 +61,13 @@ fn mouse_focus_routes_edits_to_distinct_panes_and_closing_view_retains_dirty_tab
         .read_with(cx, |this, cx| {
             assert_eq!(this.panes.paths, vec![Some("second.md".into())]);
             assert_eq!(this.tabs.len(), 2);
+            assert!(this.status.contains("retained"));
             assert!(Workspace::dirty(&this.tabs[0], cx));
             assert!(Workspace::dirty(&this.tabs[1], cx));
         })
         .unwrap();
     handle.update(cx, |this, w, cx| this.open_file("fixture.md".into(), w, cx)).unwrap();
+    assert!(handle.read_with(cx, |this, _| this.status.is_empty() && !this.error).unwrap());
     visual.update(|w, cx| {
         w.render_frame(cx);
         w.press("u", cx);
