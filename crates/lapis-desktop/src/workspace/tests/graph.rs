@@ -60,11 +60,8 @@ impl WorkspaceServices for GraphFixture {
 #[gpui_kit::test]
 fn graph_is_lazy_and_keyboard_navigation_reuses_dirty_buffers(cx: &mut TestAppContext) {
     let handle = setup(cx);
-    let services = Arc::new(GraphFixture {
-        base: Fixture { reject_save: false, indexed: false.into() },
-        requests: 0.into(),
-        fail: false.into(),
-    });
+    let services =
+        Arc::new(GraphFixture { base: Fixture::new(false), requests: 0.into(), fail: false.into() });
     handle.update(cx, |this, _, _| this.services = services.clone()).unwrap();
     let mut visual = VisualTestContext::from_window(handle.into(), cx);
     visual.update(|w, cx| {
@@ -125,11 +122,8 @@ fn graph_is_lazy_and_keyboard_navigation_reuses_dirty_buffers(cx: &mut TestAppCo
 #[gpui_kit::test]
 fn graph_hidden_load_is_discarded_and_retry_reads_the_backend(cx: &mut TestAppContext) {
     let handle = setup(cx);
-    let services = Arc::new(GraphFixture {
-        base: Fixture { reject_save: false, indexed: false.into() },
-        requests: 0.into(),
-        fail: true.into(),
-    });
+    let services =
+        Arc::new(GraphFixture { base: Fixture::new(false), requests: 0.into(), fail: true.into() });
     handle
         .update(cx, |this, w, cx| {
             this.services = services.clone();
