@@ -5,6 +5,7 @@ This supplements native clipboard smoke, not a replacement for it. No real vault
 """
 import argparse, base64, fcntl, hashlib, json, os, pty, re, select, struct, termios, time
 from pathlib import Path
+from ux_terminal import screen_text
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--bin', required=True)
@@ -17,8 +18,12 @@ out.mkdir(parents=True, exist_ok=True)
 initial = '---\ntitle: Clipboard fixture\ncustom: preserve-me\n---\nanchor\nsecond line\n'
 payload = 'first line\n    indented line\n\nlast line\n'
 
+save_receipts = []
+sessions = []
+
 class Session:
     def __init__(self, name, remote=False, editor=False):
+        sessions.append(self)
         self.root = out / name
         self.root.mkdir(exist_ok=True)
         self.vault = self.root / 'vault'
@@ -82,7 +87,25 @@ class Session:
         self.drain(delay)
 
     def saved(self):
-        self.send(b'\x13', 0.25)
+        # Atomic Save publishes a new inode. Wait for that completion rather than
+        # reading stale disk bytes after an arbitrary sleep on a busy CI runner.
+        before = self.note.stat()
+        position = len(self.raw)
+        started = time.monotonic()
+        self.send(b'\x13', 0)
+        outcome = 'timeout'
+        while time.monotonic() - started < 5:
+            current = self.note.stat()
+            if (current.st_ino, current.st_mtime_ns) != (before.st_ino, before.st_mtime_ns):
+                outcome = 'saved'
+                break
+            rendered = screen_text(self.raw)
+            if len(self.raw) > position and any(marker in rendered for marker in ('save cancelled', 'save failed', 'read-only')):
+                outcome = 'rejected'
+                break
+            self.drain(0.01)
+        save_receipts.append({'case':self.root.name, 'outcome':outcome,
+                              'elapsed_ms':1000 * (time.monotonic() - started)})
         return self.note.read_text()
 
     def close(self):
@@ -195,6 +218,7 @@ s.send(b'\x1b[200~invisible paste\x1b[201~')
 fcntl.ioctl(s.fd, termios.TIOCSWINSZ, struct.pack('HHHH',32,120,0,0))
 s.drain(0.2)
 s.send(b'\x1b')
+s.send(b'\x1b[<0;34;3M\x1b[<0;34;3m')
 after = s.saved()
 results.append({'case':'undersized-input', 'content_matches':after.split('---\n',2)[-1]=='anchor\nsecond line\n'})
 s.close()
@@ -255,10 +279,18 @@ results.append({'case':'dirty-conflict', 'dirty_quit_guard':stayed, 'external_sa
 if stayed: s.close()
 
 report = {'binary':str(Path(args.bin).resolve()), 'binary_sha256':hashlib.sha256(Path(args.bin).read_bytes()).hexdigest(),
-          'initial_sha256':hashlib.sha256(initial.encode()).hexdigest(), 'results':results}
+          'initial_sha256':hashlib.sha256(initial.encode()).hexdigest(), 'results':results, 'save_receipts':save_receipts}
+failed_cases = {r['case'] for r in results if any(value is False for value in r.values()) and r['case'] not in ('paste-lf-insert', 'paste-crlf-insert')}
+failed_cases.update(r['case'] for r in save_receipts if r['outcome'] == 'timeout')
+report['failure_screens'] = {s.root.name:screen_text(s.raw) for s in sessions if s.root.name in failed_cases}
+report['failure_terminal_tails_base64'] = {
+    s.root.name:base64.b64encode(bytes(s.raw[-12000:])).decode()
+    for s in sessions if s.root.name in failed_cases
+}
 (out/'results.json').write_text(json.dumps(report, indent=2)+'\n')
 print(json.dumps(report, indent=2))
 if args.check:
     required = [r for r in results if r['case'] not in ('paste-lf-insert', 'paste-crlf-insert')]
-    if any(value is False for result in required for value in result.values()):
+    timeouts = [r for r in save_receipts if r['outcome'] == 'timeout' and r['case'] not in ('paste-lf-insert', 'paste-crlf-insert')]
+    if timeouts or any(value is False for result in required for value in result.values()):
         raise SystemExit('required TUI input regression failed; see retained results')

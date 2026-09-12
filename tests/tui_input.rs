@@ -21,3 +21,12 @@ fn terminal_paste_selection_undo_and_external_save_guards() {
     );
     std::fs::remove_dir_all(out).unwrap();
 }
+
+#[test]
+fn terminal_screen_decoder_handles_incremental_status_repaints() {
+    let result = std::process::Command::new("python3")
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/test_ux_terminal.py"))
+        .output()
+        .expect("Python 3 is required for terminal regression checks");
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+}
