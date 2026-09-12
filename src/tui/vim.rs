@@ -82,6 +82,12 @@ impl Vim {
         Self { mode: Mode::Normal, pending: None, prompt: None, count: 0 }
     }
 
+    pub(crate) fn clear_pending(&mut self) {
+        self.pending = None;
+        self.count = 0;
+        self.prompt = None;
+    }
+
     pub fn cursor_style(&self) -> Style {
         theme::mode(&self.mode.to_string()).add_modifier(Modifier::REVERSED)
     }

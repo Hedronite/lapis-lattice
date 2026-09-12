@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use notify::{RecursiveMode, Watcher};
 use ratatui::DefaultTerminal;
 use ratatui::style::Style;
@@ -87,6 +89,8 @@ pub(crate) struct Tab {
     pub(crate) preview: Vec<Line<'static>>,
     pub(crate) preview_for: String,
     pub(crate) readonly: bool,
+    /// Exact disk contents last read/saved, for detecting external edits.
+    pub(crate) saved_source: Option<String>,
 }
 
 impl Tab {
@@ -199,6 +203,14 @@ impl App {
     }
     pub(crate) fn tab_mut(&mut self) -> Option<&mut Tab> {
         self.tabs.get_mut(self.active)
+    }
+
+    pub(crate) fn request_quit(&mut self) {
+        if let Some(t) = self.tabs.iter().find(|t| t.dirty) {
+            self.set_status(format!("unsaved changes in {}: :w to save or :q! to discard that tab", t.rel));
+        } else {
+            self.quit = true;
+        }
     }
 
     // ------------------------------------------------------------ background
@@ -372,7 +384,15 @@ impl App {
         }
         match notes::read(&self.root(), rel) {
             Ok(n) => {
-                let mut ta = TextArea::from(n.body.lines().map(str::to_string).collect::<Vec<_>>());
+                let saved_source = if n.kind == notes::Kind::Markdown {
+                    std::fs::read_to_string(self.root().join(&n.path)).ok()
+                } else {
+                    None
+                };
+                let body = saved_source.as_deref().map(|s| hal::raw_parts(s).1).unwrap_or(&n.body);
+                let mut ta = TextArea::from(
+                    body.replace("\r\n", "\n").split('\n').map(str::to_string).collect::<Vec<_>>(),
+                );
                 ta.set_cursor_line_style(Style::default());
                 ta.set_line_number_style(theme::dim());
                 ta.set_selection_style(theme::selected());
@@ -389,6 +409,7 @@ impl App {
                     preview: vec![],
                     preview_for: String::new(),
                     readonly,
+                    saved_source,
                 };
                 tab.refresh_preview();
                 self.tabs.push(tab);
@@ -418,9 +439,17 @@ impl App {
     pub(crate) fn reload_tab(&mut self, rel: &str) {
         let Some(i) = self.tabs.iter().position(|t| t.rel == rel) else { return };
         if let Ok(n) = notes::read(&self.root(), rel) {
+            let saved_source = if n.kind == notes::Kind::Markdown {
+                std::fs::read_to_string(self.root().join(rel)).ok()
+            } else {
+                None
+            };
+            let body = saved_source.as_deref().map(|s| hal::raw_parts(s).1).unwrap_or(&n.body);
             let t = &mut self.tabs[i];
             let cursor = t.text.cursor();
-            let mut ta = TextArea::from(n.body.lines().map(str::to_string).collect::<Vec<_>>());
+            let mut ta = TextArea::from(
+                body.replace("\r\n", "\n").split('\n').map(str::to_string).collect::<Vec<_>>(),
+            );
             ta.set_cursor_line_style(Style::default());
             ta.set_line_number_style(theme::dim());
             ta.set_selection_style(theme::selected());
@@ -429,6 +458,7 @@ impl App {
             t.hal = n.hal;
             t.hal_valid = n.hal_valid;
             t.dirty = false;
+            t.saved_source = saved_source;
             t.refresh_preview();
         }
     }
@@ -459,9 +489,18 @@ impl App {
         }
         let rel = t.rel.clone();
         let abs = self.root().join(&rel);
-        let current = std::fs::read_to_string(&abs).unwrap_or_default();
-        let head_len = current.len() - hal::parse(&current).body.len();
-        let head = &current[..head_len];
+        let current = match std::fs::read_to_string(&abs) {
+            Ok(current) => current,
+            Err(e) => {
+                self.set_status(format!("save failed reading {rel}: {e}; buffer retained"));
+                return;
+            }
+        };
+        if t.saved_source.as_ref().is_some_and(|saved| saved != &current) {
+            self.set_status(format!("{rel} changed on disk; save cancelled, buffer retained for comparison"));
+            return;
+        }
+        let (head, _) = hal::raw_parts(&current);
         let mut body = t.body();
         if !body.ends_with('\n') {
             body.push('\n');
@@ -474,6 +513,7 @@ impl App {
                     t.dirty = false;
                     t.hal = p.hal;
                     t.hal_valid = p.hal_valid;
+                    t.saved_source = Some(next.clone());
                 }
                 self.set_status(format!("saved {rel}"));
                 self.kick(rel);
@@ -686,14 +726,18 @@ impl App {
             self.set_status("open a note first");
             return;
         };
+        if t.dirty {
+            self.set_status("save with :w before opening the external editor");
+            return;
+        }
         let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
         let abs = self.root().join(&t.rel);
         let rel = t.rel.clone();
-        let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+        let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste, DisableMouseCapture);
         ratatui::restore();
         let status = std::process::Command::new(&editor).arg(&abs).status();
         *term = ratatui::init();
-        let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+        let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
         match status {
             Ok(_) => {
                 self.reload_tab(&rel);

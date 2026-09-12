@@ -131,7 +131,7 @@ impl App {
             Cmd::TabClose => self.close_tab(false),
             Cmd::Save => self.save(),
             Cmd::Help => self.overlay = Some(Overlay::Help(0)),
-            Cmd::Quit => self.quit = true,
+            Cmd::Quit => self.request_quit(),
             Cmd::Refresh => {
                 let root = self.root();
                 let dirs: Vec<String> = self.tree.children.keys().cloned().collect();
@@ -163,7 +163,7 @@ impl App {
         if !in_prompt {
             match (ctrl, alt, k.code) {
                 (true, _, KeyCode::Char('q')) => {
-                    self.quit = true;
+                    self.request_quit();
                     return;
                 }
                 (true, _, KeyCode::Char('p')) => {
@@ -492,7 +492,7 @@ impl App {
         match k.code {
             KeyCode::Char(' ') => self.overlay = Some(Overlay::Leader(vec![])),
             KeyCode::Char('?') => self.overlay = Some(Overlay::Help(0)),
-            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('q') => self.request_quit(),
             KeyCode::Char('/') => self.overlay = Some(Overlay::Palette(Palette::new(""))),
             KeyCode::Char('g') => self.pending_g = true,
             KeyCode::Char('G') => self.sel = rows.len().saturating_sub(1),
@@ -620,7 +620,7 @@ impl App {
             KeyCode::PageUp => t.preview_scroll = t.preview_scroll.saturating_sub(page),
             KeyCode::Char('G') => t.preview_scroll = max.saturating_sub(1),
             KeyCode::Char('g') => t.preview_scroll = 0,
-            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('q') => self.request_quit(),
             _ => {}
         }
     }

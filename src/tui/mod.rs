@@ -16,6 +16,7 @@ mod mouse;
 mod neighbors_view;
 mod omarchy;
 mod palette;
+mod paste;
 mod preview;
 mod tags_view;
 mod tasks_view;
@@ -25,7 +26,9 @@ mod vim;
 
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+};
 use ratatui::DefaultTerminal;
 
 use crate::error::{LapisError, Result};
@@ -36,18 +39,18 @@ pub async fn run(ctx: Ctx) -> Result<()> {
     tokio::task::block_in_place(|| {
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+            let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste, DisableMouseCapture);
             ratatui::restore();
             default_hook(info);
         }));
         let mut term = ratatui::init();
-        let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+        let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
         let (palette, omarchy_theme) = resolve_palette(&ctx.cfg.theme);
         theme::install(palette);
         let mut app = App::new(ctx);
         app.omarchy_theme = omarchy_theme;
         let result = ui_loop(&mut app, &mut term);
-        let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+        let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste, DisableMouseCapture);
         ratatui::restore();
         result
     })
@@ -66,6 +69,7 @@ fn ui_loop(app: &mut App, term: &mut DefaultTerminal) -> Result<()> {
             match event::read().map_err(|e| LapisError::Internal(e.to_string()))? {
                 Event::Key(k) => app.key(k, term),
                 Event::Mouse(m) => app.mouse(m),
+                Event::Paste(text) => app.paste(text),
                 _ => {}
             }
         }
