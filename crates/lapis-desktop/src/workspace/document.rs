@@ -61,6 +61,7 @@ impl Workspace {
             }
         }
         let live = cx.new(|cx| crate::live::LiveEditor::new(editor.clone(), cx));
+        editor.update(cx, |s, cx| s.set_cursor_blink(view != View::Live, cx));
         if let Some(saved) = &restored {
             live.update(cx, |s, cx| s.restore_scroll(saved.live_scroll, cx));
         }
@@ -83,5 +84,13 @@ impl Workspace {
             saving: false,
         });
         self.tabs.len() - 1
+    }
+
+    /// Switch a tab's view. Only Live hides the shared source widget behind its own
+    /// steady caret, so only Live keeps the widget blink off; visible source blinks.
+    pub(super) fn set_view(&mut self, index: usize, view: View, cx: &mut Context<Self>) {
+        let tab = &mut self.tabs[index];
+        tab.view = view;
+        tab.editor.update(cx, |s, cx| s.set_cursor_blink(view != View::Live, cx));
     }
 }

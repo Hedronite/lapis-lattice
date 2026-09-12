@@ -1,0 +1,2 @@
+# Vendored crates.io source; keep upstream formatting byte-for-byte outside the patch.
+disable_all_formatting = true

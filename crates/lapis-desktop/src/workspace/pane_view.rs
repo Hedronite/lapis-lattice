@@ -51,7 +51,7 @@ impl Workspace {
                         .child(label)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.select_document(index, window, cx);
-                            this.tabs[index].view = choice;
+                            this.set_view(index, choice, cx);
                             this.focus_active(window, cx);
                             cx.notify();
                         })),
