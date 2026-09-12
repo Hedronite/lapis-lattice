@@ -164,6 +164,7 @@ pub(crate) struct Root {
     sim: ForceSim,
     meter: Meter,
     camera: Camera,
+    fit_zoom: f32,
     hover: Option<String>,
     press: Option<Press>,
     /// Where the operator dropped a node. Survives filter and layout
@@ -202,6 +203,7 @@ impl Root {
         self.sim = laid.sim;
         let board = self.board();
         self.camera.fit(&self.scene, board);
+        self.fit_zoom = self.camera.zoom;
         self.fitted_for = (board[0], board[1]);
         self.meter.idle();
     }
@@ -405,6 +407,7 @@ impl Root {
             KeyAction::ResetCamera => {
                 let board = self.board();
                 self.camera.fit(&self.scene, board);
+                self.fit_zoom = self.camera.zoom;
             }
             KeyAction::StartQuery => self.typing = true,
             KeyAction::QueryPush(c) => self.filters.query.push(c),
@@ -574,6 +577,7 @@ impl Render for Root {
         let board_now = self.board();
         if self.fitted_for != (board_now[0], board_now[1]) {
             self.camera.fit(&self.scene, board_now);
+            self.fit_zoom = self.camera.zoom;
             self.fitted_for = (board_now[0], board_now[1]);
         }
         // The graph keeps moving until it settles; each frame asks for the
@@ -767,7 +771,7 @@ impl Render for Root {
                             .text_xs()
                             .line_height(px(LABEL_H))
                             .whitespace_nowrap()
-                            .text_color(with_alpha(label_c, alpha))
+                            .text_color(with_alpha(label_c, alpha.max(0.8)))
                             .child(text),
                     ),
             );
@@ -789,7 +793,7 @@ impl Render for Root {
         let orphans_label =
             format!("orphans: {}", if self.filters.show_orphans { "shown" } else { "hidden" });
         let domain_label = format!("domain: {}", self.filters.domain.clone().unwrap_or_else(|| "all".into()));
-        let zoom_label = format!("zoom {:.0}%", self.camera.zoom * 100.0);
+        let zoom_label = format!("Fit · {:.0}%", self.camera.zoom / self.fit_zoom.max(f32::EPSILON) * 100.0);
         let pin_label = format!("unpin {}", self.pins.len());
         let theme_label = format!("theme: {}", theme.name);
 
@@ -860,6 +864,7 @@ impl Render for Root {
             .child(chip("f-zoom", zoom_label, label_c).on_click(cx.listener(|this, _, _, cx| {
                 let board = this.board();
                 this.camera.fit(&this.scene, board);
+                this.fit_zoom = this.camera.zoom;
                 cx.notify();
             })))
             .child(chip("f-unpin", pin_label, label_c).on_click(cx.listener(|this, _, _, cx| {
@@ -925,7 +930,7 @@ impl Render for Root {
             .child(controls)
             .child(div().px_3().pb_2().text_sm().text_color(if self.error.is_some() { theme.danger } else { label_c }).child(summary))
             .child(board)
-            .child(div().px_3().py_2().text_sm().text_color(label_c)
+            .child(div().id("graph-preview").h(px(72.)).flex_shrink_0().overflow_y_scroll().px_3().py_2().text_sm().text_color(label_c)
                 .child(self.peek.clone().unwrap_or_else(|| "Click a note to open · Tab selects a node · Enter opens · / filters · arrows pan · 0 fits · wheel zooms · drag a node to pin".into())))
     }
 }

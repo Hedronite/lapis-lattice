@@ -33,6 +33,7 @@ impl Root {
             sim: ForceSim::empty(),
             meter: Meter::default(),
             camera: Camera::default(),
+            fit_zoom: 1.,
             hover: None,
             press: None,
             pins: BTreeMap::new(),
