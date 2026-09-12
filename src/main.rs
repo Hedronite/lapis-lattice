@@ -7,6 +7,7 @@
 mod backend;
 mod cli;
 mod config;
+mod desktop_services;
 mod envelope;
 mod error;
 mod hal;
@@ -66,6 +67,7 @@ async fn main() -> ExitCode {
             };
         }
     };
+    let cli = desktop_services::default_surface(cli, &std::env::current_exe().unwrap_or_default());
     let json = cli.global.json;
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
@@ -801,7 +803,7 @@ fn desktop(ctx: &Ctx, args: cli::DesktopArgs) -> Result<()> {
         );
         return Ok(());
     }
-    lapis_desktop::run(opts).map_err(|e| match e {
+    lapis_desktop::run_workspace(opts, desktop_services::service(ctx)).map_err(|e| match e {
         lapis_desktop::DesktopError::NotBuilt(m) => LapisError::Usage(m),
         lapis_desktop::DesktopError::Runtime(m) => LapisError::Internal(m),
     })

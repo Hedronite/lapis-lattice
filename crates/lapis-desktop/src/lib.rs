@@ -20,11 +20,30 @@ pub mod gitnexus;
 pub mod graph_data;
 pub mod html;
 pub mod scene;
+pub mod services;
 pub mod sim;
 pub mod view;
 
 #[cfg(feature = "gpui")]
 mod window;
+
+#[cfg(feature = "gpui")]
+mod workspace;
+
+pub fn run_workspace(
+    opts: Options,
+    services: std::sync::Arc<dyn services::WorkspaceServices>,
+) -> Result<(), DesktopError> {
+    #[cfg(feature = "gpui")]
+    {
+        workspace::open(opts, services)
+    }
+    #[cfg(not(feature = "gpui"))]
+    {
+        let _ = (opts, services);
+        Err(DesktopError::NotBuilt(NOT_BUILT.into()))
+    }
+}
 
 use std::path::PathBuf;
 
