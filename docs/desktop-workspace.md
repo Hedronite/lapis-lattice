@@ -4,7 +4,7 @@ The `feat/ux` desktop surface opens a native notes workspace. It is under active
 
 The sidebar opens folders and supported files independently of the search index. Find a note is available in the sidebar and through Ctrl/Cmd+P. Submit a query with Enter; use arrows and Enter to open a result. A fresh embedded index offers an explicit Build index action. HTTP indexing stays managed by the configured service. Backend failures and empty results are separate states.
 
-Markdown opens in Live view. Source, Reading and Split reuse the same editor state and undo history. Persistent/resizable layout and the integrated graph are still being built. YAML is editable text; HTML is a static read-only reference. PDF page reading requires the packaged native runtime; see [PDF runtime packaging](pdf-runtime.md).
+Markdown opens in Live view. Source, Reading and Split reuse the same editor state and undo history. The file/sidebar, context and source/reading dividers are resizable; Reset layout restores default widths. Sizes persist while the workspace stays open. Disk session restoration and the integrated graph are still being built. YAML is editable text; HTML is a static read-only reference. PDF page reading requires the packaged native runtime; see [PDF runtime packaging](pdf-runtime.md).
 
 ## Editing
 
@@ -47,3 +47,10 @@ Markdown opens in Live view. The block containing the caret reveals source synta
 The live surface maps pointer selection and UTF-16 input-method ranges back to source bytes. Dragging keeps the projection steady until release. Programmatic document replacements refresh the projection, and keyboard movement scrolls the caret into view. Clipboard copy contains the selected Markdown source. Both workspace Paste and platform input-handler paste normalize CRLF/lone CR to LF.
 
 This is an implementation checkpoint, not full visual/platform acceptance. Table layout, link/task interaction, image rendering, accessibility semantics, source-reveal continuity and large-document layout caching still need work. Headless GPUI tests cover formatted Unicode mouse selection/copy, literal paste/undo, empty notes, composition ranges and long-note caret scrolling. Physical macOS/Linux input, IME and performance evidence remain required.
+
+
+## Navigation and document context
+
+Back and Forward are available above the document tabs. On macOS use Cmd+Option+Left/Right; on Linux use Alt+Left/Right. Returning to an open tab reuses its editor, including unsaved changes, cursor, selection and undo. Failed file opens retain the current visit. Opening another file after going back starts a new history branch.
+
+Context opens a resizable pane for the active document. It shows indexed backlinks, outgoing links, unresolved targets and properties. Resolved links open documents through the same navigation history. Refresh links repeats the canonical backend request; loading, empty and failure states are distinct. Traverse related tree requests the existing depth-two, 50-node backend traversal. An embedded backend reports its existing HTTP-only limitation instead of showing an empty tree. Tree results retain source paths and depth; truncated results are labeled.

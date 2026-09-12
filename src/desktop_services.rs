@@ -192,6 +192,41 @@ impl WorkspaceServices for Service {
         self.runtime.block_on(ops::reindex(&self.ctx, path)).map(|_| ()).map_err(|e| e.to_string())
     }
 
+    fn links(&self, path: &str) -> Result<Vec<lapis_desktop::services::ContextLink>, String> {
+        self.runtime.block_on(async {
+            let neighbors =
+                ops::neighbors(&self.ctx, path, Some("both"), true, 1).await.map_err(|e| e.to_string())?;
+            let ops::NeighborView::Direct(neighbors) = neighbors else {
+                return Err("Expected direct links".into());
+            };
+            Ok(neighbors
+                .neighbors
+                .into_iter()
+                .map(|n| {
+                    let label = n.label().to_string();
+                    lapis_desktop::services::ContextLink { path: n.path, label, direction: n.direction }
+                })
+                .collect())
+        })
+    }
+
+    fn tree(&self, path: &str) -> Result<lapis_desktop::services::ContextTree, String> {
+        self.runtime.block_on(async {
+            let tree = self
+                .ctx
+                .backend()
+                .map_err(|e| e.to_string())?
+                .tree(Some(path), None, 2, 50)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(lapis_desktop::services::ContextTree {
+                seed: tree.seed,
+                nodes: tree.nodes.into_iter().map(|n| (n.path, n.depth)).collect(),
+                truncated: tree.truncated,
+            })
+        })
+    }
+
     fn pdf_page(
         &self,
         path: &str,
@@ -275,6 +310,27 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
         result.unwrap();
     }
+    #[tokio::test]
+    async fn context_uses_canonical_links_and_retains_embedded_tree_limit() {
+        let (root, mut service) = fixture();
+        service.ctx.force_http = false;
+        std::fs::write(root.join("First.md"), "[[Second]] [[Missing]]").unwrap();
+        std::fs::write(root.join("Second.md"), "Second note").unwrap();
+        let result = tokio::task::spawn_blocking(move || {
+            service.build_index().unwrap();
+            let outgoing = service.links("First.md").unwrap();
+            assert!(outgoing.iter().any(|l| l.path.as_deref() == Some("Second.md") && l.direction == "out"));
+            assert!(outgoing.iter().any(|l| l.path.is_none() && l.label.contains("Missing")));
+            let incoming = service.links("Second.md").unwrap();
+            assert!(incoming.iter().any(|l| l.path.as_deref() == Some("First.md") && l.direction == "in"));
+            let error = service.tree("First.md").unwrap_err();
+            assert!(error.contains("not implemented") && error.contains("http"), "{error}");
+        })
+        .await;
+        std::fs::remove_dir_all(root).unwrap();
+        result.unwrap();
+    }
+
     #[tokio::test]
     async fn yaml_remains_text_and_stale_save_keeps_agent_version() {
         let (root, service) = fixture();

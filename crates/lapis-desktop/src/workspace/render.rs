@@ -1,4 +1,5 @@
 use super::*;
+use gpui_kit::base::{h_resizable, resizable_panel};
 use gpui_kit::{
     InteractiveElement, IntoElement, ParentElement, Render, Role, SharedString, StatefulInteractiveElement,
     Styled, div, px,
@@ -59,7 +60,7 @@ impl Render for Workspace {
             files = files.child(div().p_2().text_color(theme.secondary).child("This folder is empty"));
         }
         let sidebar = div()
-            .w(px(232.))
+            .w_full()
             .h_full()
             .flex()
             .flex_col()
@@ -116,13 +117,56 @@ impl Render for Workspace {
                     .bg(if index == self.active { theme.normal_fill() } else { theme.background })
                     .child(title)
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.active = index;
-                        this.focus_active(window, cx);
-                        cx.notify();
+                        this.activate(index, None, window, cx);
                     })),
             );
         }
-        let mut content = div().flex_1().min_h_0().min_w_0().flex().flex_col().child(tabs);
+        let mut navigation = div().flex().items_center().gap_4().px_4().py_2().text_sm();
+        for (label, forward) in [("‹ Back", false), ("Forward ›", true)] {
+            let enabled = self.history.target(forward).is_some();
+            navigation = navigation.child(
+                div()
+                    .id(label)
+                    .role(Role::Button)
+                    .aria_label(label)
+                    .text_color(if enabled { theme.foreground } else { theme.secondary })
+                    .cursor_pointer()
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, w, cx| this.navigate(forward, w, cx))),
+            );
+        }
+        navigation = navigation
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id("reset-layout")
+                    .role(Role::Button)
+                    .aria_label("Reset pane widths")
+                    .cursor_pointer()
+                    .child("Reset layout")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.layout = cx.new(|_| gpui_kit::base::ResizableState::default());
+                        this.context_layout = cx.new(|_| gpui_kit::base::ResizableState::default());
+                        for tab in &mut this.tabs {
+                            tab.split = cx.new(|_| gpui_kit::base::ResizableState::default());
+                        }
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id("toggle-context")
+                    .role(Role::Button)
+                    .aria_label("Toggle document context")
+                    .cursor_pointer()
+                    .child("Context")
+                    .on_click(cx.listener(|this, _, w, cx| {
+                        this.context = !this.context;
+                        this.refresh_context(false, w, cx);
+                        cx.notify();
+                    })),
+            );
+        let mut content = div().flex_1().min_h_0().min_w_0().flex().flex_col().child(navigation).child(tabs);
         if let Some(tab) = self.tabs.get(self.active) {
             if let Some(pdf) = &tab.pdf {
                 content = content.child(div().flex_1().min_h_0().min_w_0().child(pdf.clone()));
@@ -183,30 +227,23 @@ impl Render for Workspace {
                             .cursor_pointer()
                             .child("Save copy")
                             .on_click(cx.listener(|this, _, w, cx| this.save_to(true, w, cx))),
-                    )
-                    .child(
-                        div()
-                            .id("context")
-                            .role(Role::Button)
-                            .aria_label("Toggle properties")
-                            .cursor_pointer()
-                            .child("Properties")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.context = !this.context;
-                                cx.notify();
-                            })),
                     );
                 content = content.child(toolbar);
                 let mut working = div().flex().flex_1().min_h_0().min_w_0();
+                let mut split = h_resizable(("source-reading-split", self.active)).with_state(&tab.split);
                 if view == View::Live {
                     editor.update(cx, |s, _| s.set_editor_style(theme.input_style()));
                     working = working.child(div().flex_1().min_w_0().h_full().child(tab.live.clone()));
                 }
                 if matches!(view, View::Source | View::Split) {
                     editor.update(cx, |s, _| s.set_editor_style(theme.input_style()));
-                    working = working.child(
-                        div().flex_1().min_w_0().h_full().p_5().child(gpui_kit::base::Textarea::new(&editor)),
-                    );
+                    let pane =
+                        div().flex_1().min_w_0().h_full().p_5().child(gpui_kit::base::Textarea::new(&editor));
+                    if view == View::Split {
+                        split = split.child(resizable_panel().child(pane));
+                    } else {
+                        working = working.child(pane);
+                    }
                 }
                 if matches!(view, View::Reading | View::Split) {
                     let reader = if kind == FileKind::Html {
@@ -214,33 +251,22 @@ impl Render for Workspace {
                     } else {
                         gpui_omarchy::markdown("reading", source.clone(), window, cx)
                     };
-                    working = working.child(
-                        div()
-                            .id("reading-scroll")
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .overflow_y_scroll()
-                            .p_6()
-                            .child(reader.text_size(px(16.))),
-                    );
+                    let pane = div()
+                        .id("reading-scroll")
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .overflow_y_scroll()
+                        .p_6()
+                        .child(reader.text_size(px(16.)));
+                    if view == View::Split {
+                        split = split.child(resizable_panel().child(pane));
+                    } else {
+                        working = working.child(pane);
+                    }
                 }
-                if self.context {
-                    working = working.child(
-                        div()
-                            .id("context-scroll")
-                            .w(px(240.))
-                            .h_full()
-                            .overflow_y_scroll()
-                            .border_l_1()
-                            .border_color(theme.border)
-                            .p_4()
-                            .text_sm()
-                            .child("Properties")
-                            .child(div().mt_3().text_color(theme.secondary).child(
-                                serde_json::to_string_pretty(&tab.document.properties).unwrap_or_default(),
-                            )),
-                    );
+                if view == View::Split {
+                    working = working.child(split);
                 }
                 content = content.child(working);
             }
@@ -272,6 +298,35 @@ impl Render for Workspace {
                     ),
             );
         }
+        let mut center = div().size_full().flex().min_w_0().min_h_0();
+        if self.context {
+            center = center.child(
+                h_resizable("context-panes")
+                    .with_state(&self.context_layout)
+                    .child(resizable_panel().child(content))
+                    .child(
+                        resizable_panel()
+                            .flex_none()
+                            .size(px(280.))
+                            .size_range(px(180.)..px(520.))
+                            .child(context::render(self, cx)),
+                    ),
+            );
+        } else {
+            center = center.child(content);
+        }
+        let workspace_body = div().flex().flex_1().min_h_0().child(
+            h_resizable("workspace-panes")
+                .with_state(&self.layout)
+                .child(
+                    resizable_panel()
+                        .flex_none()
+                        .size(px(232.))
+                        .size_range(px(140.)..px(480.))
+                        .child(sidebar),
+                )
+                .child(resizable_panel().child(center)),
+        );
         let mode = self.tabs.get(self.active).map_or_else(
             || "READY".to_string(),
             |t| {
@@ -296,9 +351,18 @@ impl Render for Workspace {
             .font_family(theme.font.clone())
             .text_size(px(14.))
             .track_focus(&self.focus)
+            .key_context("LapisWorkspace")
+            .capture_action(cx.listener(|this, _: &NavigateBack, w, cx| {
+                this.navigate(false, w, cx);
+                cx.stop_propagation();
+            }))
+            .capture_action(cx.listener(|this, _: &NavigateForward, w, cx| {
+                this.navigate(true, w, cx);
+                cx.stop_propagation();
+            }))
             .capture_key_down(cx.listener(|this, e, w, cx| this.key(e, w, cx)))
             .capture_action(cx.listener(|this, _: &gpui_kit::base::input::Paste, w, cx| this.paste(w, cx)))
-            .child(div().flex().flex_1().min_h_0().child(sidebar).child(content))
+            .child(workspace_body)
             .child(
                 div()
                     .id("workspace-status")

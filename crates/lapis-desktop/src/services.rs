@@ -31,6 +31,19 @@ pub struct Document {
     pub readonly: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct ContextLink {
+    pub path: Option<String>,
+    pub label: String,
+    pub direction: String,
+}
+#[derive(Debug, Clone)]
+pub struct ContextTree {
+    pub seed: String,
+    pub nodes: Vec<(String, u32)>,
+    pub truncated: bool,
+}
+
 pub struct SearchPage {
     pub hits: Vec<lapis_lattice::Hit>,
     pub modalities: Vec<String>,
@@ -47,6 +60,12 @@ pub trait WorkspaceServices: Send + Sync {
     fn search(&self, query: &str) -> Result<SearchPage, String>;
     fn reindex(&self, path: &str) -> Result<(), String>;
     fn build_index(&self) -> Result<u64, String>;
+    fn links(&self, _path: &str) -> Result<Vec<ContextLink>, String> {
+        Err("Link context is unavailable in this service".into())
+    }
+    fn tree(&self, _path: &str) -> Result<ContextTree, String> {
+        Err("Tree retrieval is unavailable in this service".into())
+    }
     fn pdf_page(&self, _path: &str, _page: u32, _width: u32, _cancel: ArcCancel) -> Result<PdfPage, String> {
         Err("PDF page rendering is unavailable in this service".into())
     }

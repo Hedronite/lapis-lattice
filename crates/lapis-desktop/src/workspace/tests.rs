@@ -12,6 +12,9 @@ impl WorkspaceServices for Fixture {
         Ok(vec![])
     }
     fn read(&self, path: &str) -> Result<Document, String> {
+        if path == "missing.md" {
+            return Err("Fixture missing file".into());
+        }
         Ok(Document {
             path: path.into(),
             title: "Fixture".into(),
@@ -37,6 +40,13 @@ impl WorkspaceServices for Fixture {
     fn search(&self, _: &str) -> Result<SearchPage, String> {
         Err("offline fixture".into())
     }
+    fn links(&self, path: &str) -> Result<Vec<crate::services::ContextLink>, String> {
+        Ok(vec![crate::services::ContextLink {
+            path: Some("related.md".into()),
+            label: format!("Related to {path}"),
+            direction: "out".into(),
+        }])
+    }
     fn reindex(&self, _: &str) -> Result<(), String> {
         Ok(())
     }
@@ -50,6 +60,7 @@ fn setup(cx: &mut TestAppContext) -> WindowHandle<Workspace> {
 fn setup_with(cx: &mut TestAppContext, reject_save: bool) -> WindowHandle<Workspace> {
     cx.update(|cx| {
         gpui_kit::base::init(cx);
+        init_workspace(cx);
         gpui_omarchy::Theme::tokyo_night().apply(cx);
     });
     let handle = cx.add_window(move |w, cx| Workspace::new(Arc::new(Fixture { reject_save }), w, cx));
@@ -330,4 +341,129 @@ fn live_platform_paste_normalizes_lines_and_respects_readonly(cx: &mut TestAppCo
     let mut visual = VisualTestContext::from_window(handle.into(), cx);
     visual.update(|w, cx| w.press("u", cx));
     assert_eq!(text(handle, cx), "one two\nsecond\n");
+}
+
+#[gpui_kit::test]
+fn navigation_reuses_dirty_buffers_and_failed_open_does_not_move_history(cx: &mut TestAppContext) {
+    let handle = setup(cx);
+    handle
+        .update(cx, |this, w, cx| {
+            this.tabs[0].editor.update(cx, |s, cx| s.replace("unsaved ", w, cx));
+            this.open_file("second.md".into(), w, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let mut visual = VisualTestContext::from_window(handle.into(), cx);
+    visual.update(|w, cx| {
+        w.render_frame(cx);
+        w.press(if cfg!(target_os = "macos") { "cmd-alt-left" } else { "alt-left" }, cx);
+    });
+    cx.run_until_parked();
+    handle
+        .read_with(cx, |this, cx| {
+            assert_eq!(this.active, 0);
+            assert!(Workspace::dirty(&this.tabs[this.active], cx));
+            assert!(this.tabs[0].editor.read(cx).value().starts_with("unsaved "));
+        })
+        .unwrap();
+    handle.update(cx, |this, w, cx| this.open_file("missing.md".into(), w, cx)).unwrap();
+    cx.run_until_parked();
+    handle
+        .read_with(cx, |this, _| {
+            assert_eq!(this.tabs[this.active].document.path, "fixture.md");
+            assert_eq!(this.history.target(true).unwrap().1, "second.md");
+        })
+        .unwrap();
+    visual.update(|w, cx| {
+        w.render_frame(cx);
+        w.press(if cfg!(target_os = "macos") { "cmd-alt-right" } else { "alt-right" }, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        handle.read_with(cx, |this, _| this.tabs[this.active].document.path.clone()).unwrap(),
+        "second.md"
+    );
+    handle
+        .update(cx, |this, w, cx| {
+            this.close_tab(false, cx);
+            this.focus_active(w, cx);
+        })
+        .unwrap();
+    handle
+        .read_with(cx, |this, _| {
+            assert_eq!(this.tabs[this.active].document.path, "fixture.md");
+            assert_eq!(this.history.target(false).unwrap().1, "second.md");
+        })
+        .unwrap();
+}
+
+#[gpui_kit::test]
+fn context_follows_active_file_and_keeps_tree_capability_error_visible(cx: &mut TestAppContext) {
+    let handle = setup(cx);
+    handle
+        .update(cx, |this, w, cx| {
+            this.context = true;
+            this.refresh_context(false, w, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    handle
+        .read_with(cx, |this, _| {
+            assert_eq!(this.context_state.path.as_deref(), Some("fixture.md"));
+            assert!(
+                this.context_state.links.as_ref().unwrap().as_ref().unwrap()[0].label.contains("fixture.md")
+            );
+        })
+        .unwrap();
+    handle.update(cx, |this, w, cx| this.context_tree(w, cx)).unwrap();
+    cx.run_until_parked();
+    assert!(handle.read_with(cx, |this, _| this.context_state.tree.as_ref().unwrap().is_err()).unwrap());
+    handle.update(cx, |this, w, cx| this.open_file("related.md".into(), w, cx)).unwrap();
+    cx.run_until_parked();
+    handle
+        .read_with(cx, |this, _| {
+            assert_eq!(this.context_state.path.as_deref(), Some("related.md"));
+            assert!(this.context_state.tree.is_none());
+        })
+        .unwrap();
+}
+
+#[gpui_kit::test]
+fn resizing_sidebar_and_source_split_preserves_editor_and_selection(cx: &mut TestAppContext) {
+    let handle = setup(cx);
+    handle
+        .update(cx, |this, _, cx| {
+            this.tabs[0].view = View::Split;
+            this.tabs[0].editor.update(cx, |s, cx| s.set_selected_range(1..4, cx));
+            cx.notify();
+        })
+        .unwrap();
+    let mut visual = VisualTestContext::from_window(handle.into(), cx);
+    visual.update(|w, cx| {
+        w.render_frame(cx);
+        w.render_frame(cx);
+    });
+    handle
+        .update(cx, |this, w, cx| {
+            this.layout.update(cx, |s, cx| s.resize_panel(0, gpui_kit::px(300.), w, cx));
+        })
+        .unwrap();
+    visual.update(|w, cx| {
+        w.render_frame(cx);
+        w.render_frame(cx);
+    });
+    handle
+        .update(cx, |this, w, cx| {
+            this.tabs[0].split.update(cx, |s, cx| s.resize_panel(0, gpui_kit::px(450.), w, cx));
+        })
+        .unwrap();
+    visual.update(|w, cx| w.render_frame(cx));
+    handle
+        .read_with(cx, |this, cx| {
+            assert_eq!(this.layout.read(cx).sizes()[0], gpui_kit::px(300.));
+            assert_eq!(this.tabs[0].split.read(cx).sizes()[0], gpui_kit::px(450.));
+            assert_eq!(this.tabs[0].editor.read(cx).selected_range(), 1..4);
+            assert_eq!(this.tabs[0].editor.read(cx).value().as_ref(), "one two\nsecond\n");
+        })
+        .unwrap();
 }

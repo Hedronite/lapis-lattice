@@ -1,6 +1,8 @@
 //! Native notes shell. Files load independently from the optional graph/index.
 
 mod command;
+mod context;
+mod history;
 mod palette;
 mod render;
 #[cfg(all(test, feature = "gui-tests"))]
@@ -17,6 +19,17 @@ use gpui_kit::{
 };
 use std::sync::Arc;
 
+gpui_kit::actions!(lapis_workspace, [NavigateBack, NavigateForward]);
+
+fn init_workspace(cx: &mut App) {
+    let (back, forward) =
+        if cfg!(target_os = "macos") { ("cmd-alt-left", "cmd-alt-right") } else { ("alt-left", "alt-right") };
+    cx.bind_keys([
+        gpui_kit::KeyBinding::new(back, NavigateBack, Some("LapisWorkspace")),
+        gpui_kit::KeyBinding::new(forward, NavigateForward, Some("LapisWorkspace")),
+    ]);
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
     Live,
@@ -32,6 +45,7 @@ struct Tab {
     pdf: Option<Entity<crate::pdf_reader::PdfReader>>,
     _events: Subscription,
     view: View,
+    split: Entity<gpui_kit::base::ResizableState>,
     vim: crate::vim::Vim,
     close_after_save: bool,
     saving: bool,
@@ -39,6 +53,8 @@ struct Tab {
 
 struct Workspace {
     services: Arc<dyn WorkspaceServices>,
+    layout: Entity<gpui_kit::base::ResizableState>,
+    context_layout: Entity<gpui_kit::base::ResizableState>,
     files: Vec<FileEntry>,
     folder: String,
     files_loading: bool,
@@ -51,6 +67,8 @@ struct Workspace {
     error: bool,
     focus: FocusHandle,
     context: bool,
+    context_state: context::Panel,
+    history: history::History,
     palette: Option<palette::Palette>,
     query_epoch: u64,
     indexing: bool,
@@ -62,6 +80,8 @@ impl Workspace {
     fn new(services: Arc<dyn WorkspaceServices>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let workspace = Workspace {
             services,
+            layout: cx.new(|_| gpui_kit::base::ResizableState::default()),
+            context_layout: cx.new(|_| gpui_kit::base::ResizableState::default()),
             files: vec![],
             folder: String::new(),
             files_loading: false,
@@ -74,6 +94,8 @@ impl Workspace {
             error: false,
             focus: cx.focus_handle(),
             context: false,
+            context_state: context::Panel::default(),
+            history: history::History::default(),
             palette: None,
             query_epoch: 0,
             indexing: false,
@@ -83,7 +105,11 @@ impl Workspace {
         workspace.focus.focus(window, cx);
         workspace
     }
-    fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get(self.active) {
+            self.history.commit(tab.document.path.clone(), None);
+        }
+        self.refresh_context(false, window, cx);
         for (i, tab) in self.tabs.iter().enumerate() {
             if let Some(pdf) = &tab.pdf {
                 pdf.update(cx, |s, cx| s.set_visible(i == self.active, window, cx));
@@ -149,14 +175,33 @@ impl Workspace {
         cx.notify();
     }
 
+    fn navigate(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((index, path)) = self.history.target(forward) {
+            self.open_visit(path, Some(index), window, cx);
+        }
+    }
+    fn activate(&mut self, index: usize, travel: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.active = index;
+        self.history.commit(self.tabs[index].document.path.clone(), travel);
+        self.refresh_context(false, window, cx);
+        self.focus_active(window, cx);
+        cx.notify();
+    }
     fn open_file(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_visit(path, None, window, cx);
+    }
+    fn open_visit(
+        &mut self,
+        path: String,
+        travel: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_epoch += 1;
         let epoch = self.open_epoch;
         if let Some(index) = self.tabs.iter().position(|t| t.document.path == path) {
-            self.active = index;
             self.opening = None;
-            self.focus_active(window, cx);
-            cx.notify();
+            self.activate(index, travel, window, cx);
             return;
         }
         self.opening = Some(path.clone());
@@ -208,12 +253,12 @@ impl Workspace {
                             pdf,
                             _events: events,
                             view,
+                            split: cx.new(|_| gpui_kit::base::ResizableState::default()),
                             vim: crate::vim::Vim::default(),
                             close_after_save: false,
                             saving: false,
                         });
-                        this.active = this.tabs.len() - 1;
-                        this.focus_active(window, cx);
+                        this.activate(this.tabs.len() - 1, travel, window, cx);
                         this.status.clear();
                         this.error = false;
                     }
@@ -499,6 +544,7 @@ impl Workspace {
 pub fn open(opts: Options, services: Arc<dyn WorkspaceServices>) -> Result<(), DesktopError> {
     gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx: &mut App| {
         gpui_omarchy::init(cx);
+        init_workspace(cx);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
