@@ -624,6 +624,48 @@ fn session_restore_is_lazy_clamps_changed_text_and_preserves_tab_order(cx: &mut 
         .unwrap();
 }
 #[gpui_kit::test]
+fn window_activation_keeps_restored_live_selection_and_scroll(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::base::init(cx);
+        init_workspace(cx);
+        gpui_omarchy::Theme::tokyo_night().apply(cx);
+    });
+    let mut first = crate::session::Tab::new("first.md".into());
+    first.selection = [1, 1];
+    first.source_scroll = [0., -23.];
+    let service = Arc::new(SessionFixture {
+        session: crate::session::Session {
+            tabs: vec![first],
+            active: Some("first.md".into()),
+            ..Default::default()
+        },
+        reads: Default::default(),
+    });
+    let handle = cx.add_window(move |w, cx| Workspace::new(service, w, cx));
+    handle.update(cx, |this, w, cx| this.restore_session(None, w, cx)).unwrap();
+    cx.run_until_parked();
+    let mut visual = VisualTestContext::from_window(handle.into(), cx);
+    let selection = |cx: &TestAppContext| {
+        handle.read_with(cx, |this, cx| this.tabs[0].editor.read(cx).selected_range()).unwrap()
+    };
+    // The window starts inactive, as after `open -a` while another app holds front.
+    visual.deactivate_window();
+    visual.update(|w, cx| {
+        w.render_frame(cx);
+        w.render_frame(cx);
+    });
+    assert_eq!(selection(cx), 1..1, "restored selection before activation");
+    visual.update(|w, _| w.activate_window());
+    cx.run_until_parked();
+    visual.update(|w, cx| {
+        w.render_frame(cx);
+        w.render_frame(cx);
+    });
+    assert_eq!(selection(cx), 1..1, "activation must not move the restored caret");
+    let snapshot = handle.read_with(cx, |this, cx| this.session_snapshot(cx)).unwrap();
+    assert_eq!(snapshot.tabs[0].selection, [1, 1]);
+}
+#[gpui_kit::test]
 fn closing_loaded_tab_can_activate_lazy_neighbor_and_dirty_tabs_stay(cx: &mut TestAppContext) {
     let handle = setup(cx);
     handle
