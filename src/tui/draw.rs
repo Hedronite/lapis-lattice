@@ -12,6 +12,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use super::app::{App, Focus, Overlay, Split, tab_label};
 use super::hal_view;
 use super::help;
+use super::index::IndexState;
 use super::leader;
 use super::mouse::Regions;
 use super::neighbors_view;
@@ -203,7 +204,7 @@ impl App {
                 f.render_widget(&t.text, area);
             }
             None => {
-                super::welcome::draw(f, area);
+                super::welcome::draw(f, area, self.index.needs_setup());
             }
         }
     }
@@ -288,6 +289,21 @@ impl App {
                 ));
             }
         }
+        let index = match &self.index {
+            IndexState::Missing => {
+                Some(Span::styled(" no search index · Space i builds ", Style::default().fg(theme::warn())))
+            }
+            IndexState::Failed(_) => {
+                Some(Span::styled(" index failed · Space i retries ", Style::default().fg(theme::warn())))
+            }
+            IndexState::Indexing { done, total } if *total > 0 => {
+                Some(Span::styled(format!(" indexing {done}/{total} "), Style::default().fg(theme::gold())))
+            }
+            IndexState::Indexing { .. } => {
+                Some(Span::styled(" indexing… ", Style::default().fg(theme::gold())))
+            }
+            _ => None,
+        };
         let lattice = match self.lattice_ok {
             Some(true) => Span::styled(" lattice ✓ ", Style::default().fg(theme::current().ok)),
             Some(false) => Span::styled(" lattice ✗ ", Style::default().fg(theme::warn())),
@@ -298,10 +314,20 @@ impl App {
         } else {
             format!(" {}/{} ", self.active + 1, self.tabs.len())
         };
-        let right = Line::from(vec![Span::styled(tabs, theme::dim()), lattice]);
+        let left = Line::from(spans);
+        let mut right = vec![Span::styled(tabs, theme::dim()), lattice];
+        // The index hint yields to transient status and guard messages; it returns
+        // once they expire.
+        if let Some(index) = index
+            && left.width() + index.width() + right.iter().map(Span::width).sum::<usize>()
+                <= area.width as usize
+        {
+            right.insert(0, index);
+        }
+        let right = Line::from(right);
         let right_w = right.width() as u16;
         let [l, r] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(right_w)]).areas(area);
-        f.render_widget(Paragraph::new(Line::from(spans)).style(theme::statusline()), l);
+        f.render_widget(Paragraph::new(left).style(theme::statusline()), l);
         f.render_widget(Paragraph::new(right).style(theme::statusline()), r);
     }
 
@@ -379,6 +405,15 @@ impl App {
                     " commands "
                 } else if p.pending {
                     " lattice search… "
+                } else if !p.asked.is_empty()
+                    && self.index.needs_setup()
+                    && p.items.iter().all(|i| matches!(i, Item::Command { .. }))
+                {
+                    " search index not built · Enter builds it in the background "
+                } else if matches!(self.index, IndexState::Indexing { .. }) {
+                    " lattice search · indexing, results incomplete "
+                } else if !p.asked.is_empty() && p.items.is_empty() {
+                    " lattice search · no matches "
                 } else {
                     " lattice search  (type `>` for commands) "
                 };

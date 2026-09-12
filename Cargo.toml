@@ -1,5 +1,7 @@
 [workspace]
 members = [".", "crates/lapis-desktop", "crates/lapis-lattice"]
+# Vendored patched dependency, not a workspace member (see [patch.crates-io]).
+exclude = ["vendor/gpui-base"]
 
 [package]
 name = "lapis"
@@ -50,3 +52,9 @@ yaml_serde = "0.10"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# gpui-base 0.6.1 from crates.io (checksum 9d45dcaaeac889bf1e7757db1beb26c9043c8ea3156651facc11c6be56bb6722)
+# plus a public `TextareaState::set_cursor_blink`. The focused widget otherwise redraws
+# the whole window every 500 ms behind the Live editor. See vendor/gpui-base/LAPIS-PATCH.md.
+[patch.crates-io]
+gpui-base = { path = "vendor/gpui-base" }

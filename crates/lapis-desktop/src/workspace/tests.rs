@@ -653,6 +653,46 @@ mod graph;
 mod panes;
 
 #[gpui_kit::test]
+fn only_visible_source_views_blink_the_native_caret(cx: &mut TestAppContext) {
+    use std::{cell::Cell, rc::Rc, time::Duration};
+    let handle = setup(cx);
+    let mut visual = VisualTestContext::from_window(handle.into(), cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    let editor = handle.read_with(cx, |this, _| this.tabs[0].editor.clone()).unwrap();
+    let notified = Rc::new(Cell::new(0));
+    cx.update(|cx| {
+        let n = notified.clone();
+        cx.observe(&editor, move |_, _| n.set(n.get() + 1)).detach();
+    });
+    let idle = |visual: &mut VisualTestContext, cx: &mut TestAppContext| {
+        notified.set(0);
+        for _ in 0..8 {
+            cx.executor().advance_clock(Duration::from_millis(500));
+            cx.run_until_parked();
+            visual.update(|w, cx| w.render_frame(cx));
+        }
+        notified.get()
+    };
+    let select = |view: View, cx: &mut TestAppContext| {
+        handle
+            .update(cx, |this, window, cx| {
+                this.set_view(0, view, cx);
+                this.focus_active(window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+    };
+    assert_eq!(handle.read_with(cx, |this, _| this.tabs[0].view).unwrap(), View::Live);
+    assert_eq!(idle(&mut visual, cx), 0, "a focused Live note is idle");
+    select(View::Source, cx);
+    assert!(idle(&mut visual, cx) >= 4, "the visible source caret blinks");
+    select(View::Live, cx);
+    assert_eq!(idle(&mut visual, cx), 0, "back in Live the blink stops and focus does not restart it");
+    select(View::Split, cx);
+    assert!(idle(&mut visual, cx) >= 4, "split shows the source widget, so it blinks");
+}
+
+#[gpui_kit::test]
 fn live_editor_ignores_cursor_blink_until_text_or_selection_changes(cx: &mut TestAppContext) {
     use gpui_kit::EntityInputHandler;
     use std::{cell::Cell, rc::Rc, time::Duration};
@@ -688,7 +728,23 @@ fn live_editor_ignores_cursor_blink_until_text_or_selection_changes(cx: &mut Tes
             })
             .unwrap()
     };
-    // The focused native widget toggles its caret every 500 ms and notifies each time.
+    // Live keeps the hidden widget caret steady, so a focused idle note notifies nothing.
+    blink(&mut visual, cx);
+    assert_eq!(widget_notified.get(), 0, "Live turns the hidden widget blink off");
+    assert_eq!(live_notified.get(), 0, "an idle focused Live note stays quiet");
+    // A blinking widget still must not invalidate the projection or reshape its lines.
+    handle
+        .update(cx, |this, w, cx| {
+            this.tabs[0].editor.update(cx, |s, cx| {
+                s.set_cursor_blink(true, cx);
+                s.focus(w, cx);
+            })
+        })
+        .unwrap();
+    cx.run_until_parked();
+    visual.update(|w, cx| w.render_frame(cx));
+    live_notified.set(0);
+    widget_notified.set(0);
     let shaped = generation(cx);
     blink(&mut visual, cx);
     assert!(widget_notified.get() >= 4, "focused widget blinks: {}", widget_notified.get());

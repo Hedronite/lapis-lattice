@@ -21,7 +21,9 @@ struct FtsRow {
     title: Option<String>,
 }
 
-pub fn reindex(conn: &Connection, vault: &Path) -> Result<IndexReport> {
+/// Full rebuild, calling `progress(files indexed, files total)` after the walk and
+/// after each file, so an interactive caller can show a nonblocking build.
+pub fn reindex(conn: &Connection, vault: &Path, progress: &mut dyn FnMut(u64, u64)) -> Result<IndexReport> {
     // The vector table carries no foreign key, so nothing cascades when the
     // chunk rows go. Clearing it here is what stops KNN from returning ids that
     // no longer name a chunk.
@@ -34,9 +36,12 @@ pub fn reindex(conn: &Connection, vault: &Path) -> Result<IndexReport> {
     crate::sqlite::create_chunks_fts(conn)?;
 
     let files = walk(vault)?;
+    let total = files.len() as u64;
+    progress(0, total);
     let mut chunks_n = 0u64;
-    for rel in &files {
+    for (done, rel) in files.iter().enumerate() {
         chunks_n += index_one(conn, vault, rel)?;
+        progress(done as u64 + 1, total);
     }
     resolve_edges(conn, &files)?;
     crate::sqlite::meta_set(conn, "graph_built", "1")?;

@@ -35,17 +35,21 @@ pub struct LiveEditor {
 }
 impl LiveEditor {
     pub fn new(source: Entity<TextareaState>, cx: &mut Context<Self>) -> Self {
+        // Live paints its own steady caret over the hidden source widget. The widget's
+        // blink would notify every 500 ms while focused and redraw the whole window, so
+        // it stays off here; `Workspace::set_view` turns it back on for visible source.
+        source.update(cx, |s, cx| s.set_cursor_blink(false, cx));
         let changes = cx.subscribe(&source, |this, _, event, cx| {
             if matches!(event, InputEvent::Change) {
                 this.changed = true;
             }
             cx.notify();
         });
-        // `TextareaState` notifies its observers on every caret-blink toggle (500 ms
-        // while focused), not only on edits and selection moves. The projection paints
-        // its own steady caret, so a blink must not rebuild the projection or reshape
-        // every line: invalidate only when the source text or selection differs from
-        // what the last layout consumed. `changed` is already true while an edit or
+        // A blinking `TextareaState` (Source/Split share this entity) notifies its
+        // observers on every caret toggle, not only on edits and selection moves. The
+        // projection paints its own steady caret, so a blink must not rebuild the
+        // projection or reshape every line: invalidate only when the source text or
+        // selection differs from what the last layout consumed. `changed` is already true while an edit or
         // an unlaid-out selection is pending, so that redraw is never lost.
         let observe = cx.observe(&source, |this, source, cx| {
             let state = source.read(cx);

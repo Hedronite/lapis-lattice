@@ -7,7 +7,9 @@
 .idea/
 .vscode/
 *.swp
-vendor/
+vendor/*
+# Patched crates.io source wired through [patch.crates-io]; see its LAPIS-PATCH.md.
+!vendor/gpui-base/
 /tmp/
 .env
 .lapis-local/

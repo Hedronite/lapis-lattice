@@ -47,6 +47,8 @@ pub enum Cmd {
     Refresh,
     /// Return to the notes view from tasks/kanban/calendar.
     NotesView,
+    /// Build (or rebuild) the embedded search index in the background.
+    BuildIndex,
 }
 
 impl Cmd {
@@ -95,6 +97,7 @@ impl Cmd {
             Cmd::Quit => "quit",
             Cmd::Refresh => "refresh tasks / tree",
             Cmd::NotesView => "notes view",
+            Cmd::BuildIndex => "build search index (background)",
         }
     }
 }
@@ -123,6 +126,7 @@ pub fn table() -> Vec<Node> {
     use Node::*;
     vec![
         Leaf('f', Cmd::FindNote),
+        Leaf('i', Cmd::BuildIndex),
         Group(
             's',
             "search",
@@ -131,6 +135,7 @@ pub fn table() -> Vec<Node> {
                 Leaf('t', Cmd::SearchText),
                 Leaf('#', Cmd::Tags),
                 Leaf('c', Cmd::Commands),
+                Leaf('i', Cmd::BuildIndex),
             ],
         ),
         Leaf('e', Cmd::ToggleSidebar),
@@ -268,6 +273,8 @@ mod tests {
         assert_eq!(step(&['s', '#']), Step::Run(Cmd::Tags));
         assert_eq!(step(&['%']), Step::Unknown);
         assert_eq!(step(&['t', '#']), Step::Unknown);
+        assert_eq!(step(&['i']), Step::Run(Cmd::BuildIndex));
+        assert_eq!(step(&['s', 'i']), Step::Run(Cmd::BuildIndex));
     }
 
     #[test]
@@ -278,6 +285,7 @@ mod tests {
         let all = all_commands();
         assert!(all.iter().any(|(k, c)| k == "Space t c" && *c == Cmd::Calendar));
         assert!(all.iter().any(|(k, c)| k == "Space d" && *c == Cmd::Daily));
+        assert!(all.iter().any(|(k, c)| k == "Space i" && *c == Cmd::BuildIndex));
         // top-level keys are unique
         let mut keys: Vec<char> = t.iter().map(Node::key).collect();
         let n = keys.len();

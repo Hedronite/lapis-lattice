@@ -386,6 +386,22 @@ impl Backend {
         }
     }
 
+    /// Blocking [`Backend::reindex_all`] with `(files indexed, files total)` progress,
+    /// for a caller that runs it on its own worker thread.
+    pub fn reindex_all_with_progress(
+        &self,
+        progress: &mut dyn FnMut(u64, u64),
+    ) -> Result<lapis_lattice::IndexReport> {
+        match self {
+            Backend::Embedded(engine) => {
+                lock(engine).reindex_with_progress(progress).map_err(LapisError::from)
+            }
+            Backend::Http(_) => {
+                Err(LapisError::Usage("Full indexing is managed by the configured HTTP service".into()))
+            }
+        }
+    }
+
     /// Index one path after a write. Embedded does it in-process; HTTP kicks serve.py.
     pub async fn reindex(&self, rel: &str) -> Result<http::Reindex> {
         match self {

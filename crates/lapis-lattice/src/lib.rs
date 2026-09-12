@@ -215,7 +215,13 @@ impl Engine {
 
     /// Full-vault reindex, then embed anything missing a vector.
     pub fn reindex(&mut self) -> Result<IndexReport> {
-        let mut r = index::reindex(&self.conn, &self.vault)?;
+        self.reindex_with_progress(&mut |_, _| {})
+    }
+
+    /// [`Engine::reindex`], calling `progress(files indexed, files total)` during the
+    /// walk. Embedding missing vectors follows the last file and is not counted.
+    pub fn reindex_with_progress(&mut self, progress: &mut dyn FnMut(u64, u64)) -> Result<IndexReport> {
+        let mut r = index::reindex(&self.conn, &self.vault, progress)?;
         self.embed_into(&mut r);
         Ok(r)
     }
