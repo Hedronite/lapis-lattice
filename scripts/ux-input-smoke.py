@@ -9,6 +9,7 @@ from pathlib import Path
 ap = argparse.ArgumentParser()
 ap.add_argument('--bin', required=True)
 ap.add_argument('--out', required=True)
+ap.add_argument('--check', action='store_true', help='fail if a required supported input route fails')
 args = ap.parse_args()
 out = Path(args.out).resolve()
 out.mkdir(parents=True, exist_ok=True)
@@ -34,8 +35,18 @@ class Session:
             os.execv(args.bin, [args.bin, '--vault', str(self.vault), 'tui'])
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack('HHHH', 32, 120, 0, 0))
         self.raw = bytearray()
-        self.drain(0.6)
+        self.wait_for(b'Space leader')
         self.send(b'\r')
+        self.wait_for(b'NORMAL')
+
+    def wait_for(self, marker, timeout=15):
+        deadline = time.monotonic() + timeout
+        while marker not in self.raw:
+            if time.monotonic() >= deadline:
+                (self.root / 'startup-timeout.ansi').write_bytes(self.raw)
+                self.close()
+                raise RuntimeError(f'{self.root.name}: terminal never reached {marker!r}')
+            self.drain(0.05)
 
     def drain(self, seconds=0.12):
         end = time.monotonic() + seconds
@@ -137,3 +148,7 @@ report = {'binary':str(Path(args.bin).resolve()), 'binary_sha256':hashlib.sha256
           'initial_sha256':hashlib.sha256(initial.encode()).hexdigest(), 'results':results}
 (out/'results.json').write_text(json.dumps(report, indent=2)+'\n')
 print(json.dumps(report, indent=2))
+if args.check:
+    required = [r for r in results if r['case'] not in ('paste-lf-insert', 'paste-crlf-insert')]
+    if any(value is False for result in required for value in result.values()):
+        raise SystemExit('required TUI input regression failed; see retained results')

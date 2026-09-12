@@ -236,7 +236,11 @@ impl App {
     pub(crate) fn start_watcher(&mut self) {
         let tx = self.tx.clone();
         match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(ev) = res {
+            if let Ok(ev) = res
+                && !matches!(ev.kind, notify::EventKind::Access(_))
+            {
+                // Inotify reports directory opens. Reloading the tree in
+                // response would produce another open, starving input forever.
                 for p in ev.paths {
                     let _ = tx.send(Msg::Fs(p));
                 }
@@ -793,7 +797,9 @@ impl App {
     // ------------------------------------------------------------- messages
 
     pub(crate) fn drain(&mut self) {
-        while let Ok(m) = self.rx.try_recv() {
+        // A burst of genuine external edits must also leave time for input.
+        for _ in 0..128 {
+            let Ok(m) = self.rx.try_recv() else { break };
             match m {
                 Msg::Search(seq, r) => {
                     if let Some(Overlay::Palette(p)) = self.overlay.as_mut()
