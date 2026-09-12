@@ -1,7 +1,10 @@
 //! Adapter from the desktop's background requests to canonical product operations.
 
-use crate::{hal, notes, ops, safe_file, write};
-use lapis_desktop::services::{Document, FileEntry, FileKind, SearchPage, WorkspaceServices};
+use crate::{hal, notes, ops, safe_file, tasks, templates, write};
+use lapis_desktop::services::{
+    Document, FileEntry, FileKind, Period, SearchPage, TaskRow, TemplateInfo, WorkspaceServices,
+};
+use notify::{RecursiveMode, Watcher};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -25,6 +28,8 @@ pub fn service(ctx: &ops::Ctx) -> Arc<dyn WorkspaceServices> {
         ctx: ctx.clone(),
         runtime: tokio::runtime::Handle::current(),
         pdf_gate: std::sync::Mutex::new(()),
+        watcher: std::sync::Mutex::new(None),
+        changes: Arc::new(std::sync::Mutex::new(Vec::new())),
     })
 }
 
@@ -32,6 +37,9 @@ struct Service {
     ctx: ops::Ctx,
     runtime: tokio::runtime::Handle,
     pdf_gate: std::sync::Mutex<()>,
+    /// Started on the first `changed_paths` call, so CLI use never watches anything.
+    watcher: std::sync::Mutex<Option<notify::RecommendedWatcher>>,
+    changes: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl Service {
@@ -286,6 +294,170 @@ impl WorkspaceServices for Service {
             backend.health().await.map(|h| h.documents_indexed).map_err(|e| e.to_string())
         })
     }
+
+    fn templates(&self) -> Result<Vec<TemplateInfo>, String> {
+        Ok(templates::list(&self.ctx.vault.root)
+            .into_iter()
+            .map(|t| TemplateInfo { id: t.id, name: t.name })
+            .collect())
+    }
+    fn create_note(&self, title: &str, folder: &str, template: Option<&str>) -> Result<String, String> {
+        let folder = folder.trim_matches('/');
+        let opts = write::CreateOpts {
+            title: title.to_string(),
+            path: (!folder.is_empty()).then(|| format!("{folder}/")),
+            template: template.map(str::to_string),
+            doc_type: None,
+            domain: None,
+            tags: vec![],
+            body: None,
+            operator: self.ctx.cfg.operator.name.clone(),
+            inbox: self.ctx.inbox().unwrap_or_else(|_| "inbox".into()),
+            director: None,
+            template_date: None,
+            dry_run: false,
+        };
+        let written = write::create(&self.ctx.vault.root, &opts).map_err(|e| e.to_string())?;
+        self.index_quietly(&written.path);
+        Ok(written.path)
+    }
+    fn periodic(&self, period: Period) -> Result<String, String> {
+        let period = match period {
+            Period::Daily => write::Period::Daily,
+            Period::Weekly => write::Period::Weekly,
+            Period::Monthly => write::Period::Monthly,
+        };
+        let note = write::periodic(&self.ctx.vault.root, period, None, self.ctx.cfg.operator.name.clone())
+            .map_err(|e| e.to_string())?;
+        if note.created {
+            self.index_quietly(&note.path);
+        }
+        Ok(note.path)
+    }
+    fn capture(&self, text: &str) -> Result<String, String> {
+        let inbox = self.ctx.inbox().unwrap_or_else(|_| "inbox".into());
+        let written = write::capture(&self.ctx.vault.root, text, &inbox, self.ctx.cfg.operator.name.clone())
+            .map_err(|e| e.to_string())?;
+        self.index_quietly(&written.path);
+        Ok(written.path)
+    }
+    fn tags(&self) -> Result<Vec<(String, u64)>, String> {
+        let docs = self.documents(None)?;
+        let mut counts = std::collections::BTreeMap::new();
+        for d in docs {
+            for tag in d.tags {
+                *counts.entry(tag).or_insert(0u64) += 1;
+            }
+        }
+        let mut out: Vec<(String, u64)> = counts.into_iter().collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(out)
+    }
+    fn tagged(&self, tag: &str) -> Result<Vec<String>, String> {
+        Ok(self.documents(Some(tag))?.into_iter().map(|d| d.path).collect())
+    }
+    fn tasks(&self) -> Result<Vec<TaskRow>, String> {
+        let filter = tasks::Filter { exclude: self.ctx.cfg.agent.task_exclude.clone(), ..Default::default() };
+        Ok(tasks::list(&self.ctx.vault.root, &filter)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|t| !t.cancelled)
+            .map(|t| TaskRow {
+                id: t.id,
+                path: t.source_path,
+                line: t.line_number,
+                content: t.content,
+                checked: t.checked,
+            })
+            .collect())
+    }
+    fn toggle_task(&self, id: &str) -> Result<bool, String> {
+        let task = tasks::toggle(&self.ctx.vault.root, id).map_err(|e| e.to_string())?;
+        self.index_quietly(&task.source_path);
+        Ok(task.checked)
+    }
+    fn trash(&self, path: &str) -> Result<String, String> {
+        let bucket = ops::trash_bucket(&self.ctx);
+        let trashed = write::trash(&self.ctx.vault.root, path, &bucket).map_err(|e| e.to_string())?;
+        self.index_quietly(path);
+        Ok(trashed.trashed_to)
+    }
+    fn trash_list(&self) -> Result<Vec<String>, String> {
+        Ok(write::trash_list(&self.ctx.vault.root, &ops::trash_bucket(&self.ctx)))
+    }
+    fn restore(&self, trashed: &str) -> Result<String, String> {
+        let bucket = ops::trash_bucket(&self.ctx);
+        let restored = write::restore(&self.ctx.vault.root, trashed, &bucket).map_err(|e| e.to_string())?;
+        self.index_quietly(&restored.path);
+        Ok(restored.path)
+    }
+    fn changed_paths(&self) -> Vec<String> {
+        self.ensure_watcher();
+        let mut drained: Vec<String> =
+            std::mem::take(&mut *self.changes.lock().unwrap_or_else(|p| p.into_inner()));
+        drained.sort();
+        drained.dedup();
+        drained
+    }
+}
+
+impl Service {
+    /// One-path index update after a workflow write; the file is already the truth,
+    /// so a failure only means search lags until the next build.
+    fn index_quietly(&self, path: &str) {
+        let _ = self.runtime.block_on(ops::reindex(&self.ctx, path));
+    }
+    fn documents(&self, tag: Option<&str>) -> Result<Vec<crate::http::Document>, String> {
+        self.runtime.block_on(async {
+            let backend = self.ctx.backend().map_err(|e| e.to_string())?;
+            backend
+                .documents(&crate::http::ListParams {
+                    domain: None,
+                    doc_type: None,
+                    status: None,
+                    tag: tag.map(str::to_string),
+                    prefix: None,
+                    limit: 5000,
+                    offset: 0,
+                    include_archives: false,
+                })
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+    /// Recursive vault watch (FSEvents on macOS, inotify directories on Linux).
+    /// Access notifications and the index directory are ignored.
+    fn ensure_watcher(&self) {
+        let mut slot = self.watcher.lock().unwrap_or_else(|p| p.into_inner());
+        if slot.is_some() {
+            return;
+        }
+        // Events carry the resolved path (macOS reports /private/var for /var), so
+        // strip the canonical root, not the configured spelling.
+        let root = self.ctx.vault.root.canonicalize().unwrap_or_else(|_| self.ctx.vault.root.clone());
+        let changes = self.changes.clone();
+        let watch_root = root.clone();
+        let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            let Ok(event) = res else { return };
+            if matches!(event.kind, notify::EventKind::Access(_)) {
+                return;
+            }
+            let mut changes = changes.lock().unwrap_or_else(|p| p.into_inner());
+            for path in event.paths {
+                let Ok(rel) = path.strip_prefix(&root) else { continue };
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                if rel.starts_with(".lapis") || rel.is_empty() {
+                    continue;
+                }
+                changes.push(rel);
+            }
+        });
+        if let Ok(mut watcher) = watcher
+            && watcher.watch(&watch_root, RecursiveMode::Recursive).is_ok()
+        {
+            *slot = Some(watcher);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -323,9 +495,63 @@ mod tests {
             lattice_url: "http://127.0.0.1:9".into(),
             force_http: true,
         };
-        let service =
-            Service { ctx, runtime: tokio::runtime::Handle::current(), pdf_gate: std::sync::Mutex::new(()) };
+        let service = Service {
+            ctx,
+            runtime: tokio::runtime::Handle::current(),
+            pdf_gate: std::sync::Mutex::new(()),
+            watcher: std::sync::Mutex::new(None),
+            changes: Default::default(),
+        };
         (root, service)
+    }
+
+    #[tokio::test]
+    async fn workflows_round_trip_on_a_temporary_vault() {
+        let (root, mut service) = fixture();
+        service.ctx.force_http = false;
+        let vault = root.clone();
+        std::fs::create_dir_all(vault.join("notes")).unwrap();
+        let result = tokio::task::spawn_blocking(move || {
+            assert!(service.templates().unwrap().iter().any(|t| t.id.starts_with("builtin.")));
+            let fresh = service.create_note("Fresh note", "", None).unwrap();
+            assert!(fresh.starts_with("inbox/") && vault.join(&fresh).is_file(), "{fresh}");
+            let inside = service.create_note("Inside", "notes", None).unwrap();
+            assert!(inside.starts_with("notes/") && vault.join(&inside).is_file(), "{inside}");
+            let daily = service.periodic(Period::Daily).unwrap();
+            assert!(daily.starts_with("Daily/") && vault.join(&daily).is_file(), "{daily}");
+            assert_eq!(service.periodic(Period::Daily).unwrap(), daily, "reopened, not recreated");
+            let captured = service.capture("captured line").unwrap();
+            assert!(std::fs::read_to_string(vault.join(&captured)).unwrap().contains("captured line"));
+            std::fs::write(vault.join("notes/Tasks.md"), "# Tasks\n\n- [ ] first task\n").unwrap();
+            let tasks = service.tasks().unwrap();
+            let task = tasks.iter().find(|t| t.content.contains("first task")).expect("task listed");
+            assert!(!task.checked);
+            assert!(service.toggle_task(&task.id).unwrap());
+            assert!(
+                std::fs::read_to_string(vault.join("notes/Tasks.md")).unwrap().contains("- [x] first task")
+            );
+            assert!(service.tags().is_ok(), "tags are reachable without a built index");
+            let trashed = service.trash("notes/Tasks.md").unwrap();
+            assert!(trashed.starts_with(".lapis/trash/"), "{trashed}");
+            assert!(!vault.join("notes/Tasks.md").exists());
+            assert!(service.trash_list().unwrap().contains(&trashed));
+            assert_eq!(service.restore(&trashed).unwrap(), "notes/Tasks.md");
+            assert!(vault.join("notes/Tasks.md").is_file());
+            // The watch starts on first use and reports a later write, never the index.
+            assert!(service.changed_paths().is_empty());
+            std::fs::write(vault.join(&inside), "# Inside\n\nchanged outside\n").unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            let mut seen = Vec::new();
+            while std::time::Instant::now() < deadline && !seen.iter().any(|p| p == &inside) {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                seen.extend(service.changed_paths());
+            }
+            assert!(seen.iter().any(|p| p == &inside), "watcher reported {seen:?}");
+            assert!(seen.iter().all(|p| !p.starts_with(".lapis")), "{seen:?}");
+        })
+        .await;
+        std::fs::remove_dir_all(root).unwrap();
+        result.unwrap();
     }
 
     #[tokio::test]

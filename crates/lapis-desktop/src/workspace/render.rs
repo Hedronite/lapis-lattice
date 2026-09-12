@@ -80,6 +80,20 @@ impl Render for Workspace {
                     .on_click(cx.listener(|this, _, w, cx| this.open_palette(w, cx))),
             )
             .child(
+                div()
+                    .id("workspace-commands-button")
+                    .role(Role::Button)
+                    .aria_label("Commands")
+                    .px_4()
+                    .pb_3()
+                    .cursor_pointer()
+                    .text_color(theme.secondary)
+                    .child("Commands · ⌘/Ctrl K")
+                    .on_click(
+                        cx.listener(|this, _, w, cx| this.open_menu(super::menu::Kind::Commands, w, cx)),
+                    ),
+            )
+            .child(
                 div().px_4().pb_2().text_sm().text_color(theme.secondary).child(if self.folder.is_empty() {
                     "Files".into()
                 } else {
@@ -366,6 +380,9 @@ impl Render for Workspace {
         }
         if self.palette.is_some() {
             surface = surface.child(self.draw_palette(window, cx));
+        }
+        if self.menu.is_some() {
+            surface = surface.child(self.draw_menu(window, cx));
         }
         if let Some(prompt) = &self.command {
             surface =

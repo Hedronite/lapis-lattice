@@ -7,24 +7,60 @@ use gpui_kit::{ClipboardItem, TestAppContext, VisualTestContext, WindowHandle};
 struct Fixture {
     reject_save: bool,
     indexed: std::sync::atomic::AtomicBool,
+    /// Workflow calls, in order, and the text the next read returns instead of the default.
+    created: std::sync::Mutex<Vec<String>>,
+    trashed: std::sync::Mutex<Vec<String>>,
+    directories: std::sync::atomic::AtomicUsize,
+    changes: std::sync::Mutex<Vec<String>>,
+    disk_text: std::sync::Mutex<Option<String>>,
+}
+impl Fixture {
+    fn new(reject_save: bool) -> Self {
+        Self {
+            reject_save,
+            indexed: false.into(),
+            created: Default::default(),
+            trashed: Default::default(),
+            directories: Default::default(),
+            changes: Default::default(),
+            disk_text: Default::default(),
+        }
+    }
 }
 impl WorkspaceServices for Fixture {
     fn directory(&self, _: &str) -> Result<Vec<FileEntry>, String> {
+        self.directories.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(vec![])
     }
     fn read(&self, path: &str) -> Result<Document, String> {
         if path == "missing.md" {
             return Err("Fixture missing file".into());
         }
+        let text = self.disk_text.lock().unwrap().clone().unwrap_or_else(|| "one two\nsecond\n".into());
         Ok(Document {
             path: path.into(),
             title: "Fixture".into(),
             kind: FileKind::Markdown,
-            text: "one two\nsecond\n".into(),
-            original: "one two\nsecond\n".into(),
+            text: text.clone(),
+            original: text,
             properties: serde_json::json!({"custom":"keep"}),
             readonly: false,
         })
+    }
+    fn create_note(&self, title: &str, folder: &str, template: Option<&str>) -> Result<String, String> {
+        self.created.lock().unwrap().push(format!("{title}|{folder}|{}", template.unwrap_or("-")));
+        let folder = if folder.is_empty() { "inbox" } else { folder };
+        Ok(format!("{folder}/{}.md", title.to_lowercase().replace(' ', "-")))
+    }
+    fn templates(&self) -> Result<Vec<crate::services::TemplateInfo>, String> {
+        Ok(vec![crate::services::TemplateInfo { id: "builtin.meeting".into(), name: "Meeting".into() }])
+    }
+    fn trash(&self, path: &str) -> Result<String, String> {
+        self.trashed.lock().unwrap().push(path.into());
+        Ok(format!(".lapis/trash/{path}"))
+    }
+    fn changed_paths(&self) -> Vec<String> {
+        std::mem::take(&mut *self.changes.lock().unwrap())
     }
     fn save(&self, d: &Document, text: &str) -> Result<Document, String> {
         if self.reject_save {
@@ -69,9 +105,7 @@ fn setup_with(cx: &mut TestAppContext, reject_save: bool) -> WindowHandle<Worksp
         init_workspace(cx);
         gpui_omarchy::Theme::tokyo_night().apply(cx);
     });
-    let handle = cx.add_window(move |w, cx| {
-        Workspace::new(Arc::new(Fixture { reject_save, indexed: false.into() }), w, cx)
-    });
+    let handle = cx.add_window(move |w, cx| Workspace::new(Arc::new(Fixture::new(reject_save)), w, cx));
     handle.update(cx, |this, w, cx| this.open_file("fixture.md".into(), w, cx)).unwrap();
     cx.run_until_parked();
     assert_eq!(handle.read_with(cx, |this, _| this.tabs.len()).unwrap(), 1);
@@ -521,7 +555,7 @@ impl WorkspaceServices for SessionFixture {
     }
     fn read(&self, path: &str) -> Result<Document, String> {
         self.reads.lock().unwrap().push(path.into());
-        Fixture { reject_save: false, indexed: false.into() }.read(path)
+        Fixture::new(false).read(path)
     }
     fn save(&self, _: &Document, _: &str) -> Result<Document, String> {
         Err("unused fixture save".into())
@@ -693,6 +727,137 @@ fn closing_loaded_tab_can_activate_lazy_neighbor_and_dirty_tabs_stay(cx: &mut Te
 mod graph;
 
 mod panes;
+
+#[gpui_kit::test]
+fn commands_menu_creates_a_note_from_a_template_and_opens_it(cx: &mut TestAppContext) {
+    use super::menu::{Action, Kind};
+    let handle = setup(cx);
+    let fixture = handle.read_with(cx, |this, _| this.services.clone()).unwrap();
+    handle.update(cx, |this, w, cx| this.open_menu(Kind::Commands, w, cx)).unwrap();
+    let labels = handle
+        .read_with(cx, |this, cx| {
+            let m = this.menu.as_ref().unwrap();
+            m.visible(cx).iter().map(|&i| m.entries[i].label.clone()).collect::<Vec<_>>()
+        })
+        .unwrap();
+    assert_eq!(labels[0], "New note");
+    assert!(labels.iter().any(|l| l.starts_with("Tags")) && labels.iter().any(|l| l.starts_with("Tasks")));
+    // Filter to the template command, run it, pick the template, give a title.
+    handle
+        .update(cx, |this, w, cx| {
+            let input = this.menu.as_ref().unwrap().input.clone();
+            input.update(cx, |s, cx| s.set_value("then a title", w, cx));
+            assert_eq!(this.menu.as_ref().unwrap().visible(cx).len(), 1);
+            this.menu_key("enter", w, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    handle
+        .update(cx, |this, w, cx| {
+            let m = this.menu.as_ref().unwrap();
+            assert_eq!(m.kind, Kind::Templates);
+            assert_eq!(m.entries[0].label, "Meeting");
+            this.menu_key("enter", w, cx);
+            let m = this.menu.as_ref().unwrap();
+            assert_eq!(m.kind, Kind::NewNoteTitle { template: Some("builtin.meeting".into()) });
+            let input = m.input.clone();
+            input.update(cx, |s, cx| s.set_value("Fresh note", w, cx));
+            this.menu_key("enter", w, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    handle
+        .read_with(cx, |this, _| {
+            assert!(this.menu.is_none());
+            assert_eq!(this.tabs[this.active].document.path, "inbox/fresh-note.md");
+        })
+        .unwrap();
+    let _ = fixture;
+    // A direct action needs no menu: Properties lists the document's front matter.
+    handle.update(cx, |this, w, cx| this.run_action(Action::Properties, w, cx)).unwrap();
+    handle
+        .read_with(cx, |this, _| {
+            let m = this.menu.as_ref().unwrap();
+            assert_eq!(m.kind, Kind::Properties);
+            assert_eq!((m.entries[0].label.as_str(), m.entries[0].detail.as_str()), ("custom", "keep"));
+        })
+        .unwrap();
+}
+
+#[gpui_kit::test]
+fn trash_command_closes_a_clean_tab_and_guards_a_dirty_one(cx: &mut TestAppContext) {
+    use super::menu::Action;
+    let handle = setup(cx);
+    handle.update(cx, |this, w, cx| this.run_action(Action::TrashNote, w, cx)).unwrap();
+    cx.run_until_parked();
+    handle
+        .read_with(cx, |this, _| {
+            assert!(this.tabs.is_empty(), "clean tab closes after trashing");
+            assert!(this.status.starts_with("Moved to .lapis/trash/fixture.md"), "{}", this.status);
+            assert!(!this.error);
+        })
+        .unwrap();
+    handle.update(cx, |this, w, cx| this.open_file("fixture.md".into(), w, cx)).unwrap();
+    cx.run_until_parked();
+    handle
+        .update(cx, |this, w, cx| {
+            this.tabs[0].editor.update(cx, |s, cx| s.replace("dirty ", w, cx));
+            this.run_action(Action::TrashNote, w, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    handle
+        .read_with(cx, |this, cx| {
+            assert_eq!(this.tabs.len(), 1, "dirty tab is retained");
+            assert!(this.tabs[0].editor.read(cx).value().starts_with("dirty "));
+            assert!(this.status.starts_with("Unsaved changes"), "{}", this.status);
+            assert!(this.error);
+        })
+        .unwrap();
+}
+
+#[gpui_kit::test]
+fn external_change_reloads_a_clean_tab_and_retains_a_dirty_buffer(cx: &mut TestAppContext) {
+    use std::time::Duration;
+    let handle = setup(cx);
+    let fixture: Arc<Fixture> = Arc::new(Fixture::new(false));
+    // Swap in a fixture we can drive; the workspace keeps only the trait object.
+    let services: Arc<dyn WorkspaceServices> = fixture.clone();
+    handle
+        .update(cx, |this, w, cx| {
+            this.services = services;
+            this.start(w, cx);
+        })
+        .unwrap();
+    let tick = |cx: &mut TestAppContext| {
+        cx.executor().advance_clock(Duration::from_millis(1100));
+        cx.run_until_parked();
+    };
+    tick(cx);
+    assert_eq!(text(handle, cx), "one two\nsecond\n", "no change, no reload");
+    *fixture.disk_text.lock().unwrap() = Some("changed on disk\nsecond\n".into());
+    fixture.changes.lock().unwrap().push("fixture.md".into());
+    let before = fixture.directories.load(std::sync::atomic::Ordering::SeqCst);
+    tick(cx);
+    assert_eq!(text(handle, cx), "changed on disk\nsecond\n", "clean tab follows the disk");
+    assert!(fixture.directories.load(std::sync::atomic::Ordering::SeqCst) > before, "file list refreshed");
+    handle
+        .read_with(cx, |this, _| assert!(this.status.ends_with("reloaded from disk"), "{}", this.status))
+        .unwrap();
+    handle
+        .update(cx, |this, w, cx| this.tabs[0].editor.update(cx, |s, cx| s.replace("mine ", w, cx)))
+        .unwrap();
+    *fixture.disk_text.lock().unwrap() = Some("theirs\n".into());
+    fixture.changes.lock().unwrap().push("fixture.md".into());
+    tick(cx);
+    assert!(text(handle, cx).starts_with("mine "), "dirty buffer is never replaced");
+    handle
+        .read_with(cx, |this, _| {
+            assert!(this.status.contains("unsaved buffer is retained"), "{}", this.status);
+            assert!(!this.error);
+        })
+        .unwrap();
+}
 
 #[gpui_kit::test]
 fn only_visible_source_views_blink_the_native_caret(cx: &mut TestAppContext) {
