@@ -1,6 +1,7 @@
 //! Host operations injected by the binary; desktop never owns a second writer or ranker.
 
 use serde_json::Value;
+pub type ArcCancel = std::sync::Arc<std::sync::atomic::AtomicBool>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileKind {
@@ -46,4 +47,23 @@ pub trait WorkspaceServices: Send + Sync {
     fn search(&self, query: &str) -> Result<SearchPage, String>;
     fn reindex(&self, path: &str) -> Result<(), String>;
     fn build_index(&self) -> Result<u64, String>;
+    fn pdf_page(&self, _path: &str, _page: u32, _width: u32, _cancel: ArcCancel) -> Result<PdfPage, String> {
+        Err("PDF page rendering is unavailable in this service".into())
+    }
+}
+
+/// Pixel dimensions are bounded independently of the document's page count.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct PdfPageInfo {
+    pub page: u32,
+    pub pages: u32,
+    pub width: u32,
+    pub height: u32,
+    pub text: String,
+}
+#[derive(Debug)]
+pub struct PdfPage {
+    pub info: PdfPageInfo,
+    pub bgra: Vec<u8>,
+    pub revision: String,
 }

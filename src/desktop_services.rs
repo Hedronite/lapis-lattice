@@ -21,12 +21,17 @@ pub fn default_surface(mut cli: crate::cli::Cli, exe: &Path) -> crate::cli::Cli 
 }
 
 pub fn service(ctx: &ops::Ctx) -> Arc<dyn WorkspaceServices> {
-    Arc::new(Service { ctx: ctx.clone(), runtime: tokio::runtime::Handle::current() })
+    Arc::new(Service {
+        ctx: ctx.clone(),
+        runtime: tokio::runtime::Handle::current(),
+        pdf_gate: std::sync::Mutex::new(()),
+    })
 }
 
 struct Service {
     ctx: ops::Ctx,
     runtime: tokio::runtime::Handle,
+    pdf_gate: std::sync::Mutex<()>,
 }
 
 impl Service {
@@ -85,11 +90,19 @@ impl WorkspaceServices for Service {
             notes::Kind::Pdf => FileKind::Pdf,
             notes::Kind::Source => FileKind::Source,
         };
+        if kind == FileKind::Pdf {
+            return Ok(Document {
+                path: rel.into(),
+                kind,
+                title: Path::new(rel).file_stem().unwrap_or_default().to_string_lossy().into_owned(),
+                text: String::new(),
+                original: String::new(),
+                properties: serde_json::json!({"format":"PDF"}),
+                readonly: true,
+            });
+        }
         if std::fs::metadata(&abs).map_err(|e| e.to_string())?.len() > 32 * 1024 * 1024 {
             return Err(format!("{rel}: text exceeds the 32 MiB editor limit; open externally"));
-        }
-        if kind == FileKind::Pdf {
-            return Err(format!("{rel}: PDF page reader is not available yet"));
         }
         let original = std::fs::read_to_string(&abs).map_err(|e| format!("{rel}: {e}"))?;
         let (text, properties, title) = if kind == FileKind::Markdown {
@@ -184,6 +197,21 @@ impl WorkspaceServices for Service {
         self.runtime.block_on(ops::reindex(&self.ctx, path)).map(|_| ()).map_err(|e| e.to_string())
     }
 
+    fn pdf_page(
+        &self,
+        path: &str,
+        page: u32,
+        width: u32,
+        cancel: lapis_desktop::services::ArcCancel,
+    ) -> Result<lapis_desktop::services::PdfPage, String> {
+        let abs = self.contained(path)?;
+        if notes::kind_of(path) != notes::Kind::Pdf {
+            return Err("The selected file is not a PDF".into());
+        }
+        let _permit = self.pdf_gate.lock().map_err(|_| "PDF worker queue failed")?;
+        self.runtime.block_on(crate::pdf_render::request(&abs, page, width, cancel))
+    }
+
     fn build_index(&self) -> Result<u64, String> {
         self.runtime.block_on(async {
             let backend = self.ctx.backend().map_err(|e| e.to_string())?;
@@ -228,7 +256,8 @@ mod tests {
             lattice_url: "http://127.0.0.1:9".into(),
             force_http: true,
         };
-        let service = Service { ctx, runtime: tokio::runtime::Handle::current() };
+        let service =
+            Service { ctx, runtime: tokio::runtime::Handle::current(), pdf_gate: std::sync::Mutex::new(()) };
         (root, service)
     }
 

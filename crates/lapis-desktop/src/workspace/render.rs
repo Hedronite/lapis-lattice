@@ -124,122 +124,126 @@ impl Render for Workspace {
         }
         let mut content = div().flex_1().min_h_0().min_w_0().flex().flex_col().child(tabs);
         if let Some(tab) = self.tabs.get(self.active) {
-            let editor = tab.editor.clone();
-            let source = editor.read(cx).value();
-            let kind = tab.document.kind;
-            let view = tab.view;
-            let mut toolbar = div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .px_5()
-                .py_2()
-                .border_b_1()
-                .border_color(theme.border)
-                .text_sm();
-            for (label, choice) in [
-                ("Live", View::Live),
-                ("Source", View::Source),
-                ("Reading", View::Reading),
-                ("Split", View::Split),
-            ] {
-                if choice == View::Live && kind != FileKind::Markdown {
-                    continue;
+            if let Some(pdf) = &tab.pdf {
+                content = content.child(div().flex_1().min_h_0().min_w_0().child(pdf.clone()));
+            } else {
+                let editor = tab.editor.clone();
+                let source = editor.read(cx).value();
+                let kind = tab.document.kind;
+                let view = tab.view;
+                let mut toolbar = div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_5()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_sm();
+                for (label, choice) in [
+                    ("Live", View::Live),
+                    ("Source", View::Source),
+                    ("Reading", View::Reading),
+                    ("Split", View::Split),
+                ] {
+                    if choice == View::Live && kind != FileKind::Markdown {
+                        continue;
+                    }
+                    toolbar = toolbar.child(
+                        div()
+                            .id(label)
+                            .role(Role::Button)
+                            .aria_label(format!("{label} view"))
+                            .cursor_pointer()
+                            .text_color(if view == choice { theme.accent } else { theme.secondary })
+                            .child(label)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.tabs[this.active].view = choice;
+                                this.focus_active(window, cx);
+                                cx.notify();
+                            })),
+                    );
                 }
-                toolbar = toolbar.child(
-                    div()
-                        .id(label)
-                        .role(Role::Button)
-                        .aria_label(format!("{label} view"))
-                        .cursor_pointer()
-                        .text_color(if view == choice { theme.accent } else { theme.secondary })
-                        .child(label)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.tabs[this.active].view = choice;
-                            this.focus_active(window, cx);
-                            cx.notify();
-                        })),
-                );
+                toolbar = toolbar
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id("save")
+                            .role(Role::Button)
+                            .aria_label("Save document")
+                            .cursor_pointer()
+                            .child(if tab.saving { "Saving…" } else { "Save" })
+                            .on_click(cx.listener(|this, _, w, cx| this.save(w, cx))),
+                    )
+                    .child(
+                        div()
+                            .id("save-copy")
+                            .role(Role::Button)
+                            .aria_label("Save a copy")
+                            .cursor_pointer()
+                            .child("Save copy")
+                            .on_click(cx.listener(|this, _, w, cx| this.save_to(true, w, cx))),
+                    )
+                    .child(
+                        div()
+                            .id("context")
+                            .role(Role::Button)
+                            .aria_label("Toggle properties")
+                            .cursor_pointer()
+                            .child("Properties")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.context = !this.context;
+                                cx.notify();
+                            })),
+                    );
+                content = content.child(toolbar);
+                let mut working = div().flex().flex_1().min_h_0().min_w_0();
+                if view == View::Live {
+                    editor.update(cx, |s, _| s.set_editor_style(theme.input_style()));
+                    working = working.child(div().flex_1().min_w_0().h_full().child(tab.live.clone()));
+                }
+                if matches!(view, View::Source | View::Split) {
+                    editor.update(cx, |s, _| s.set_editor_style(theme.input_style()));
+                    working = working.child(
+                        div().flex_1().min_w_0().h_full().p_5().child(gpui_kit::base::Textarea::new(&editor)),
+                    );
+                }
+                if matches!(view, View::Reading | View::Split) {
+                    let reader = if kind == FileKind::Html {
+                        gpui_omarchy::html("reading", source.clone(), window, cx)
+                    } else {
+                        gpui_omarchy::markdown("reading", source.clone(), window, cx)
+                    };
+                    working = working.child(
+                        div()
+                            .id("reading-scroll")
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .overflow_y_scroll()
+                            .p_6()
+                            .child(reader.text_size(px(16.))),
+                    );
+                }
+                if self.context {
+                    working = working.child(
+                        div()
+                            .id("context-scroll")
+                            .w(px(240.))
+                            .h_full()
+                            .overflow_y_scroll()
+                            .border_l_1()
+                            .border_color(theme.border)
+                            .p_4()
+                            .text_sm()
+                            .child("Properties")
+                            .child(div().mt_3().text_color(theme.secondary).child(
+                                serde_json::to_string_pretty(&tab.document.properties).unwrap_or_default(),
+                            )),
+                    );
+                }
+                content = content.child(working);
             }
-            toolbar = toolbar
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .id("save")
-                        .role(Role::Button)
-                        .aria_label("Save document")
-                        .cursor_pointer()
-                        .child(if tab.saving { "Saving…" } else { "Save" })
-                        .on_click(cx.listener(|this, _, w, cx| this.save(w, cx))),
-                )
-                .child(
-                    div()
-                        .id("save-copy")
-                        .role(Role::Button)
-                        .aria_label("Save a copy")
-                        .cursor_pointer()
-                        .child("Save copy")
-                        .on_click(cx.listener(|this, _, w, cx| this.save_to(true, w, cx))),
-                )
-                .child(
-                    div()
-                        .id("context")
-                        .role(Role::Button)
-                        .aria_label("Toggle properties")
-                        .cursor_pointer()
-                        .child("Properties")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.context = !this.context;
-                            cx.notify();
-                        })),
-                );
-            content = content.child(toolbar);
-            let mut working = div().flex().flex_1().min_h_0().min_w_0();
-            if view == View::Live {
-                editor.update(cx, |s, _| s.set_editor_style(theme.input_style()));
-                working = working.child(div().flex_1().min_w_0().h_full().child(tab.live.clone()));
-            }
-            if matches!(view, View::Source | View::Split) {
-                editor.update(cx, |s, _| s.set_editor_style(theme.input_style()));
-                working = working.child(
-                    div().flex_1().min_w_0().h_full().p_5().child(gpui_kit::base::Textarea::new(&editor)),
-                );
-            }
-            if matches!(view, View::Reading | View::Split) {
-                let reader = if kind == FileKind::Html {
-                    gpui_omarchy::html("reading", source.clone(), window, cx)
-                } else {
-                    gpui_omarchy::markdown("reading", source.clone(), window, cx)
-                };
-                working = working.child(
-                    div()
-                        .id("reading-scroll")
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .overflow_y_scroll()
-                        .p_6()
-                        .child(reader.text_size(px(16.))),
-                );
-            }
-            if self.context {
-                working = working.child(
-                    div()
-                        .id("context-scroll")
-                        .w(px(240.))
-                        .h_full()
-                        .overflow_y_scroll()
-                        .border_l_1()
-                        .border_color(theme.border)
-                        .p_4()
-                        .text_sm()
-                        .child("Properties")
-                        .child(div().mt_3().text_color(theme.secondary).child(
-                            serde_json::to_string_pretty(&tab.document.properties).unwrap_or_default(),
-                        )),
-                );
-            }
-            content = content.child(working);
         } else {
             content = content.child(
                 div()

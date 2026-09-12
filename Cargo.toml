@@ -18,9 +18,10 @@ path = "src/main.rs"
 [features]
 default = []
 # GPUI desktop shell. Off by default: `lapis desktop` then reports it is not built in.
-desktop = ["lapis-desktop/gpui"]
+desktop = ["lapis-desktop/gpui", "dep:pdfium-render"]
 
 [dependencies]
+pdfium-render = { version = "=0.9.4", optional = true, default-features = false, features = ["pdfium_7881"] }
 base64 = "0.22"
 lapis-desktop = { path = "crates/lapis-desktop" }
 lapis-lattice = { path = "crates/lapis-lattice", version = "0.4.1" }

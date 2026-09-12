@@ -29,6 +29,7 @@ struct Tab {
     document: Document,
     editor: Entity<TextareaState>,
     live: Entity<crate::live::LiveEditor>,
+    pdf: Option<Entity<crate::pdf_reader::PdfReader>>,
     _events: Subscription,
     view: View,
     vim: crate::vim::Vim,
@@ -83,11 +84,18 @@ impl Workspace {
         workspace
     }
     fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+        for (i, tab) in self.tabs.iter().enumerate() {
+            if let Some(pdf) = &tab.pdf {
+                pdf.update(cx, |s, cx| s.set_visible(i == self.active, window, cx));
+            }
+        }
         if let Some(prompt) = &self.command {
             prompt.input.update(cx, |s, cx| s.focus(window, cx));
             return;
         }
-        if let Some(tab) = self.tabs.get(self.active).filter(|t| t.view != View::Reading) {
+        if let Some(pdf) = self.tabs.get(self.active).and_then(|t| t.pdf.as_ref()) {
+            pdf.update(cx, |s, cx| s.focus(window, cx));
+        } else if let Some(tab) = self.tabs.get(self.active).filter(|t| t.view != View::Reading) {
             tab.editor.update(cx, |s, cx| s.focus(window, cx));
         } else {
             self.focus.focus(window, cx);
@@ -176,8 +184,20 @@ impl Workspace {
                         });
                         let view = match document.kind {
                             FileKind::Markdown => View::Live,
-                            FileKind::Html => View::Reading,
+                            FileKind::Html | FileKind::Pdf => View::Reading,
                             _ => View::Source,
+                        };
+                        let pdf = if document.kind == FileKind::Pdf {
+                            Some(cx.new(|cx| {
+                                crate::pdf_reader::PdfReader::new(
+                                    document.path.clone(),
+                                    this.services.clone(),
+                                    window,
+                                    cx,
+                                )
+                            }))
+                        } else {
+                            None
                         };
                         let live = cx.new(|cx| crate::live::LiveEditor::new(editor.clone(), cx));
                         editor.update(cx, |s, cx| s.focus(window, cx));
@@ -185,6 +205,7 @@ impl Workspace {
                             document,
                             editor,
                             live,
+                            pdf,
                             _events: events,
                             view,
                             vim: crate::vim::Vim::default(),

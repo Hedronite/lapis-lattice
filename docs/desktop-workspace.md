@@ -4,7 +4,7 @@ The `feat/ux` desktop surface opens a native notes workspace. It is under active
 
 The sidebar opens folders and supported files independently of the search index. Find a note is available in the sidebar and through Ctrl/Cmd+P. Submit a query with Enter; use arrows and Enter to open a result. A fresh embedded index offers an explicit Build index action. HTTP indexing stays managed by the configured service. Backend failures and empty results are separate states.
 
-Markdown currently opens in source mode. Source, Reading and Split reuse the same editor state and undo history. Live preview, persistent/resizable layout and the integrated graph are still being built. YAML is editable text; HTML is a static read-only reference. PDF pages are not available yet.
+Markdown opens in Live view. Source, Reading and Split reuse the same editor state and undo history. Persistent/resizable layout and the integrated graph are still being built. YAML is editable text; HTML is a static read-only reference. PDF page reading requires the packaged native runtime; see [PDF runtime packaging](pdf-runtime.md).
 
 ## Editing
 

@@ -16,6 +16,7 @@ mod mcp;
 mod notes;
 mod ops;
 mod overlay;
+mod pdf_render;
 mod resolve;
 mod safe_file;
 mod tasks;
@@ -87,6 +88,9 @@ fn report_error(e: &LapisError, json: bool) {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    if let Some(Command::PdfRender(args)) = &cli.subcommand {
+        return pdf_render::worker(args).map_err(LapisError::Internal);
+    }
     let cfg = config::load()?;
     let vault_flag = cli.global.vault.clone();
     let lattice_flag = cli.global.lattice.clone();
@@ -109,6 +113,7 @@ async fn run(cli: Cli) -> Result<()> {
 
 async fn dispatch(ctx: Ctx, cmd: Command) -> Result<()> {
     match cmd {
+        Command::PdfRender(_) => unreachable!("PDF worker is handled before configuration"),
         Command::Init(_) => unreachable!("init is handled before vault resolve"),
         Command::Vault { command: VaultCommand::Info } => vault_info(&ctx).await,
         Command::Search(args) => search(&ctx, args).await,

@@ -56,6 +56,9 @@ pub struct Global {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Private, framed page-rendering protocol used by the desktop's cancellable worker.
+    #[command(hide = true, name = "__pdf-render")]
+    PdfRender(PdfRenderArgs),
     /// Vault root, overlay buckets, and lattice health. Exit 2 if lattice is down.
     Vault {
         #[command(subcommand)]
@@ -867,4 +870,13 @@ mod tests {
         assert!(list(&["lapis", "task", "list", "--full"]).full);
         assert!(Cli::try_parse_from(["lapis", "task", "list", "a", "--path", "b"]).is_err());
     }
+}
+
+#[derive(Debug, Args)]
+pub struct PdfRenderArgs {
+    pub path: std::path::PathBuf,
+    #[arg(long, default_value_t = 0)]
+    pub page: u32,
+    #[arg(long, default_value_t = 1200, value_parser = clap::value_parser!(u32).range(320..=2400))]
+    pub width: u32,
 }

@@ -21,6 +21,8 @@ pub mod graph_data;
 pub mod html;
 pub mod live;
 mod motion;
+#[cfg(feature = "gpui")]
+mod pdf_reader;
 pub mod scene;
 pub mod services;
 pub mod sim;
