@@ -369,6 +369,16 @@ impl Backend {
         }
     }
 
+    /// Explicit embedded full-vault rebuild. HTTP retains its own index lifecycle.
+    pub async fn reindex_all(&self) -> Result<lapis_lattice::IndexReport> {
+        match self {
+            Backend::Embedded(engine) => lock(engine).reindex().map_err(LapisError::from),
+            Backend::Http(_) => {
+                Err(LapisError::Usage("Full indexing is managed by the configured HTTP service".into()))
+            }
+        }
+    }
+
     /// Index one path after a write. Embedded does it in-process; HTTP kicks serve.py.
     pub async fn reindex(&self, rel: &str) -> Result<http::Reindex> {
         match self {

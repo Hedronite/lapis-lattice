@@ -162,17 +162,34 @@ impl WorkspaceServices for Service {
     }
 
     fn search(&self, query: &str) -> Result<SearchPage, String> {
-        self.runtime
-            .block_on(ops::search(
+        self.runtime.block_on(async {
+            let backend = self.ctx.backend().map_err(|e| e.to_string())?;
+            let health = backend.health().await.map_err(|e| e.to_string())?;
+            let page = ops::search(
                 &self.ctx,
                 ops::SearchQuery { query: query.into(), limit: 30, ..Default::default() },
-            ))
-            .map(|p| SearchPage { hits: p.result.hits, modalities: p.result.modalities })
-            .map_err(|e| e.to_string())
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(SearchPage {
+                hits: page.result.hits,
+                modalities: page.result.modalities,
+                indexed_documents: health.documents_indexed,
+                can_build_index: backend.mode() == "embedded",
+            })
+        })
     }
 
     fn reindex(&self, path: &str) -> Result<(), String> {
         self.runtime.block_on(ops::reindex(&self.ctx, path)).map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    fn build_index(&self) -> Result<u64, String> {
+        self.runtime.block_on(async {
+            let backend = self.ctx.backend().map_err(|e| e.to_string())?;
+            backend.reindex_all().await.map_err(|e| e.to_string())?;
+            backend.health().await.map(|h| h.documents_indexed).map_err(|e| e.to_string())
+        })
     }
 }
 
@@ -213,6 +230,26 @@ mod tests {
         };
         let service = Service { ctx, runtime: tokio::runtime::Handle::current() };
         (root, service)
+    }
+
+    #[tokio::test]
+    async fn empty_index_is_distinct_and_explicit_build_enables_canonical_search() {
+        let (root, mut service) = fixture();
+        service.ctx.force_http = false;
+        std::fs::write(root.join("Needle.md"), "---\ntitle: Needle\n---\nA unique fixture note.\n").unwrap();
+        let result = tokio::task::spawn_blocking(move || {
+            let before = service.search("Needle").unwrap();
+            assert_eq!(before.indexed_documents, 0);
+            assert!(before.can_build_index);
+            assert!(before.hits.is_empty());
+            assert_eq!(service.build_index().unwrap(), 1);
+            let after = service.search("Needle").unwrap();
+            assert_eq!(after.indexed_documents, 1);
+            assert_eq!(after.hits[0].path, "Needle.md");
+        })
+        .await;
+        std::fs::remove_dir_all(root).unwrap();
+        result.unwrap();
     }
     #[tokio::test]
     async fn yaml_remains_text_and_stale_save_keeps_agent_version() {

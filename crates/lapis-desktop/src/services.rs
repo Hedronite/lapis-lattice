@@ -33,6 +33,8 @@ pub struct Document {
 pub struct SearchPage {
     pub hits: Vec<lapis_lattice::Hit>,
     pub modalities: Vec<String>,
+    pub indexed_documents: u64,
+    pub can_build_index: bool,
 }
 
 /// Blocking operations. Call on a background executor, never during GPUI paint/input.
@@ -43,4 +45,5 @@ pub trait WorkspaceServices: Send + Sync {
     fn save_copy(&self, document: &Document, text: &str) -> Result<Document, String>;
     fn search(&self, query: &str) -> Result<SearchPage, String>;
     fn reindex(&self, path: &str) -> Result<(), String>;
+    fn build_index(&self) -> Result<u64, String>;
 }

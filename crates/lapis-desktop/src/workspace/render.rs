@@ -1,19 +1,27 @@
 use super::*;
 use gpui_kit::{
-    InteractiveElement, IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
-    div, px,
+    InteractiveElement, IntoElement, ParentElement, Render, Role, SharedString, StatefulInteractiveElement,
+    Styled, div, px,
 };
 use gpui_omarchy::ActiveTheme;
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.omarchy().clone();
-        let mut files = div().id("file-list").flex_1().overflow_y_scroll().px_2();
+        let mut files = div()
+            .id("file-list")
+            .role(Role::List)
+            .aria_label("Workspace files")
+            .flex_1()
+            .overflow_y_scroll()
+            .px_2();
         if !self.folder.is_empty() {
             let parent = self.folder.rsplit_once('/').map_or(String::new(), |(p, _)| p.into());
             files = files.child(
                 div()
                     .id("parent-folder")
+                    .role(Role::Button)
+                    .aria_label("Open parent folder")
                     .p_2()
                     .cursor_pointer()
                     .child("‹ Parent folder")
@@ -27,6 +35,9 @@ impl Render for Workspace {
             files = files.child(
                 div()
                     .id(SharedString::from(format!("file-{path}")))
+                    .role(Role::Button)
+                    .accessibility_id(format!("workspace.file.{path}"))
+                    .aria_label(format!("Open {} {}", if directory { "folder" } else { "file" }, entry.name))
                     .px_2()
                     .py_1()
                     .rounded_md()
@@ -56,6 +67,18 @@ impl Render for Workspace {
             .border_color(theme.border)
             .child(div().p_4().text_color(theme.accent).child("L A P I S"))
             .child(
+                div()
+                    .id("workspace-search-button")
+                    .role(Role::Button)
+                    .aria_label("Find in workspace")
+                    .px_4()
+                    .pb_3()
+                    .cursor_pointer()
+                    .text_color(theme.secondary)
+                    .child("Find a note · ⌘/Ctrl P")
+                    .on_click(cx.listener(|this, _, w, cx| this.open_palette(w, cx))),
+            )
+            .child(
                 div().px_4().pb_2().text_sm().text_color(theme.secondary).child(if self.folder.is_empty() {
                     "Files".into()
                 } else {
@@ -65,6 +88,8 @@ impl Render for Workspace {
             .child(files);
         let mut tabs = div()
             .id("workspace-tabs")
+            .role(Role::TabList)
+            .aria_label("Open documents")
             .flex()
             .w_full()
             .overflow_x_scroll()
@@ -80,6 +105,10 @@ impl Render for Workspace {
             tabs = tabs.child(
                 div()
                     .id(("tab", index))
+                    .role(Role::Tab)
+                    .aria_label(title.clone())
+                    .aria_selected(index == self.active)
+                    .accessibility_id(format!("workspace.tab.{}", tab.document.path))
                     .flex_shrink_0()
                     .px_4()
                     .py_3()
@@ -114,6 +143,8 @@ impl Render for Workspace {
                 toolbar = toolbar.child(
                     div()
                         .id(label)
+                        .role(Role::Button)
+                        .aria_label(format!("{label} view"))
                         .cursor_pointer()
                         .text_color(if view == choice { theme.accent } else { theme.secondary })
                         .child(label)
@@ -129,6 +160,8 @@ impl Render for Workspace {
                 .child(
                     div()
                         .id("save")
+                        .role(Role::Button)
+                        .aria_label("Save document")
                         .cursor_pointer()
                         .child(if tab.saving { "Saving…" } else { "Save" })
                         .on_click(cx.listener(|this, _, w, cx| this.save(w, cx))),
@@ -136,16 +169,24 @@ impl Render for Workspace {
                 .child(
                     div()
                         .id("save-copy")
+                        .role(Role::Button)
+                        .aria_label("Save a copy")
                         .cursor_pointer()
                         .child("Save copy")
                         .on_click(cx.listener(|this, _, w, cx| this.save_to(true, w, cx))),
                 )
-                .child(div().id("context").cursor_pointer().child("Properties").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.context = !this.context;
-                        cx.notify();
-                    },
-                )));
+                .child(
+                    div()
+                        .id("context")
+                        .role(Role::Button)
+                        .aria_label("Toggle properties")
+                        .cursor_pointer()
+                        .child("Properties")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.context = !this.context;
+                            cx.notify();
+                        })),
+                );
             content = content.child(toolbar);
             let mut working = div().flex().flex_1().min_h_0().min_w_0();
             if view != View::Reading {
@@ -208,6 +249,8 @@ impl Render for Workspace {
                     .child(
                         div()
                             .id("welcome-search")
+                            .role(Role::Button)
+                            .aria_label("Find in workspace")
                             .cursor_pointer()
                             .text_color(theme.accent)
                             .child("Find a note · Ctrl/Cmd+P")
@@ -240,6 +283,9 @@ impl Render for Workspace {
             .child(div().flex().flex_1().min_h_0().child(sidebar).child(content))
             .child(
                 div()
+                    .id("workspace-status")
+                    .role(Role::Status)
+                    .aria_label(format!("{mode}. {status}"))
                     .flex()
                     .gap_4()
                     .px_4()

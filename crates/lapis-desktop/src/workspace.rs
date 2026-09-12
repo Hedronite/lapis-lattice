@@ -46,6 +46,7 @@ struct Workspace {
     context: bool,
     palette: Option<palette::Palette>,
     query_epoch: u64,
+    indexing: bool,
 }
 
 impl Workspace {
@@ -269,6 +270,7 @@ impl Workspace {
         let modifiers = event.keystroke.modifiers;
         if modifiers.platform || modifiers.control {
             match key {
+                "i" if modifiers.shift && self.palette.is_some() => self.build_index(window, cx),
                 "p" => self.open_palette(window, cx),
                 "s" => self.save_to(modifiers.shift, window, cx),
                 "w" => {
@@ -396,6 +398,7 @@ pub fn open(opts: Options, services: Arc<dyn WorkspaceServices>) -> Result<(), D
                     context: false,
                     palette: None,
                     query_epoch: 0,
+                    indexing: false,
                 };
                 workspace.focus.focus(window, cx);
                 workspace
