@@ -145,6 +145,7 @@ impl App {
             }
             Cmd::TabClose => self.close_tab(false),
             Cmd::Save => self.save(),
+            Cmd::SaveCopy => self.save_copy(),
             Cmd::Help => self.overlay = Some(Overlay::Help(0)),
             Cmd::Quit => self.request_quit(),
             Cmd::Refresh => {

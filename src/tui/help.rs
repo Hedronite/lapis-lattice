@@ -15,6 +15,7 @@ pub fn sections() -> Vec<Section> {
             rows: vec![
                 s("Ctrl+P", "palette: search / commands (`>` prefix)"),
                 s("Ctrl+S", "save current note"),
+                s("Space l S", "save a copy to keep both versions after a conflict"),
                 s("Ctrl+Q / q", "quit (q from the sidebar or preview)"),
                 s("?", "this help"),
                 s("Space", "leader (which-key shows the next keys)"),

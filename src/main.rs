@@ -16,6 +16,7 @@ mod notes;
 mod ops;
 mod overlay;
 mod resolve;
+mod safe_file;
 mod tasks;
 mod taxonomy;
 mod templates;

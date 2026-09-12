@@ -18,7 +18,7 @@ initial = '---\ntitle: Clipboard fixture\ncustom: preserve-me\n---\nanchor\nseco
 payload = 'first line\n    indented line\n\nlast line\n'
 
 class Session:
-    def __init__(self, name, remote=False):
+    def __init__(self, name, remote=False, editor=False):
         self.root = out / name
         self.root.mkdir(exist_ok=True)
         self.vault = self.root / 'vault'
@@ -28,12 +28,18 @@ class Session:
         config = self.root / 'config' / 'lapis'
         config.mkdir(parents=True, exist_ok=True)
         (config / 'config.toml').write_text('[lattice]\nmode = "embedded"\n')
+        self.editor_marker = self.root / 'editor-called'
+        editor_program = self.root / 'fixture-editor.py'
+        if editor:
+            editor_program.write_text('#!/usr/bin/env python3\nfrom pathlib import Path\nimport sys\np=Path(sys.argv[1])\np.write_text(p.read_text()+"external editor\\n")\nPath('+repr(str(self.editor_marker))+').write_text("called")\n')
+            editor_program.chmod(0o755)
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.environ['XDG_CONFIG_HOME'] = str(config.parent)
             os.environ['TERM'] = 'xterm-256color'
             os.environ.pop('LAPIS_VAULT', None)
             if remote: os.environ['SSH_CONNECTION'] = 'fixture'
+            if editor: os.environ['EDITOR'] = str(editor_program)
             os.execv(args.bin, [args.bin, '--vault', str(self.vault), 'tui'])
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack('HHHH', 32, 120, 0, 0))
         os.set_blocking(self.fd, False)
@@ -180,6 +186,39 @@ if args.large:
                     'redo_matches':body_of(redone)==expected})
     s.close()
 
+# Destructive navigation must not discard an unsaved tab.
+s = Session('dirty-trash-close')
+s.send(b'iunsaved')
+s.send(b'\x1b')
+s.send(b' x')
+trash_guard = s.note.exists() and b'before trashing' in s.raw
+s.send(b':q\r')
+saved = s.saved()
+results.append({'case':'dirty-trash-close', 'dirty_trash_guard':trash_guard,
+                'dirty_close_guard':saved.split('---\n',2)[-1]=='unsavedanchor\nsecond line\n'})
+s.close()
+
+# The external editor is an isolated fixture program. Verify the dirty guard,
+# successful return/reload, and restored terminal protocols.
+s = Session('external-editor', editor=True)
+s.send(b'iunsaved')
+s.send(b'\x1b')
+s.send(b' le')
+blocked_dirty = not s.editor_marker.exists()
+s.saved()
+s.send(b' le', 0.6)
+after_external = s.note.read_text()
+s.send(b'iX')
+s.send(b'\x1b')
+after_local = s.saved()
+results.append({'case':'external-editor', 'dirty_guard':blocked_dirty,
+                'editor_ran':s.editor_marker.exists(),
+                'reload_preserved_external_edit':'external editor\n' in after_local,
+                'local_edit_retained':'X' in after_local and after_local.replace('X','',1)==after_external,
+                'bracketed_restored':s.raw.count(b'\x1b[?2004h')>=2,
+                'mouse_restored':s.raw.count(b'\x1b[?1000h')>=2})
+s.close()
+
 # Quit and save must retain dirty content when an agent changes the same file.
 s = Session('dirty-conflict')
 s.send(b'iunsaved')
@@ -192,9 +231,14 @@ if stayed:
     s.drain(0.2)
     s.saved()
     conflict_retained = s.note.read_text() == external
+    s.send(b' lS', 0.4)
+    copies = list(s.vault.glob('* (Lapis copy *).md'))
+    copy_retained = bool(copies) and 'unsavedanchor' in copies[0].read_text() and 'custom: preserve-me' in copies[0].read_text()
+    conflict_retained = conflict_retained and s.note.read_text() == external
 else:
     conflict_retained = False
-results.append({'case':'dirty-conflict', 'dirty_quit_guard':stayed, 'external_save_guard':conflict_retained})
+    copy_retained = False
+results.append({'case':'dirty-conflict', 'dirty_quit_guard':stayed, 'external_save_guard':conflict_retained, 'conflict_copy_preserved':copy_retained})
 if stayed: s.close()
 
 report = {'binary':str(Path(args.bin).resolve()), 'binary_sha256':hashlib.sha256(Path(args.bin).read_bytes()).hexdigest(),

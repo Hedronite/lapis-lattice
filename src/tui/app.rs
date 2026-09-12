@@ -509,48 +509,6 @@ impl App {
         }
     }
 
-    /// Frontmatter + marker are kept verbatim; only the body is written.
-    pub(crate) fn save(&mut self) {
-        let Some(t) = self.tab() else { return };
-        if t.readonly {
-            self.set_status("read-only (PDF/HTML text)");
-            return;
-        }
-        let rel = t.rel.clone();
-        let abs = self.root().join(&rel);
-        let current = match std::fs::read_to_string(&abs) {
-            Ok(current) => current,
-            Err(e) => {
-                self.set_status(format!("save failed reading {rel}: {e}; buffer retained"));
-                return;
-            }
-        };
-        if t.saved_source.as_ref().is_some_and(|saved| saved != &current) {
-            self.set_status(format!("{rel} changed on disk; save cancelled, buffer retained for comparison"));
-            return;
-        }
-        let (head, _) = hal::raw_parts(&current);
-        let mut body = t.body();
-        if !body.ends_with('\n') {
-            body.push('\n');
-        }
-        let next = write::set_frontmatter_key(&format!("{head}{body}"), "updated", &write::today());
-        match std::fs::write(&abs, &next) {
-            Ok(()) => {
-                let p = hal::parse(&next);
-                if let Some(t) = self.tab_mut() {
-                    t.dirty = false;
-                    t.hal = p.hal;
-                    t.hal_valid = p.hal_valid;
-                    t.saved_source = Some(next.clone());
-                }
-                self.set_status(format!("saved {rel}"));
-                self.kick(rel);
-            }
-            Err(e) => self.set_status(format!("save failed: {e}")),
-        }
-    }
-
     pub(crate) fn toggle_checkbox_at_cursor(&mut self) {
         let Some(t) = self.tab_mut() else { return };
         if t.readonly {
@@ -716,6 +674,10 @@ impl App {
                 None => return,
             },
         };
+        if self.tabs.iter().any(|t| t.rel == rel && t.dirty) {
+            self.set_status("unsaved changes: save or explicitly discard the buffer before trashing");
+            return;
+        }
         let root = self.root();
         match write::trash(&root, &rel, &self.trash_bucket) {
             Ok(t) => {

@@ -22,6 +22,7 @@ mod paste;
 mod pointer;
 mod preview;
 mod reader;
+mod save;
 mod tags_view;
 mod tasks_view;
 mod theme;

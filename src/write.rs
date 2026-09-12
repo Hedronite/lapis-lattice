@@ -243,9 +243,7 @@ fn write_atomic(abs: &Path, text: &str) -> Result<u64> {
     if let Some(parent) = abs.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = abs.with_extension("md.lapis-tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, abs)?;
+    crate::safe_file::replace(abs, text.as_bytes(), None)?;
     Ok(text.len() as u64)
 }
 
