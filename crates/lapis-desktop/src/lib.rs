@@ -19,10 +19,12 @@
 pub mod gitnexus;
 pub mod graph_data;
 pub mod html;
+mod motion;
 pub mod scene;
 pub mod services;
 pub mod sim;
 pub mod view;
+pub mod vim;
 
 #[cfg(feature = "gpui")]
 mod window;

@@ -24,6 +24,10 @@ pub(super) struct Palette {
 
 impl Workspace {
     pub(super) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.command = None;
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.vim.prompt = None;
+        }
         self.query_epoch += 1;
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find notes, paths, and ideas…"));
         let events = cx.subscribe(&input, |this, _, event, cx| {

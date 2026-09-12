@@ -258,17 +258,20 @@ impl Render for Workspace {
                     ),
             );
         }
-        let mode = self.tabs.get(self.active).map_or("READY", |t| {
-            if t.document.readonly {
-                "READ ONLY"
-            } else if t.insert {
-                "INSERT"
-            } else {
-                "NORMAL"
-            }
-        });
-        let status =
-            self.opening.as_ref().map(|p| format!("Opening {p}…")).unwrap_or_else(|| self.status.clone());
+        let mode = self.tabs.get(self.active).map_or_else(
+            || "READY".to_string(),
+            |t| {
+                if t.document.readonly { "READ ONLY".into() } else { t.vim.label() }
+            },
+        );
+        let status = self
+            .tabs
+            .get(self.active)
+            .filter(|t| t.vim.prompt.is_some())
+            .map(|t| t.vim.label())
+            .unwrap_or_else(|| {
+                self.opening.as_ref().map(|p| format!("Opening {p}…")).unwrap_or_else(|| self.status.clone())
+            });
         let mut surface = div()
             .relative()
             .size_full()
@@ -280,6 +283,7 @@ impl Render for Workspace {
             .text_size(px(14.))
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(|this, e, w, cx| this.key(e, w, cx)))
+            .capture_action(cx.listener(|this, _: &gpui_kit::base::input::Paste, w, cx| this.paste(w, cx)))
             .child(div().flex().flex_1().min_h_0().child(sidebar).child(content))
             .child(
                 div()
@@ -302,6 +306,10 @@ impl Render for Workspace {
             );
         if self.palette.is_some() {
             surface = surface.child(self.draw_palette(window, cx));
+        }
+        if let Some(prompt) = &self.command {
+            surface =
+                surface.child(command::render(prompt, self.error.then(|| self.status.clone()), window, cx));
         }
         surface
     }

@@ -1,7 +1,10 @@
 //! Native notes shell. Files load independently from the optional graph/index.
 
+mod command;
 mod palette;
 mod render;
+#[cfg(all(test, feature = "gui-tests"))]
+mod tests;
 
 use crate::{
     DesktopError, Options,
@@ -26,7 +29,8 @@ struct Tab {
     editor: Entity<TextareaState>,
     _events: Subscription,
     view: View,
-    insert: bool,
+    vim: crate::vim::Vim,
+    close_after_save: bool,
     saving: bool,
 }
 
@@ -47,10 +51,40 @@ struct Workspace {
     palette: Option<palette::Palette>,
     query_epoch: u64,
     indexing: bool,
+    register: crate::vim::Register,
+    command: Option<command::Prompt>,
 }
 
 impl Workspace {
+    fn new(services: Arc<dyn WorkspaceServices>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let workspace = Workspace {
+            services,
+            files: vec![],
+            folder: String::new(),
+            files_loading: false,
+            file_epoch: 0,
+            open_epoch: 0,
+            opening: None,
+            tabs: vec![],
+            active: 0,
+            status: String::new(),
+            error: false,
+            focus: cx.focus_handle(),
+            context: false,
+            palette: None,
+            query_epoch: 0,
+            indexing: false,
+            register: crate::vim::Register::default(),
+            command: None,
+        };
+        workspace.focus.focus(window, cx);
+        workspace
+    }
     fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(prompt) = &self.command {
+            prompt.input.update(cx, |s, cx| s.focus(window, cx));
+            return;
+        }
         if let Some(tab) = self.tabs.get(self.active).filter(|t| t.view != View::Reading) {
             tab.editor.update(cx, |s, cx| s.focus(window, cx));
         } else {
@@ -145,7 +179,8 @@ impl Workspace {
                             editor,
                             _events: events,
                             view,
-                            insert: false,
+                            vim: crate::vim::Vim::default(),
+                            close_after_save: false,
                             saving: false,
                         });
                         this.active = this.tabs.len() - 1;
@@ -191,20 +226,36 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                let Some(tab) = this.tabs.iter_mut().find(|t| t.editor == editor) else {
+                let Some(index) = this.tabs.iter().position(|t| t.editor == editor) else {
                     return;
                 };
+                let tab = &mut this.tabs[index];
                 tab.saving = false;
+                let close_requested = std::mem::take(&mut tab.close_after_save);
                 match result {
                     Ok(document) => {
                         this.status = format!("Saved {}", document.path);
                         this.error = false;
                         let path = document.path.clone();
+                        let close =
+                            close_requested && !copy && tab.editor.read(cx).value().as_ref() == document.text;
                         if copy {
                             this.open_file(path.clone(), window, cx);
                             this.directory(this.folder.clone(), window, cx);
                         } else {
                             tab.document = document;
+                        }
+                        if close {
+                            let was_active = this.active == index;
+                            this.tabs.remove(index);
+                            this.active = if index < this.active {
+                                this.active - 1
+                            } else {
+                                this.active.min(this.tabs.len().saturating_sub(1))
+                            };
+                            if was_active {
+                                this.focus_active(window, cx);
+                            }
                         }
                         this.reindex(path, window, cx);
                     }
@@ -249,6 +300,10 @@ impl Workspace {
     }
 
     fn close_tab(&mut self, discard: bool, cx: &mut Context<Self>) {
+        self.command = None;
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.vim.prompt = None;
+        }
         let Some(tab) = self.tabs.get(self.active) else {
             return;
         };
@@ -268,7 +323,13 @@ impl Workspace {
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
         let modifiers = event.keystroke.modifiers;
-        if modifiers.platform || modifiers.control {
+        if (modifiers.platform || modifiers.control)
+            && !(modifiers.control
+                && !modifiers.platform
+                && key == "r"
+                && self.palette.is_none()
+                && self.tabs.get(self.active).is_some_and(|t| t.vim.mode != crate::vim::Mode::Insert))
+        {
             match key {
                 "i" if modifiers.shift && self.palette.is_some() => self.build_index(window, cx),
                 "p" => self.open_palette(window, cx),
@@ -309,53 +370,97 @@ impl Workspace {
             cx.notify();
             return;
         }
+        if self.command.is_some() {
+            match key {
+                "escape" => {
+                    self.command = None;
+                    if let Some(tab) = self.tabs.get_mut(self.active) {
+                        tab.vim.reset();
+                    }
+                    self.focus_active(window, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                "enter" => {
+                    let prompt = self.command.take().unwrap();
+                    if let Some(tab) = self.tabs.get_mut(self.active) {
+                        tab.vim.prompt = Some((prompt.kind, prompt.input.read(cx).value().to_string()));
+                    }
+                    self.focus_active(window, cx);
+                }
+                _ => return,
+            }
+        }
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
         if !tab.editor.read(cx).focus_handle(cx).is_focused(window) {
             return;
         }
-        if key == "escape" {
-            tab.insert = false;
-            cx.stop_propagation();
-            cx.notify();
+        if modifiers.shift && matches!(key, "left" | "right" | "up" | "down" | "home" | "end") {
+            tab.vim.reset();
             return;
         }
-        if tab.insert || tab.document.readonly {
-            return;
+        use crate::vim::{Effect, Mode};
+        let key = event.keystroke.key_char.as_deref().filter(|_| modifiers.shift).unwrap_or(key);
+        let state = tab.editor.read(cx);
+        let source = state.value();
+        let cursor = state.cursor();
+        let selection = state.selected_range();
+        let old_register = self.register.generation;
+        let effect = tab.vim.key(key, modifiers.control, &source, cursor, selection, &mut self.register);
+        if self.register.generation != old_register {
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(self.register.text.clone()));
         }
-        match key {
-            "i" => tab.insert = true,
-            "a" => {
-                tab.insert = true;
-                tab.editor.update(cx, |s, cx| {
-                    let p = s.cursor();
-                    let v = s.value();
-                    let end = v[p..].chars().next().map_or(p, |c| p + c.len_utf8());
-                    s.set_selected_range(end..end, cx);
-                });
-            }
-            "h" | "l" => tab.editor.update(cx, |s, cx| {
-                let p = s.cursor();
-                let value = s.value();
-                let next = if key == "h" {
-                    value[..p].char_indices().last().map_or(0, |(i, _)| i)
+        match effect {
+            Effect::Pass => return,
+            Effect::None => {}
+            Effect::Select(range) => tab.editor.update(cx, |s, cx| s.set_selected_range(range, cx)),
+            Effect::Edit { range, text, cursor } => {
+                if tab.document.readonly {
+                    tab.vim.reset();
+                    self.status = "Read-only reference".into();
+                    self.error = true;
                 } else {
-                    value[p..].chars().next().map_or(p, |c| p + c.len_utf8())
-                };
-                s.set_selected_range(next..next, cx);
-            }),
-            "j" | "k" => tab.editor.update(cx, |s, cx| {
-                let p = s.cursor_position();
-                let row = if key == "j" { p.line + 1 } else { p.line.saturating_sub(1) };
-                s.set_cursor_position(
-                    gpui_kit::base::input::Position { line: row, character: p.character },
-                    window,
-                    cx,
-                );
-            }),
-            _ if key.chars().count() != 1 => return,
-            _ => {}
+                    tab.editor.update(cx, |s, cx| {
+                        s.set_selected_range(range, cx);
+                        s.replace(text, window, cx);
+                        s.set_selected_range(cursor..cursor, cx);
+                    });
+                }
+            }
+            Effect::Undo => window.dispatch_action(Box::new(gpui_kit::base::input::Undo), cx),
+            Effect::Redo => window.dispatch_action(Box::new(gpui_kit::base::input::Redo), cx),
+            Effect::Save => self.save(window, cx),
+            Effect::Close(discard) => {
+                self.close_tab(discard, cx);
+                self.focus_active(window, cx);
+            }
+            Effect::SaveClose => {
+                if tab.document.readonly || tab.saving {
+                    self.status = "Cannot save and close while read-only or saving".into();
+                    self.error = true;
+                } else {
+                    tab.close_after_save = true;
+                    self.save(window, cx);
+                }
+            }
+            Effect::Status(message) => {
+                self.status = message;
+                self.error = false;
+            }
+        }
+        if let Some(tab) = self.tabs.get_mut(self.active)
+            && tab.document.readonly
+            && tab.vim.mode == Mode::Insert
+        {
+            tab.vim.reset();
+        }
+        if self.command.is_none()
+            && let Some((kind, _)) = self.tabs.get(self.active).and_then(|t| t.vim.prompt.as_ref())
+        {
+            self.open_command(*kind, window, cx);
         }
         cx.stop_propagation();
         cx.notify();
@@ -381,28 +486,7 @@ pub fn open(opts: Options, services: Arc<dyn WorkspaceServices>) -> Result<(), D
         };
         let seed = opts.seed;
         let opened = cx.open_window(options, move |window, cx| {
-            let entity = cx.new(|cx| {
-                let workspace = Workspace {
-                    services,
-                    files: vec![],
-                    folder: String::new(),
-                    files_loading: false,
-                    file_epoch: 0,
-                    open_epoch: 0,
-                    opening: None,
-                    tabs: vec![],
-                    active: 0,
-                    status: String::new(),
-                    error: false,
-                    focus: cx.focus_handle(),
-                    context: false,
-                    palette: None,
-                    query_epoch: 0,
-                    indexing: false,
-                };
-                workspace.focus.focus(window, cx);
-                workspace
-            });
+            let entity = cx.new(|cx| Workspace::new(services, window, cx));
             let weak = entity.downgrade();
             window.on_window_should_close(cx, move |_, cx| {
                 weak.update(cx, |this, cx| this.may_close(cx)).unwrap_or(true)
