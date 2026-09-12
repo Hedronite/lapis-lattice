@@ -39,6 +39,22 @@ impl Service {
         write::editor_content(&document.path, &document.original, text)
     }
 
+    fn saved(document: &Document, path: String, text: &str, original: String) -> Document {
+        let mut saved = document.clone();
+        saved.path = path;
+        if saved.kind == FileKind::Markdown {
+            let parsed = hal::parse(&original);
+            if let Some(title) = hal::title_from_hal(&parsed.hal) {
+                saved.title = title;
+            }
+            saved.properties = serde_json::Value::Object(parsed.hal);
+        }
+        saved.original = original;
+        // Preserve the editor's exact text/undo history; the newline policy is on disk.
+        saved.text = text.into();
+        saved
+    }
+
     fn contained(&self, rel: &str) -> Result<PathBuf, String> {
         let root = self.ctx.vault.root.canonicalize().map_err(|e| e.to_string())?;
         let path = if rel.is_empty() {
@@ -131,11 +147,7 @@ impl WorkspaceServices for Service {
         let next = Self::content(document, text);
         safe_file::replace(&abs, next.as_bytes(), Some(document.original.as_bytes()))
             .map_err(|e| format!("{}: {e}; buffer retained", document.path))?;
-        let mut saved = document.clone();
-        saved.original = next;
-        // Keep the editor's exact text/undo history; the explicit Markdown newline policy is on disk.
-        saved.text = text.into();
-        Ok(saved)
+        Ok(Self::saved(document, document.path.clone(), text, next))
     }
 
     fn save_copy(&self, document: &Document, text: &str) -> Result<Document, String> {
@@ -156,11 +168,7 @@ impl WorkspaceServices for Service {
                 .into_owned();
             match safe_file::create(&self.ctx.vault.root.join(&path), next.as_bytes()) {
                 Ok(()) => {
-                    let mut saved = document.clone();
-                    saved.path = path;
-                    saved.text = text.into();
-                    saved.original = next;
-                    return Ok(saved);
+                    return Ok(Self::saved(document, path, text, next));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(format!("Save copy failed: {e}; buffer retained")),
@@ -357,10 +365,16 @@ mod tests {
         std::fs::write(root.join("Note.md"), original).unwrap();
         let document = service.read("Note.md").unwrap();
         assert_eq!(document.text, "\n# Body\n");
-        service.save(&document, "\n# Changed\n漢字").unwrap();
+        let returned = service.save(&document, "\n# Changed\n漢字").unwrap();
         let saved = std::fs::read_to_string(root.join("Note.md")).unwrap();
         assert!(saved.contains("custom: {keep: true}\n"));
         assert!(saved.ends_with("\n# Changed\n漢字\n"));
+        assert_eq!(returned.text, "\n# Changed\n漢字");
+        assert_eq!(returned.properties, service.read("Note.md").unwrap().properties);
+        assert!(returned.properties.get("updated").is_some());
+        let copied = service.save_copy(&returned, "copy body").unwrap();
+        assert_eq!(copied.text, "copy body");
+        assert_eq!(copied.properties, service.read(&copied.path).unwrap().properties);
         assert!(service.read("../outside.md").is_err());
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -350,13 +350,17 @@ impl Workspace {
         let rel = path.clone();
         let task = cx.background_executor().spawn(async move { service.reindex(&rel) });
         cx.spawn_in(window, async move |this, cx| {
-            if let Err(error) = task.await {
-                let _ = this.update_in(cx, |this, _, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Err(error) = result {
                     this.status = format!("Saved {path}; indexing failed: {error}. Search may be stale.");
                     this.error = true;
-                    cx.notify();
-                });
-            }
+                } else {
+                    // A saved note can change backlinks of the currently visible note too.
+                    this.refresh_context(true, window, cx);
+                }
+                cx.notify();
+            });
         })
         .detach();
     }

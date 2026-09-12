@@ -6,6 +6,7 @@ use gpui_kit::{ClipboardItem, TestAppContext, VisualTestContext, WindowHandle};
 
 struct Fixture {
     reject_save: bool,
+    indexed: std::sync::atomic::AtomicBool,
 }
 impl WorkspaceServices for Fixture {
     fn directory(&self, _: &str) -> Result<Vec<FileEntry>, String> {
@@ -43,11 +44,16 @@ impl WorkspaceServices for Fixture {
     fn links(&self, path: &str) -> Result<Vec<crate::services::ContextLink>, String> {
         Ok(vec![crate::services::ContextLink {
             path: Some("related.md".into()),
-            label: format!("Related to {path}"),
+            label: if self.indexed.load(std::sync::atomic::Ordering::SeqCst) {
+                format!("Updated links to {path}")
+            } else {
+                format!("Related to {path}")
+            },
             direction: "out".into(),
         }])
     }
     fn reindex(&self, _: &str) -> Result<(), String> {
+        self.indexed.store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
     fn build_index(&self) -> Result<u64, String> {
@@ -63,7 +69,9 @@ fn setup_with(cx: &mut TestAppContext, reject_save: bool) -> WindowHandle<Worksp
         init_workspace(cx);
         gpui_omarchy::Theme::tokyo_night().apply(cx);
     });
-    let handle = cx.add_window(move |w, cx| Workspace::new(Arc::new(Fixture { reject_save }), w, cx));
+    let handle = cx.add_window(move |w, cx| {
+        Workspace::new(Arc::new(Fixture { reject_save, indexed: false.into() }), w, cx)
+    });
     handle.update(cx, |this, w, cx| this.open_file("fixture.md".into(), w, cx)).unwrap();
     cx.run_until_parked();
     assert_eq!(handle.read_with(cx, |this, _| this.tabs.len()).unwrap(), 1);
@@ -426,6 +434,38 @@ fn context_follows_active_file_and_keeps_tree_capability_error_visible(cx: &mut 
             assert!(this.context_state.tree.is_none());
         })
         .unwrap();
+}
+
+#[gpui_kit::test]
+fn save_refreshes_indexed_context_without_reopening_editor(cx: &mut TestAppContext) {
+    for reject_save in [false, true] {
+        let handle = setup_with(cx, reject_save);
+        handle
+            .update(cx, |this, w, cx| {
+                this.context = true;
+                this.refresh_context(false, w, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        visual.update(|w, cx| {
+            w.press("i", cx);
+            w.input("edited ", cx);
+            w.press("escape", cx);
+        });
+        handle.update(cx, |this, w, cx| this.save(w, cx)).unwrap();
+        cx.run_until_parked();
+        handle
+            .read_with(cx, |this, cx| {
+                let label = &this.context_state.links.as_ref().unwrap().as_ref().unwrap()[0].label;
+                assert_eq!(label.starts_with("Updated links"), !reject_save);
+                assert_eq!(Workspace::dirty(&this.tabs[0], cx), reject_save);
+                assert!(this.tabs[0].editor.read(cx).value().starts_with("edited "));
+            })
+            .unwrap();
+        visual.update(|w, cx| w.press("u", cx));
+        assert_eq!(text(handle, cx), "one two\nsecond\n");
+    }
 }
 
 #[gpui_kit::test]
