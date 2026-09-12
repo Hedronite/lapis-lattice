@@ -10,8 +10,8 @@ Do not wait for Codex. Do not restart the goal. Do not merge `feat/ux` to
 | Goal | GOAL-ux |
 | Repo | [VirtualMachinist/lapis-lattice](https://github.com/VirtualMachinist/lapis-lattice) |
 | Branch | `feat/ux` |
-| Tip | `3e94191` — `perf(tui): redraw only when workspace state changes` |
-| Ahead of `main` | **24 commits** (`39bfa65`… search merge) |
+| Tip | UX code `3e94191` (`perf(tui): redraw only when workspace state changes`); this file sits on top |
+| Ahead of `main` | **24 UX commits** plus this handoff (`39bfa65`… search merge) |
 | PR | [#18](https://github.com/VirtualMachinist/lapis-lattice/pull/18) — same branch; **do not merge** until Evan GO |
 | Formal checklist | **0 / 32 IDs closed** |
 | Ownership | Halo: **Grok PM** · **Claude Code fullstack** · **Composer** |
