@@ -49,6 +49,10 @@ pub enum Cmd {
     NotesView,
     /// Build (or rebuild) the embedded search index in the background.
     BuildIndex,
+    /// Reopen the previously visited note.
+    Back,
+    /// Reopen the next visited note after going back.
+    Forward,
 }
 
 impl Cmd {
@@ -98,6 +102,8 @@ impl Cmd {
             Cmd::Refresh => "refresh tasks / tree",
             Cmd::NotesView => "notes view",
             Cmd::BuildIndex => "build search index (background)",
+            Cmd::Back => "back (previous note)",
+            Cmd::Forward => "forward (next note)",
         }
     }
 }
@@ -198,7 +204,17 @@ pub fn table() -> Vec<Node> {
         Leaf('y', Cmd::Hal),
         Leaf('#', Cmd::Tags),
         Leaf('o', Cmd::Buffers),
-        Group('b', "tabs", vec![Leaf('n', Cmd::TabNext), Leaf('p', Cmd::TabPrev), Leaf('x', Cmd::TabClose)]),
+        Group(
+            'b',
+            "tabs",
+            vec![
+                Leaf('n', Cmd::TabNext),
+                Leaf('p', Cmd::TabPrev),
+                Leaf('x', Cmd::TabClose),
+                Leaf('h', Cmd::Back),
+                Leaf('l', Cmd::Forward),
+            ],
+        ),
         Leaf('r', Cmd::Refresh),
         Leaf('h', Cmd::Help),
         Leaf('?', Cmd::Help),
@@ -275,6 +291,8 @@ mod tests {
         assert_eq!(step(&['t', '#']), Step::Unknown);
         assert_eq!(step(&['i']), Step::Run(Cmd::BuildIndex));
         assert_eq!(step(&['s', 'i']), Step::Run(Cmd::BuildIndex));
+        assert_eq!(step(&['b', 'h']), Step::Run(Cmd::Back));
+        assert_eq!(step(&['b', 'l']), Step::Run(Cmd::Forward));
     }
 
     #[test]
