@@ -405,8 +405,12 @@ impl App {
                 f.render_widget(Clear, popup);
                 let [input, list] =
                     Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(popup);
+                let error_title =
+                    p.error.as_ref().map(|e| format!(" lattice search · failed: {e} · Enter retries "));
                 let title = if p.is_commands() {
                     " commands "
+                } else if let Some(t) = error_title.as_deref() {
+                    t
                 } else if p.pending {
                     " lattice search… "
                 } else if !p.asked.is_empty()
@@ -455,15 +459,35 @@ impl App {
                         ])),
                     })
                     .collect();
-                let mut st = ListState::default().with_selected(Some(p.sel));
-                f.render_stateful_widget(
-                    List::new(items)
+                if let Some(e) = &p.error {
+                    // An answered-with-error query is not a zero-result query: say so where
+                    // the results would be, with the recovery action.
+                    f.render_widget(
+                        Paragraph::new(vec![
+                            Line::from(Span::styled(
+                                format!("search failed: {e}"),
+                                Style::default().fg(theme::warn()),
+                            )),
+                            Line::from(Span::styled(
+                                "Enter retries · edit the query · Esc closes",
+                                theme::dim(),
+                            )),
+                        ])
                         .style(theme::overlay())
-                        .block(Block::default().borders(Borders::ALL).border_style(theme::chrome()))
-                        .highlight_style(theme::selected()),
-                    list,
-                    &mut st,
-                );
+                        .block(Block::default().borders(Borders::ALL).border_style(theme::chrome())),
+                        list,
+                    );
+                } else {
+                    let mut st = ListState::default().with_selected(Some(p.sel));
+                    f.render_stateful_widget(
+                        List::new(items)
+                            .style(theme::overlay())
+                            .block(Block::default().borders(Borders::ALL).border_style(theme::chrome()))
+                            .highlight_style(theme::selected()),
+                        list,
+                        &mut st,
+                    );
+                }
             }
             Overlay::Help(scroll) => {
                 let popup = centered(area, 90, 90);

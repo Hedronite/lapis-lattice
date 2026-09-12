@@ -17,6 +17,8 @@ pub struct Palette {
     pub pending: bool,
     /// Last query the lattice was asked; avoids duplicate requests.
     pub asked: String,
+    /// The lattice answered the last query with an error; distinct from no matches.
+    pub error: Option<String>,
 }
 
 impl Palette {
@@ -28,6 +30,7 @@ impl Palette {
             seq: 0,
             pending: false,
             asked: String::new(),
+            error: None,
         };
         p.refresh_commands();
         p
@@ -60,6 +63,7 @@ impl Palette {
     }
 
     pub fn set_hits(&mut self, hits: Vec<Hit>) {
+        self.error = None;
         self.items = hits
             .into_iter()
             .map(|h| Item::Note { path: h.path, title: h.title, snippet: h.heading.or(h.snippet) })

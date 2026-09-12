@@ -145,6 +145,9 @@ pub(crate) struct App {
     pub(crate) status_at: Instant,
     pub(crate) lattice_ok: Option<bool>,
     pub(crate) index: IndexState,
+    pub(crate) visits: super::nav::Visits,
+    /// Set by back/forward before an open, consumed when that open succeeds.
+    pub(crate) travel: Option<usize>,
     /// Paths saved during a full build, re-indexed once it lands.
     pub(crate) index_pending: std::cell::RefCell<Vec<String>>,
     pub(crate) tx: Sender<Msg>,
@@ -198,6 +201,8 @@ impl App {
             status_at: Instant::now(),
             lattice_ok: None,
             index: IndexState::Unknown,
+            visits: Default::default(),
+            travel: None,
             index_pending: Default::default(),
             tx,
             rx,
@@ -484,7 +489,24 @@ impl App {
         }
     }
 
+    /// Open the previous or next visited note. Nothing happens at either end.
+    pub(crate) fn navigate(&mut self, forward: bool) {
+        let Some((index, rel)) = self.visits.target(forward).map(|(i, p)| (i, p.to_string())) else {
+            self.set_status(if forward { "no newer visit" } else { "no earlier visit" });
+            return;
+        };
+        self.travel = Some(index);
+        self.open_note(&rel);
+        self.travel = None;
+        self.tasks = None;
+        self.focus = Focus::Editor;
+    }
+
     pub(crate) fn after_open(&mut self) {
+        if let Some(rel) = self.tab().map(|t| t.rel.clone()) {
+            let travel = self.travel.take();
+            self.visits.commit(&rel, travel);
+        }
         if self.show_neighbors {
             self.fetch_neighbors();
         }
@@ -830,6 +852,8 @@ impl App {
                             }
                             Err(e) => {
                                 p.pending = false;
+                                p.items.clear();
+                                p.error = Some(e.clone());
                                 self.set_status(format!("search: {e}"));
                             }
                         }
