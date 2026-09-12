@@ -21,6 +21,7 @@ mod palette;
 mod paste;
 mod pointer;
 mod preview;
+mod reader;
 mod tags_view;
 mod tasks_view;
 mod theme;

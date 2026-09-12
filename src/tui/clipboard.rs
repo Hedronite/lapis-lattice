@@ -6,13 +6,36 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use base64::Engine;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
-use super::app::{App, Focus, Msg};
+use super::app::{App, Focus, Msg, Tab};
 use super::vim::Mode;
 
 const LIMIT: usize = 16 * 1024 * 1024;
+
+#[derive(PartialEq, Eq)]
+pub(crate) struct PasteTarget {
+    revision: u64,
+    cursor: (usize, usize),
+    selection: Option<((usize, usize), (usize, usize))>,
+    mode: Mode,
+}
+
+impl PasteTarget {
+    fn capture(t: &Tab) -> Self {
+        Self {
+            revision: t.revision,
+            cursor: (t.text.cursor().0, t.text.cursor().1),
+            selection: t.text.selection_range().map(|(a, b)| ((a.0, a.1), (b.0, b.1))),
+            mode: t.vim.mode,
+        }
+    }
+
+    pub(crate) fn matches(&self, t: &Tab) -> bool {
+        !t.readonly && t.vim.prompt.is_none() && *self == Self::capture(t)
+    }
+}
 
 fn remote() -> bool {
     std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some()
@@ -52,14 +75,26 @@ async fn transfer(payload: Option<String>) -> Result<String, String> {
                 stdin.write_all(payload.as_bytes()).await.map_err(|e| e.to_string())?;
                 drop(stdin);
             }
-            let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
-            if !output.status.success() {
-                return Err(format!("{program} exited {}", output.status));
+            let mut bytes = Vec::new();
+            if read {
+                child
+                    .stdout
+                    .take()
+                    .ok_or_else(|| "clipboard output unavailable".to_string())?
+                    .take((LIMIT + 1) as u64)
+                    .read_to_end(&mut bytes)
+                    .await
+                    .map_err(|e| e.to_string())?;
             }
-            if output.stdout.len() > LIMIT {
+            if bytes.len() > LIMIT {
+                let _ = child.kill().await;
                 return Err("clipboard exceeds 16 MiB limit".into());
             }
-            String::from_utf8(output.stdout).map_err(|_| "clipboard is not UTF-8 text".into())
+            let status = child.wait().await.map_err(|e| e.to_string())?;
+            if !status.success() {
+                return Err(format!("{program} exited {status}"));
+            }
+            String::from_utf8(bytes).map_err(|_| "clipboard is not UTF-8 text".into())
         })
         .await
         .map_err(|_| format!("{program} timed out"))?;
@@ -103,6 +138,16 @@ impl App {
     }
 
     pub(crate) fn copy_selection(&mut self, cut: bool) {
+        if self.focus == Focus::Preview {
+            if cut {
+                self.set_status("preview is read-only; use copy");
+            } else if let Some(payload) = self.tab().and_then(|t| t.reader.selected()) {
+                self.copy_system(payload);
+            } else {
+                self.set_status("select preview text first (drag or v)");
+            }
+            return;
+        }
         if self.focus != Focus::Editor {
             self.set_status("focus text and select it to copy");
             return;
@@ -144,11 +189,10 @@ impl App {
             self.set_status("focus an editable note to paste");
             return;
         }
-        let rel = t.rel.clone();
-        let cursor = t.text.cursor();
+        let target = PasteTarget::capture(t);
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let _ = tx.send(Msg::ClipboardPaste(rel, (cursor.0, cursor.1), transfer(None).await));
+            let _ = tx.send(Msg::ClipboardPaste(target, transfer(None).await));
         });
     }
 }
@@ -156,6 +200,40 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_paste_rejects_changed_selection_mode_document_or_readonly() {
+        use ratatui_textarea::{CursorMove, TextArea};
+        let mut tab = Tab {
+            rel: "fixture.md".into(),
+            text: TextArea::from(["anchor"]),
+            vim: super::super::vim::Vim::new(),
+            hal: Default::default(),
+            hal_valid: true,
+            dirty: false,
+            reader: Default::default(),
+            preview_for: "anchor".into(),
+            readonly: false,
+            saved_source: Some("anchor".into()),
+            history: Default::default(),
+            revision: 1,
+        };
+        tab.text.start_selection();
+        tab.text.move_cursor(CursorMove::Forward);
+        let request = PasteTarget::capture(&tab);
+        assert!(request.matches(&tab));
+        tab.text.cancel_selection();
+        assert!(!request.matches(&tab));
+        let request = PasteTarget::capture(&tab);
+        tab.vim.mode = Mode::Insert;
+        assert!(!request.matches(&tab));
+        let request = PasteTarget::capture(&tab);
+        tab.revision += 1;
+        assert!(!request.matches(&tab));
+        let request = PasteTarget::capture(&tab);
+        tab.readonly = true;
+        assert!(!request.matches(&tab));
+    }
 
     #[test]
     fn osc52_encodes_literal_unicode_and_wraps_tmux() {

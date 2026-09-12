@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::{Margin, Position, Rect};
 use ratatui::text::Line;
 use ratatui_textarea::{CursorMove, DataCursor, TextArea};
 
@@ -21,6 +21,7 @@ pub(crate) struct Pointer {
 #[derive(Clone, Copy)]
 enum Drag {
     Editor,
+    Preview,
     SidebarDivider,
     PreviewDivider,
 }
@@ -75,6 +76,13 @@ fn select_word(text: &mut TextArea<'_>) {
 impl App {
     pub(crate) fn pointer_tick(&mut self) {
         if let Some((event, at)) = self.pointer.last_motion
+            && matches!(self.pointer.drag, Some(Drag::Preview))
+            && at.elapsed() >= Duration::from_millis(50)
+            && !self.regions.preview.inner(Margin::new(1, 1)).contains(Position::new(event.column, event.row))
+        {
+            self.drag_preview(event);
+        }
+        if let Some((event, at)) = self.pointer.last_motion
             && matches!(self.pointer.drag, Some(Drag::Editor))
             && at.elapsed() >= Duration::from_millis(50)
             && let Some(t) = self.tab()
@@ -84,6 +92,14 @@ impl App {
                 self.drag_editor(event);
             }
         }
+    }
+
+    fn drag_preview(&mut self, m: MouseEvent) {
+        let area = self.regions.preview.inner(Margin::new(1, 1));
+        if let Some(t) = self.tab_mut() {
+            t.reader.drag(area, m.column, m.row);
+        }
+        self.pointer.last_motion = Some((m, Instant::now()));
     }
 
     fn drag_editor(&mut self, m: MouseEvent) {
@@ -132,6 +148,7 @@ impl App {
         if m.kind == MouseEventKind::Drag(MouseButton::Left) {
             match self.pointer.drag {
                 Some(Drag::Editor) => self.drag_editor(m),
+                Some(Drag::Preview) => self.drag_preview(m),
                 Some(Drag::SidebarDivider) => {
                     let width = self.regions.sidebar.width + self.regions.tabs.width;
                     self.sidebar_pct =
@@ -194,6 +211,22 @@ impl App {
                     }
                     self.pointer.drag = Some(Drag::Editor);
                 }
+                return;
+            }
+            let area = self.regions.preview.inner(Margin::new(1, 1));
+            if area.contains(Position::new(m.column, m.row)) {
+                self.focus = Focus::Preview;
+                let double = self.pointer.last_click.is_some_and(|(at, x, y)| {
+                    at.elapsed() < Duration::from_millis(400) && (x, y) == (m.column, m.row)
+                });
+                self.pointer.last_click = Some((Instant::now(), m.column, m.row));
+                if let Some(t) = self.tab_mut() {
+                    t.reader.point(area, m.column, m.row, m.modifiers.contains(KeyModifiers::SHIFT));
+                    if double {
+                        t.reader.word();
+                    }
+                }
+                self.pointer.drag = Some(Drag::Preview);
                 return;
             }
         }
@@ -261,8 +294,7 @@ impl App {
                 }
                 Target::Preview => {
                     if let Some(t) = self.tab_mut() {
-                        let max = t.preview.len();
-                        t.preview_scroll = mouse::scroll(t.preview_scroll as usize, max, down, 3) as u16;
+                        t.reader.scroll_by(if down { 3 } else { -3 });
                     }
                 }
                 Target::Editor => {

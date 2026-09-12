@@ -198,15 +198,11 @@ impl App {
             return;
         };
         t.refresh_preview();
-        let max = t.preview.len() as u16;
-        t.preview_scroll = t.preview_scroll.min(max.saturating_sub(1));
-        let mut p = Paragraph::new(Text::from(t.preview.clone()))
-            .block(Block::default().borders(Borders::ALL).title(" preview ").border_style(border))
-            .scroll((t.preview_scroll, 0));
-        if wrap {
-            p = p.wrap(Wrap { trim: false });
-        }
-        f.render_widget(p, area);
+        let block = Block::default().borders(Borders::ALL).title(" preview ").border_style(border);
+        let content = block.inner(area);
+        f.render_widget(block, area);
+        t.reader.reflow(content.width, wrap);
+        t.reader.draw(content, f.buffer_mut(), focused, theme::selected());
     }
 
     pub(crate) fn draw_hal(&self, f: &mut Frame, area: Rect) {

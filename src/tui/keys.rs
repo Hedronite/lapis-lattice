@@ -113,7 +113,7 @@ impl App {
                 };
                 self.set_status(match result {
                     Ok(()) if self.mouse_capture => "mouse capture on: drag to select text".into(),
-                    Ok(()) => "mouse capture off: use terminal selection; F6 restores capture".into(),
+                    Ok(()) => "mouse capture off: terminal selection; Space z m restores capture".into(),
                     Err(e) => format!("mouse capture: {e}"),
                 });
             }
@@ -364,7 +364,7 @@ impl App {
                         && let Some(t) = self.tab_mut()
                     {
                         t.text.move_cursor(ratatui_textarea::CursorMove::Jump(*line as u16, 0));
-                        t.preview_scroll = *line as u16;
+                        t.reader.scroll = *line;
                     }
                     self.focus = Focus::Editor;
                 }
@@ -667,25 +667,41 @@ impl App {
             self.focus = Focus::Sidebar;
             return;
         };
-        let max = t.preview.len() as u16;
+        if k.code == KeyCode::Char('y') {
+            self.copy_selection(false);
+            return;
+        }
+        if t.reader.selecting() && !k.modifiers.contains(KeyModifiers::CONTROL) {
+            let movement = match k.code {
+                KeyCode::Char('h') | KeyCode::Left => Some((-1, 0)),
+                KeyCode::Char('l') | KeyCode::Right => Some((1, 0)),
+                KeyCode::Char('j') | KeyCode::Down => Some((0, 1)),
+                KeyCode::Char('k') | KeyCode::Up => Some((0, -1)),
+                _ => None,
+            };
+            if let Some((x, y)) = movement {
+                t.reader.move_selection(x, y, page as usize);
+                return;
+            }
+        }
         match k.code {
             KeyCode::Char(' ') => self.overlay = Some(Overlay::Leader(vec![])),
             KeyCode::Char('?') => self.overlay = Some(Overlay::Help(0)),
+            KeyCode::Esc if t.reader.selecting() => t.reader.clear_selection(),
             KeyCode::Esc => self.focus = if self.show_sidebar { Focus::Sidebar } else { Focus::Editor },
-            KeyCode::Char('j') | KeyCode::Down => {
-                t.preview_scroll = (t.preview_scroll + 1).min(max.saturating_sub(1))
-            }
-            KeyCode::Char('k') | KeyCode::Up => t.preview_scroll = t.preview_scroll.saturating_sub(1),
+            KeyCode::Char('v') => t.reader.begin_selection(),
+            KeyCode::Char('j') | KeyCode::Down => t.reader.scroll_by(1),
+            KeyCode::Char('k') | KeyCode::Up => t.reader.scroll_by(-1),
             KeyCode::Char('d') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                t.preview_scroll = (t.preview_scroll + page / 2).min(max.saturating_sub(1));
+                t.reader.scroll_by((page / 2) as isize)
             }
             KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                t.preview_scroll = t.preview_scroll.saturating_sub(page / 2);
+                t.reader.scroll_by(-((page / 2) as isize))
             }
-            KeyCode::PageDown => t.preview_scroll = (t.preview_scroll + page).min(max.saturating_sub(1)),
-            KeyCode::PageUp => t.preview_scroll = t.preview_scroll.saturating_sub(page),
-            KeyCode::Char('G') => t.preview_scroll = max.saturating_sub(1),
-            KeyCode::Char('g') => t.preview_scroll = 0,
+            KeyCode::PageDown => t.reader.scroll_by(page as isize),
+            KeyCode::PageUp => t.reader.scroll_by(-(page as isize)),
+            KeyCode::Char('G') => t.reader.end(),
+            KeyCode::Char('g') => t.reader.scroll = 0,
             KeyCode::Char('q') => self.request_quit(),
             _ => {}
         }

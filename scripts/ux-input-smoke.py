@@ -3,12 +3,13 @@
 
 This supplements native clipboard smoke, not a replacement for it. No real vault is used.
 """
-import argparse, fcntl, hashlib, json, os, pty, select, struct, termios, time
+import argparse, base64, fcntl, hashlib, json, os, pty, re, select, struct, termios, time
 from pathlib import Path
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--bin', required=True)
 ap.add_argument('--out', required=True)
+ap.add_argument('--large', action='store_true', help='measure an exact 1 MiB bracketed paste and undo/redo')
 ap.add_argument('--check', action='store_true', help='fail if a required supported input route fails')
 args = ap.parse_args()
 out = Path(args.out).resolve()
@@ -17,7 +18,7 @@ initial = '---\ntitle: Clipboard fixture\ncustom: preserve-me\n---\nanchor\nseco
 payload = 'first line\n    indented line\n\nlast line\n'
 
 class Session:
-    def __init__(self, name):
+    def __init__(self, name, remote=False):
         self.root = out / name
         self.root.mkdir(exist_ok=True)
         self.vault = self.root / 'vault'
@@ -32,8 +33,10 @@ class Session:
             os.environ['XDG_CONFIG_HOME'] = str(config.parent)
             os.environ['TERM'] = 'xterm-256color'
             os.environ.pop('LAPIS_VAULT', None)
+            if remote: os.environ['SSH_CONNECTION'] = 'fixture'
             os.execv(args.bin, [args.bin, '--vault', str(self.vault), 'tui'])
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack('HHHH', 32, 120, 0, 0))
+        os.set_blocking(self.fd, False)
         self.raw = bytearray()
         self.wait_for(b'Space leader')
         self.send(b'\r')
@@ -59,7 +62,17 @@ class Session:
                 self.raw.extend(data)
 
     def send(self, data, delay=0.12):
-        os.write(self.fd, data)
+        pending = memoryview(data)
+        deadline = time.monotonic() + 30
+        while pending:
+            if time.monotonic() > deadline: raise RuntimeError('PTY input timed out')
+            readable, writable, _ = select.select([self.fd], [self.fd], [], 0.1)
+            if readable:
+                try: self.raw.extend(os.read(self.fd, 65536))
+                except BlockingIOError: pass
+            if writable:
+                try: pending = pending[os.write(self.fd, pending):]
+                except BlockingIOError: pass
         self.drain(delay)
 
     def saved(self):
@@ -126,6 +139,46 @@ results.append({'case':'mouse-replace-undo', 'body':after,
                 'content_matches':after==payload+'\nsecond line\n',
                 'undo_matches':undone=='anchor\nsecond line\n'})
 s.close()
+
+# Preview text is copied through OSC 52 in a simulated SSH environment;
+# this verifies dispatch/content without overwriting the runner's OS clipboard.
+s = Session('preview-copy', remote=True)
+s.send(b'\x1b[<0;77;3M')
+s.send(b'\x1b[<32;83;3M')
+s.send(b'\x1b[<0;83;3m')
+s.send(b'y')
+copies = re.findall(rb'\x1b\]52;c;([^\x07]*)\x07', s.raw)
+results.append({'case':'preview-copy', 'content_matches':bool(copies) and base64.b64decode(copies[-1]) == b'anchor'})
+s.close()
+
+if args.large:
+    s = Session('large-paste')
+    unit = 'line\t漢字 ' + 'x' * (64 - len('line\t漢字 \n'.encode())) + '\n'
+    large = unit * (1024 * 1024 // 64)
+    assert len(large.encode()) == 1024 * 1024
+    expected = large + 'anchor\nsecond line\n'
+    body_of = lambda text: text.split('---\n', 2)[-1]
+    start = time.monotonic()
+    s.send(b'\x1b[200~' + large.encode() + b'\x1b[201~', 0)
+    delivered = time.monotonic()
+    s.send(b'\x13', 0)
+    deadline = time.monotonic() + 30
+    while body_of(s.note.read_text()) != expected and time.monotonic() < deadline: s.drain(0.005)
+    integrated_saved = time.monotonic()
+    after = s.note.read_text()
+    s.send(b'u', 0.1)
+    undone = s.saved()
+    s.send(b'\x12', 0.1)
+    redone = s.saved()
+    results.append({'case':'large-paste', 'bytes':len(large.encode()),
+                    'payload_sha256':hashlib.sha256(large.encode()).hexdigest(),
+                    'delivery_ms':1000*(delivered-start),
+                    'paste_and_save_upper_bound_ms':1000*(integrated_saved-start),
+                    'content_matches':body_of(after)==expected,
+                    'custom_preserved':all('custom: preserve-me' in text for text in (after, undone, redone)),
+                    'undo_matches':body_of(undone)=='anchor\nsecond line\n',
+                    'redo_matches':body_of(redone)==expected})
+    s.close()
 
 # Quit and save must retain dirty content when an agent changes the same file.
 s = Session('dirty-conflict')

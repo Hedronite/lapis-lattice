@@ -11,7 +11,6 @@ use crossterm::event::{
 use notify::{RecursiveMode, Watcher};
 use ratatui::DefaultTerminal;
 use ratatui::style::Style;
-use ratatui::text::Line;
 use ratatui_textarea::TextArea;
 
 use crate::http::{Document, ListParams, Neighbor};
@@ -38,7 +37,7 @@ pub(crate) enum Msg {
     Tasks(Vec<Task>),
     Health(bool),
     ClipboardCopy(std::result::Result<String, String>),
-    ClipboardPaste(String, (usize, usize), std::result::Result<String, String>),
+    ClipboardPaste(super::clipboard::PasteTarget, std::result::Result<String, String>),
     Fs(PathBuf),
 }
 
@@ -87,13 +86,19 @@ pub(crate) struct Tab {
     pub(crate) hal: serde_json::Map<String, serde_json::Value>,
     pub(crate) hal_valid: bool,
     pub(crate) dirty: bool,
-    pub(crate) preview_scroll: u16,
-    pub(crate) preview: Vec<Line<'static>>,
+    pub(crate) reader: super::reader::Reader,
     pub(crate) preview_for: String,
     pub(crate) readonly: bool,
     /// Exact disk contents last read/saved, for detecting external edits.
     pub(crate) saved_source: Option<String>,
     pub(crate) history: super::history::History,
+    pub(crate) revision: u64,
+}
+
+fn next_revision() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 impl Tab {
@@ -103,7 +108,8 @@ impl Tab {
     pub(crate) fn refresh_preview(&mut self) {
         let body = self.body();
         if body != self.preview_for {
-            self.preview = preview::render(&body);
+            self.revision = next_revision();
+            self.reader.replace(&preview::render(&body));
             self.preview_for = body;
         }
     }
@@ -419,12 +425,12 @@ impl App {
                     hal: n.hal,
                     hal_valid: n.hal_valid,
                     dirty: false,
-                    preview_scroll: 0,
-                    preview: vec![],
+                    reader: super::reader::Reader::default(),
                     preview_for: String::new(),
                     readonly,
                     saved_source,
                     history: super::history::History::default(),
+                    revision: next_revision(),
                 };
                 tab.refresh_preview();
                 self.tabs.push(tab);
@@ -854,11 +860,11 @@ impl App {
                     Ok(message) => message,
                     Err(error) => format!("clipboard: {error}; Vim register retained"),
                 }),
-                Msg::ClipboardPaste(rel, cursor, result) => match result {
+                Msg::ClipboardPaste(target, result) => match result {
                     Ok(payload)
                         if self.overlay.is_none()
                             && self.focus == Focus::Editor
-                            && self.tab().is_some_and(|t| t.rel == rel && t.text.cursor() == cursor) =>
+                            && self.tab().is_some_and(|t| target.matches(t)) =>
                     {
                         self.paste(payload)
                     }
