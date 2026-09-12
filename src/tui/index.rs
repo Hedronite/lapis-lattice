@@ -82,7 +82,7 @@ impl App {
             }
         };
         self.index = IndexState::Indexing { done: 0, total: 0 };
-        self.set_status("indexing workspace in the background · files remain usable");
+        self.set_status("indexing in the background · files remain usable");
         let tx = self.tx.clone();
         tokio::task::spawn_blocking(move || {
             let mut sent = Instant::now();
@@ -99,6 +99,12 @@ impl App {
     pub(crate) fn index_progress(&mut self, done: u64, total: u64) {
         if matches!(self.index, IndexState::Indexing { .. }) {
             self.index = IndexState::Indexing { done, total };
+            // Keep the count in the status line while it shows the build, so progress
+            // stays visible even when the right-hand hint has no room. Any other
+            // message (a guard, a save) keeps its place.
+            if self.status.starts_with("indexing ") {
+                self.set_status(format!("indexing {done}/{total} · files remain usable"));
+            }
         }
     }
 

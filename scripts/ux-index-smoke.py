@@ -5,7 +5,7 @@ builds in the background, and health afterwards is built rather than silently em
 Uses a disposable synthetic vault (or a caller-supplied copy with no index) and an
 isolated XDG_CONFIG_HOME. Never runs `lapis init` and never edits notes.
 """
-import argparse, fcntl, hashlib, json, os, pty, select, struct, subprocess, termios, time
+import argparse, fcntl, hashlib, json, os, pty, re, select, struct, subprocess, termios, time
 from pathlib import Path
 from ux_terminal import screen_text
 
@@ -107,7 +107,7 @@ def send(data):
 
 def record_progress(text):
     line = status_line(text)
-    if 'indexing' in line and (not progress or progress[-1]['status'] != line.strip()):
+    if re.search(r'indexing \d+/\d+', line) and (not progress or progress[-1]['status'] != line.strip()):
         progress.append({'ms': (time.monotonic() - started) * 1000, 'status': line.strip()})
 
 
@@ -166,7 +166,7 @@ if health:
     if health['documents_indexed'] != markdown:
         failures.append(f"documents_indexed {health['documents_indexed']} != {markdown} notes")
 if not progress:
-    failures.append('no indexing progress was displayed')
+    failures.append('no files/total indexing progress was displayed')
 after_files = corpus(vault)
 if after_files != before:
     changed = sorted(set(before) ^ set(after_files) | {k for k in before if after_files.get(k) != before[k]})
