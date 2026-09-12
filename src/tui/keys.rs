@@ -29,6 +29,7 @@ impl App {
             Cmd::FindNote => self.overlay = Some(Overlay::Palette(Palette::new(""))),
             Cmd::SearchText => self.overlay = Some(Overlay::Palette(Palette::new(""))),
             Cmd::Commands => self.overlay = Some(Overlay::Palette(Palette::new(">"))),
+            Cmd::BuildIndex => self.build_index(),
             Cmd::ToggleSidebar => {
                 self.show_sidebar = !self.show_sidebar;
                 if !self.show_sidebar && self.focus == Focus::Sidebar {

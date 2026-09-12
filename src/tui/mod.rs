@@ -13,6 +13,7 @@ mod keys;
 mod hal_view;
 mod help;
 mod history;
+mod index;
 mod leader;
 mod mouse;
 mod neighbors_view;

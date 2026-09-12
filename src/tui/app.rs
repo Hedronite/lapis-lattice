@@ -19,9 +19,11 @@ use crate::tasks::Task;
 use crate::{notes, tasks, templates, write};
 use lapis_lattice::{Hit, Mode as SearchMode};
 
+use super::index::{IndexHealth, IndexState};
+use super::leader::Cmd;
 use super::mouse::Regions;
 use super::omarchy;
-use super::palette::Palette;
+use super::palette::{Item, Palette};
 use super::preview;
 use super::tags_view::TagsBrowser;
 use super::tasks_view::{TasksView, View};
@@ -35,7 +37,9 @@ pub(crate) enum Msg {
     Documents(std::result::Result<Vec<Document>, String>),
     Reindexed(String, std::result::Result<Option<u64>, String>),
     Tasks(Vec<Task>),
-    Health(bool),
+    Health(std::result::Result<IndexHealth, String>),
+    IndexProgress(u64, u64),
+    IndexBuilt(std::result::Result<u64, String>),
     ClipboardCopy(std::result::Result<String, String>),
     ClipboardPaste(super::clipboard::PasteTarget, std::result::Result<String, String>),
     Fs(PathBuf),
@@ -140,6 +144,9 @@ pub(crate) struct App {
     pub(crate) status: String,
     pub(crate) status_at: Instant,
     pub(crate) lattice_ok: Option<bool>,
+    pub(crate) index: IndexState,
+    /// Paths saved during a full build, re-indexed once it lands.
+    pub(crate) index_pending: std::cell::RefCell<Vec<String>>,
     pub(crate) tx: Sender<Msg>,
     pub(crate) rx: Receiver<Msg>,
     pub(crate) watcher: Option<notify::RecommendedWatcher>,
@@ -190,6 +197,8 @@ impl App {
             status: "Space leader · Ctrl+P palette · ? help".into(),
             status_at: Instant::now(),
             lattice_ok: None,
+            index: IndexState::Unknown,
+            index_pending: Default::default(),
             tx,
             rx,
             watcher: None,
@@ -238,11 +247,20 @@ impl App {
     // ------------------------------------------------------------ background
 
     pub(crate) fn poll_health(&self) {
+        // A full build owns the index; its completion polls again.
+        if matches!(self.index, IndexState::Indexing { .. }) {
+            return;
+        }
         let Ok(backend) = self.ctx.backend() else { return };
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let ok = backend.health().await.is_ok();
-            let _ = tx.send(Msg::Health(ok));
+            let embedded = backend.mode() == "embedded";
+            let health = backend
+                .health()
+                .await
+                .map(|h| IndexHealth { embedded, built: h.graph.built, documents: h.documents_indexed })
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Msg::Health(health));
         });
     }
 
@@ -303,6 +321,14 @@ impl App {
     }
 
     pub(crate) fn kick(&self, rel: String) {
+        match self.index {
+            // The walk may already have passed this path; index it after the build.
+            IndexState::Indexing { .. } => return self.index_pending.borrow_mut().push(rel),
+            // One-path updates would mark a never-built graph as built around this
+            // note and hide the missing index; the explicit build covers it.
+            IndexState::Missing | IndexState::Failed(_) => return,
+            _ => {}
+        }
         let Ok(backend) = self.ctx.backend() else { return };
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -789,7 +815,14 @@ impl App {
                         && seq == p.seq
                     {
                         match r {
-                            Ok(hits) => p.set_hits(hits),
+                            Ok(hits) => {
+                                p.set_hits(hits);
+                                // "Nothing indexed" is not a real zero-result query.
+                                if p.items.is_empty() && self.index.needs_setup() {
+                                    p.items
+                                        .push(Item::Command { keys: "Space i".into(), cmd: Cmd::BuildIndex });
+                                }
+                            }
                             Err(e) => {
                                 p.pending = false;
                                 self.set_status(format!("search: {e}"));
@@ -848,7 +881,14 @@ impl App {
                     Ok(_) => self.set_status("clipboard paste cancelled: active editor changed"),
                     Err(error) => self.set_status(format!("clipboard: {error}")),
                 },
-                Msg::Health(ok) => self.lattice_ok = Some(ok),
+                Msg::Health(health) => {
+                    self.lattice_ok = Some(health.is_ok());
+                    if let Ok(health) = health {
+                        self.index = self.index.observe(&health);
+                    }
+                }
+                Msg::IndexProgress(done, total) => self.index_progress(done, total),
+                Msg::IndexBuilt(result) => self.index_built(result),
                 Msg::Fs(path) => {
                     // A theme swap restyles in place; no restart, no reindex.
                     if let Some(state) = omarchy::state_root()

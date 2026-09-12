@@ -8,7 +8,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-pub(crate) fn draw(f: &mut Frame, area: Rect) {
+pub(crate) fn draw(f: &mut Frame, area: Rect, index_missing: bool) {
     let spacious = area.width >= 66 && area.height >= 21;
     let mut lines = Vec::new();
     if spacious {
@@ -33,12 +33,17 @@ pub(crate) fn draw(f: &mut Frame, area: Rect) {
         );
         lines.push(Line::default());
     }
-    for (key, action) in [
+    let mut keys = vec![
         ("Enter", "open selected note"),
         ("Ctrl+P", "find a note"),
         ("Space n n", "new note"),
         ("Space / ?", "actions / help"),
-    ] {
+    ];
+    if index_missing {
+        // First run: files work now; search needs one explicit background build.
+        keys.push(("Space i", "build search index (files work now)"));
+    }
+    for (key, action) in keys {
         lines.push(Line::from(vec![
             Span::styled(format!("{key:>12}  "), theme::accent()),
             Span::styled(action, theme::chrome()),
