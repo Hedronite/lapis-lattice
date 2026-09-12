@@ -86,7 +86,19 @@ impl Render for Workspace {
                     self.folder.clone()
                 }),
             )
-            .child(files);
+            .child(files)
+            .child(
+                div()
+                    .id("workspace-graph")
+                    .role(Role::Button)
+                    .aria_label("Open workspace graph")
+                    .px_4()
+                    .py_3()
+                    .text_color(theme.accent)
+                    .cursor_pointer()
+                    .child("Graph · ⌘/Ctrl ⇧ G")
+                    .on_click(cx.listener(|this, _, w, cx| this.toggle_graph(w, cx))),
+            );
         let mut tabs = div()
             .id("workspace-tabs")
             .role(Role::TabList)
@@ -112,7 +124,7 @@ impl Render for Workspace {
                     title
                 };
             let dirty = loaded.is_some_and(|(_, t)| Self::dirty(t, cx));
-            let selected = loaded.is_some_and(|(i, _)| i == self.active);
+            let selected = !self.graph_visible && loaded.is_some_and(|(i, _)| i == self.active);
             let open = path.clone();
             let close = path.clone();
             tabs = tabs.child(
@@ -198,7 +210,11 @@ impl Render for Workspace {
                     })),
             );
         let mut content = div().flex_1().min_h_0().min_w_0().flex().flex_col().child(navigation).child(tabs);
-        if let Some(tab) = self.tabs.get(self.active) {
+        if self.graph_visible {
+            if let Some(graph) = &self.graph {
+                content = content.child(div().flex_1().min_h_0().child(graph.clone()));
+            }
+        } else if let Some(tab) = self.tabs.get(self.active) {
             if let Some(pdf) = &tab.pdf {
                 content = content.child(div().flex_1().min_h_0().min_w_0().child(pdf.clone()));
             } else {
@@ -364,12 +380,16 @@ impl Render for Workspace {
                 )
                 .child(resizable_panel().child(center)),
         );
-        let mode = self.tabs.get(self.active).map_or_else(
-            || "READY".to_string(),
-            |t| {
-                if t.document.readonly { "READ ONLY".into() } else { t.vim.label() }
-            },
-        );
+        let mode = if self.graph_visible {
+            "GRAPH".into()
+        } else {
+            self.tabs.get(self.active).map_or_else(
+                || "READY".to_string(),
+                |t| {
+                    if t.document.readonly { "READ ONLY".into() } else { t.vim.label() }
+                },
+            )
+        };
         let status = self
             .tabs
             .get(self.active)

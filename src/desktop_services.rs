@@ -227,6 +227,26 @@ impl WorkspaceServices for Service {
         })
     }
 
+    fn graph_snapshot(&self) -> Result<lapis_lattice::GraphSnapshot, String> {
+        self.ctx.backend().and_then(|b| b.graph_snapshot()).map_err(|e| e.to_string())
+    }
+    fn graph_preview(&self, path: &str) -> Result<String, String> {
+        use std::io::Read;
+        let abs = self.contained(path)?;
+        if matches!(notes::kind_of(path), notes::Kind::Pdf) {
+            return Ok("PDF reference · Open to read".into());
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(abs)
+            .map_err(|e| e.to_string())?
+            .take(4096)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        let text = String::from_utf8_lossy(&bytes);
+        let body =
+            if notes::kind_of(path) == notes::Kind::Markdown { hal::raw_parts(&text).1 } else { &text };
+        Ok(body.chars().take(600).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" "))
+    }
     fn tree(&self, path: &str) -> Result<lapis_desktop::services::ContextTree, String> {
         self.runtime.block_on(async {
             let tree = self
@@ -342,6 +362,31 @@ mod tests {
             assert!(incoming.iter().any(|l| l.path.as_deref() == Some("First.md") && l.direction == "in"));
             let error = service.tree("First.md").unwrap_err();
             assert!(error.contains("not implemented") && error.contains("http"), "{error}");
+        })
+        .await;
+        std::fs::remove_dir_all(root).unwrap();
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn graph_uses_configured_index_and_preview_is_contained_and_bounded() {
+        let (root, mut service) = fixture();
+        assert!(service.graph_snapshot().unwrap_err().contains("HTTP backend"));
+        service.ctx.force_http = false;
+        std::fs::write(root.join("First.md"), "---\ntitle: First\n---\n[[Second]] [[Missing]]").unwrap();
+        std::fs::write(root.join("Second.md"), "漢🙂".repeat(100_000)).unwrap();
+        let result = tokio::task::spawn_blocking(move || {
+            assert!(service.graph_snapshot().unwrap().nodes.is_empty());
+            service.build_index().unwrap();
+            let snapshot = service.graph_snapshot().unwrap();
+            assert_eq!(snapshot.nodes.len(), 3);
+            assert!(snapshot.nodes.iter().any(|n| n.dangling));
+            assert_eq!(snapshot.edges.len(), 2);
+            let preview = service.graph_preview("Second.md").unwrap();
+            assert_eq!(preview.chars().count(), 600);
+            assert!(preview.starts_with("漢🙂"));
+            assert_eq!(service.graph_preview("First.md").unwrap(), "[[Second]] [[Missing]]");
+            assert!(service.graph_preview("../outside.md").is_err());
         })
         .await;
         std::fs::remove_dir_all(root).unwrap();

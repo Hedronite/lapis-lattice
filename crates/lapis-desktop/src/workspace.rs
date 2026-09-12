@@ -2,6 +2,7 @@
 
 mod command;
 mod context;
+mod graph;
 mod history;
 mod palette;
 mod render;
@@ -72,6 +73,9 @@ struct Workspace {
     context: bool,
     context_state: context::Panel,
     history: history::History,
+    graph: Option<Entity<crate::window::Root>>,
+    graph_events: Option<Subscription>,
+    graph_visible: bool,
     palette: Option<palette::Palette>,
     query_epoch: u64,
     indexing: bool,
@@ -105,6 +109,9 @@ impl Workspace {
             context: false,
             context_state: context::Panel::default(),
             history: history::History::default(),
+            graph: None,
+            graph_events: None,
+            graph_visible: false,
             palette: None,
             query_epoch: 0,
             indexing: false,
@@ -115,6 +122,12 @@ impl Workspace {
         workspace
     }
     fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.graph_visible {
+            if let Some(graph) = &self.graph {
+                graph.update(cx, |g, cx| g.focus(window, cx));
+            }
+            return;
+        }
         if self.tabs.is_empty()
             && self.opening.is_none()
             && let Some(path) = self.tab_order.first().cloned()
@@ -123,7 +136,7 @@ impl Workspace {
             return;
         }
         if let Some(tab) = self.tabs.get(self.active) {
-            self.history.commit(tab.document.path.clone(), None);
+            self.history.commit(tab.document.path.clone().into(), None);
         }
         self.refresh_context(false, window, cx);
         for (i, tab) in self.tabs.iter().enumerate() {
@@ -192,13 +205,17 @@ impl Workspace {
     }
 
     fn navigate(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some((index, path)) = self.history.target(forward) {
-            self.open_visit(path, Some(index), window, cx);
+        if let Some((index, visit)) = self.history.target(forward) {
+            match visit {
+                history::Visit::Note(path) => self.open_visit(path, Some(index), window, cx),
+                history::Visit::Graph => self.show_graph(Some(index), window, cx),
+            }
         }
     }
     fn activate(&mut self, index: usize, travel: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.hide_graph(cx);
         self.active = index;
-        self.history.commit(self.tabs[index].document.path.clone(), travel);
+        self.history.commit(self.tabs[index].document.path.clone().into(), travel);
         self.refresh_context(false, window, cx);
         self.focus_active(window, cx);
         cx.notify();
@@ -420,6 +437,9 @@ impl Workspace {
                 } else {
                     // A saved note can change backlinks of the currently visible note too.
                     this.refresh_context(true, window, cx);
+                    if let Some(graph) = &this.graph {
+                        graph.update(cx, |g, cx| g.invalidate(window, cx));
+                    }
                 }
                 cx.notify();
             });
@@ -481,8 +501,10 @@ impl Workspace {
         {
             match key {
                 "i" if modifiers.shift && self.palette.is_some() => self.build_index(window, cx),
+                "g" if modifiers.shift => self.toggle_graph(window, cx),
                 "p" => self.open_palette(window, cx),
                 "s" => self.save_to(modifiers.shift, window, cx),
+                "w" if self.graph_visible => self.toggle_graph(window, cx),
                 "w" => {
                     self.close_tab(modifiers.shift, cx);
                     self.focus_active(window, cx);
@@ -517,6 +539,9 @@ impl Workspace {
             }
             cx.stop_propagation();
             cx.notify();
+            return;
+        }
+        if self.graph_visible {
             return;
         }
         if self.command.is_some() {

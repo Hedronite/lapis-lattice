@@ -70,6 +70,12 @@ pub trait WorkspaceServices: Send + Sync {
     fn links(&self, _path: &str) -> Result<Vec<ContextLink>, String> {
         Err("Link context is unavailable in this service".into())
     }
+    fn graph_snapshot(&self) -> Result<lapis_lattice::GraphSnapshot, String> {
+        Err("Graph snapshots are unavailable in this service".into())
+    }
+    fn graph_preview(&self, _path: &str) -> Result<String, String> {
+        Err("Graph previews are unavailable in this service".into())
+    }
     fn tree(&self, _path: &str) -> Result<ContextTree, String> {
         Err("Tree retrieval is unavailable in this service".into())
     }

@@ -379,7 +379,7 @@ fn navigation_reuses_dirty_buffers_and_failed_open_does_not_move_history(cx: &mu
     handle
         .read_with(cx, |this, _| {
             assert_eq!(this.tabs[this.active].document.path, "fixture.md");
-            assert_eq!(this.history.target(true).unwrap().1, "second.md");
+            assert_eq!(this.history.target(true).unwrap().1, history::Visit::from("second.md"));
         })
         .unwrap();
     visual.update(|w, cx| {
@@ -400,7 +400,7 @@ fn navigation_reuses_dirty_buffers_and_failed_open_does_not_move_history(cx: &mu
     handle
         .read_with(cx, |this, _| {
             assert_eq!(this.tabs[this.active].document.path, "fixture.md");
-            assert_eq!(this.history.target(false).unwrap().1, "second.md");
+            assert_eq!(this.history.target(false).unwrap().1, history::Visit::from("second.md"));
         })
         .unwrap();
 }
@@ -647,3 +647,5 @@ fn closing_loaded_tab_can_activate_lazy_neighbor_and_dirty_tabs_stay(cx: &mut Te
         })
         .unwrap();
 }
+
+mod graph;

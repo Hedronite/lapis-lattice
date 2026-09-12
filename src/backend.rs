@@ -146,6 +146,13 @@ impl Backend {
         }
     }
 
+    pub fn graph_snapshot(&self) -> Result<lapis_lattice::GraphSnapshot> {
+        match self {
+            Backend::Embedded(engine) => lock(engine).graph_snapshot().map_err(Into::into),
+            Backend::Http(_) => Err(LapisError::Usage("Whole-workspace graph snapshots are unavailable from the configured HTTP backend; note links and tree retrieval remain available".into())),
+        }
+    }
+
     /// Where reads come from: the sqlite file, or the lattice URL.
     pub fn source(&self) -> String {
         match self {
