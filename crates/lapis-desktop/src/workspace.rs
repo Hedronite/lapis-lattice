@@ -5,6 +5,7 @@ mod context;
 mod history;
 mod palette;
 mod render;
+mod session;
 #[cfg(all(test, feature = "gui-tests"))]
 mod tests;
 
@@ -30,13 +31,7 @@ fn init_workspace(cx: &mut App) {
     ]);
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum View {
-    Live,
-    Source,
-    Reading,
-    Split,
-}
+use crate::session::View;
 
 struct Tab {
     document: Document,
@@ -46,6 +41,8 @@ struct Tab {
     _events: Subscription,
     view: View,
     split: Entity<gpui_kit::base::ResizableState>,
+    split_width: Option<f32>,
+    reading_scroll: gpui_kit::ScrollHandle,
     vim: crate::vim::Vim,
     close_after_save: bool,
     saving: bool,
@@ -62,6 +59,12 @@ struct Workspace {
     open_epoch: u64,
     opening: Option<String>,
     tabs: Vec<Tab>,
+    tab_order: Vec<String>,
+    restored: Vec<crate::session::Tab>,
+    session_ready: bool,
+    session_notice: Option<String>,
+    sidebar_width: f32,
+    context_width: f32,
     active: usize,
     status: String,
     error: bool,
@@ -89,6 +92,12 @@ impl Workspace {
             open_epoch: 0,
             opening: None,
             tabs: vec![],
+            tab_order: vec![],
+            restored: vec![],
+            session_ready: false,
+            session_notice: None,
+            sidebar_width: 232.,
+            context_width: 280.,
             active: 0,
             status: String::new(),
             error: false,
@@ -106,6 +115,13 @@ impl Workspace {
         workspace
     }
     fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.is_empty()
+            && self.opening.is_none()
+            && let Some(path) = self.tab_order.first().cloned()
+        {
+            self.open_file(path, window, cx);
+            return;
+        }
         if let Some(tab) = self.tabs.get(self.active) {
             self.history.commit(tab.document.path.clone(), None);
         }
@@ -204,6 +220,12 @@ impl Workspace {
             self.activate(index, travel, window, cx);
             return;
         }
+        if !self.tab_order.contains(&path) && self.tab_order.len() >= 128 {
+            self.status = "Close a tab before opening more than 128 documents".into();
+            self.error = true;
+            cx.notify();
+            return;
+        }
         self.opening = Some(path.clone());
         let service = self.services.clone();
         let task = cx.background_executor().spawn(async move { service.read(&path) });
@@ -216,6 +238,7 @@ impl Workspace {
                 this.opening = None;
                 match result {
                     Ok(document) => {
+                        let restored = this.restored.iter().find(|t| t.path == document.path).cloned();
                         let editor = cx.new(|cx| {
                             let mut input =
                                 TextareaState::new(window, cx).default_value(document.text.clone()).rows(30);
@@ -227,7 +250,7 @@ impl Workspace {
                                 cx.notify();
                             }
                         });
-                        let view = match document.kind {
+                        let mut view = match document.kind {
                             FileKind::Markdown => View::Live,
                             FileKind::Html | FileKind::Pdf => View::Reading,
                             _ => View::Source,
@@ -244,14 +267,51 @@ impl Workspace {
                         } else {
                             None
                         };
+                        let reading_scroll = gpui_kit::ScrollHandle::new();
+                        if let Some(saved) = &restored {
+                            view = match document.kind {
+                                FileKind::Pdf | FileKind::Html => View::Reading,
+                                FileKind::Markdown => saved.view,
+                                _ if saved.view == View::Live => View::Source,
+                                _ => saved.view,
+                            };
+                            editor.update(cx, |s, cx| {
+                                s.set_selected_range(saved.selection[0]..saved.selection[1], cx);
+                                s.set_scroll_offset(
+                                    gpui_kit::point(
+                                        gpui_kit::px(saved.source_scroll[0]),
+                                        gpui_kit::px(saved.source_scroll[1]),
+                                    ),
+                                    cx,
+                                );
+                            });
+                            reading_scroll.set_offset(gpui_kit::point(
+                                gpui_kit::px(saved.reading_scroll[0]),
+                                gpui_kit::px(saved.reading_scroll[1]),
+                            ));
+                            if let Some(pdf) = &pdf {
+                                pdf.update(cx, |s, cx| {
+                                    s.restore_position(saved.pdf_page, saved.pdf_zoom, window, cx)
+                                });
+                            }
+                        }
                         let live = cx.new(|cx| crate::live::LiveEditor::new(editor.clone(), cx));
+                        if let Some(saved) = &restored {
+                            live.update(cx, |s, cx| s.restore_scroll(saved.live_scroll, cx));
+                        }
                         editor.update(cx, |s, cx| s.focus(window, cx));
+                        if !this.tab_order.contains(&document.path) {
+                            this.tab_order.push(document.path.clone());
+                        }
+                        this.restored.retain(|t| t.path != document.path);
                         this.tabs.push(Tab {
                             document,
                             editor,
                             live,
                             pdf,
                             _events: events,
+                            split_width: restored.and_then(|t| t.split_width),
+                            reading_scroll,
                             view,
                             split: cx.new(|_| gpui_kit::base::ResizableState::default()),
                             vim: crate::vim::Vim::default(),
@@ -321,6 +381,8 @@ impl Workspace {
                         }
                         if close {
                             let was_active = this.active == index;
+                            let path = this.tabs[index].document.path.clone();
+                            this.tab_order.retain(|p| p != &path);
                             this.tabs.remove(index);
                             this.active = if index < this.active {
                                 this.active - 1
@@ -383,6 +445,13 @@ impl Workspace {
             tab.vim.prompt = None;
         }
         let Some(tab) = self.tabs.get(self.active) else {
+            if let Some(path) = self.tab_order.first().cloned() {
+                self.tab_order.retain(|p| p != &path);
+                self.restored.retain(|t| t.path != path);
+                self.open_epoch += 1;
+                self.opening = None;
+                cx.notify();
+            }
             return;
         };
         if tab.saving || (!discard && Self::dirty(tab, cx)) {
@@ -392,6 +461,8 @@ impl Workspace {
             self.status =
                 format!("{} {}", if discard { "Discarded changes in" } else { "Closed" }, tab.document.path);
             self.error = false;
+            let path = tab.document.path.clone();
+            self.tab_order.retain(|p| p != &path);
             self.tabs.remove(self.active);
             self.active = self.active.min(self.tabs.len().saturating_sub(1));
         }
@@ -577,10 +648,22 @@ pub fn open(opts: Options, services: Arc<dyn WorkspaceServices>) -> Result<(), D
                 // The root entity and window must be registered before a fast I/O completion
                 // tries to update them. No loading work belongs inside the constructor.
                 if let Err(error) = handle.update(cx, move |this, window, cx| {
-                    this.directory(String::new(), window, cx);
-                    if let Some(path) = seed {
-                        this.open_file(path, window, cx);
-                    }
+                    this.restore_session(seed, window, cx);
+                    let entity = cx.entity();
+                    // Keep metadata entities until quit, including a native window-close event.
+                    App::on_app_quit(cx, move |cx| {
+                        let this = entity.read(cx);
+                        let snapshot = this.session_ready.then(|| this.session_snapshot(cx));
+                        let services = this.services.clone();
+                        cx.background_executor().spawn(async move {
+                            if let Some(snapshot) = snapshot
+                                && let Err(error) = services.save_session(&snapshot)
+                            {
+                                eprintln!("lapis desktop: workspace state was not saved: {error}");
+                            }
+                        })
+                    })
+                    .detach();
                 }) {
                     eprintln!("lapis desktop: workspace initialization failed: {error}");
                     cx.quit();

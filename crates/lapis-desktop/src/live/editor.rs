@@ -23,6 +23,7 @@ pub struct LiveEditor {
     lines: Vec<layout::Line>,
     bounds: Bounds<Pixels>,
     scroll: Pixels,
+    restored_scroll: Option<Pixels>,
     height: Pixels,
     anchor: Option<usize>,
     _changes: Subscription,
@@ -51,11 +52,19 @@ impl LiveEditor {
             lines: vec![],
             bounds: Bounds::default(),
             scroll: px(0.),
+            restored_scroll: None,
             height: px(0.),
             anchor: None,
             _changes: changes,
             _observe: observe,
         }
+    }
+    pub fn scroll_position(&self) -> f32 {
+        self.scroll.as_f32()
+    }
+    pub fn restore_scroll(&mut self, value: f32, cx: &mut Context<Self>) {
+        self.restored_scroll = Some(px(value.max(0.)));
+        cx.notify();
     }
     fn sync_source(&mut self, cx: &mut Context<Self>) {
         let selection = self.source.read(cx).selected_range();

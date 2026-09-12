@@ -78,6 +78,10 @@ impl LiveEditor {
         }
         self.height = y + px(16.);
         let old_scroll = self.scroll;
+        if let Some(scroll) = self.restored_scroll.take() {
+            self.scroll = scroll;
+            self.follow_cursor = false;
+        }
         if self.follow_cursor
             && self.anchor.is_none()
             && let Some(p) = self.point_for_source(self.source.read(cx).cursor())

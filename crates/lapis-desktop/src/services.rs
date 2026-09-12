@@ -53,6 +53,13 @@ pub struct SearchPage {
 
 /// Blocking operations. Call on a background executor, never during GPUI paint/input.
 pub trait WorkspaceServices: Send + Sync {
+    fn load_session(&self) -> Result<Option<crate::session::Session>, String> {
+        Ok(None)
+    }
+    fn save_session(&self, _session: &crate::session::Session) -> Result<(), String> {
+        Ok(())
+    }
+
     fn directory(&self, path: &str) -> Result<Vec<FileEntry>, String>;
     fn read(&self, path: &str) -> Result<Document, String>;
     fn save(&self, document: &Document, text: &str) -> Result<Document, String>;

@@ -96,29 +96,54 @@ impl Render for Workspace {
             .overflow_x_scroll()
             .border_b_1()
             .border_color(theme.border);
-        for (index, tab) in self.tabs.iter().enumerate() {
-            let title = format!("{}{}", tab.document.title, if Self::dirty(tab, cx) { " •" } else { "" });
-            let title = if self.tabs.iter().filter(|t| t.document.title == tab.document.title).count() > 1 {
-                format!("{}{}", tab.document.path, if Self::dirty(tab, cx) { " •" } else { "" })
-            } else {
-                title
-            };
+        for (ordinal, path) in self.tab_order.iter().enumerate() {
+            let loaded = self.tabs.iter().enumerate().find(|(_, t)| &t.document.path == path);
+            let title = loaded
+                .map(|(_, t)| t.document.title.clone())
+                .or_else(|| self.restored.iter().find(|t| &t.path == path).map(|t| t.title.clone()))
+                .unwrap_or_else(|| path.rsplit('/').next().unwrap_or(path).into());
+            let title =
+                if self.tab_order.iter().filter(|p| p.rsplit('/').next() == path.rsplit('/').next()).count()
+                    > 1
+                    || self.tabs.iter().filter(|t| t.document.title == title).count() > 1
+                {
+                    path.clone()
+                } else {
+                    title
+                };
+            let dirty = loaded.is_some_and(|(_, t)| Self::dirty(t, cx));
+            let selected = loaded.is_some_and(|(i, _)| i == self.active);
+            let open = path.clone();
+            let close = path.clone();
             tabs = tabs.child(
                 div()
-                    .id(("tab", index))
+                    .id(("tab", ordinal))
                     .role(Role::Tab)
-                    .aria_label(title.clone())
-                    .aria_selected(index == self.active)
-                    .accessibility_id(format!("workspace.tab.{}", tab.document.path))
+                    .aria_label(format!("{title}{}", if dirty { " •" } else { "" }))
+                    .aria_selected(selected)
+                    .accessibility_id(format!("workspace.tab.{path}"))
+                    .flex()
+                    .gap_2()
+                    .items_center()
                     .flex_shrink_0()
                     .px_4()
                     .py_3()
                     .cursor_pointer()
-                    .bg(if index == self.active { theme.normal_fill() } else { theme.background })
-                    .child(title)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.activate(index, None, window, cx);
-                    })),
+                    .bg(if selected { theme.normal_fill() } else { theme.background })
+                    .child(format!("{title}{}", if dirty { " •" } else { "" }))
+                    .child(
+                        div()
+                            .id(("close-tab", ordinal))
+                            .role(Role::Button)
+                            .aria_label(format!("Close {path}"))
+                            .text_color(theme.secondary)
+                            .child("×")
+                            .on_click(cx.listener(move |this, _, w, cx| {
+                                this.close_path(&close, w, cx);
+                                cx.stop_propagation();
+                            })),
+                    )
+                    .on_click(cx.listener(move |this, _, w, cx| this.open_file(open.clone(), w, cx))),
             );
         }
         let mut navigation = div().flex().items_center().gap_4().px_4().py_2().text_sm();
@@ -145,9 +170,15 @@ impl Render for Workspace {
                     .cursor_pointer()
                     .child("Reset layout")
                     .on_click(cx.listener(|this, _, _, cx| {
+                        this.sidebar_width = 232.;
+                        this.context_width = 280.;
                         this.layout = cx.new(|_| gpui_kit::base::ResizableState::default());
                         this.context_layout = cx.new(|_| gpui_kit::base::ResizableState::default());
+                        for saved in &mut this.restored {
+                            saved.split_width = None;
+                        }
                         for tab in &mut this.tabs {
+                            tab.split_width = None;
                             tab.split = cx.new(|_| gpui_kit::base::ResizableState::default());
                         }
                         cx.notify();
@@ -240,7 +271,12 @@ impl Render for Workspace {
                     let pane =
                         div().flex_1().min_w_0().h_full().p_5().child(gpui_kit::base::Textarea::new(&editor));
                     if view == View::Split {
-                        split = split.child(resizable_panel().child(pane));
+                        let panel = resizable_panel().child(pane);
+                        split = split.child(if let Some(width) = tab.split_width {
+                            panel.size(px(width))
+                        } else {
+                            panel
+                        });
                     } else {
                         working = working.child(pane);
                     }
@@ -252,7 +288,8 @@ impl Render for Workspace {
                         gpui_omarchy::markdown("reading", source.clone(), window, cx)
                     };
                     let pane = div()
-                        .id("reading-scroll")
+                        .id(("reading-scroll", self.active))
+                        .track_scroll(&tab.reading_scroll)
                         .flex_1()
                         .min_w_0()
                         .h_full()
@@ -307,7 +344,7 @@ impl Render for Workspace {
                     .child(
                         resizable_panel()
                             .flex_none()
-                            .size(px(280.))
+                            .size(px(self.context_width))
                             .size_range(px(180.)..px(520.))
                             .child(context::render(self, cx)),
                     ),
@@ -321,7 +358,7 @@ impl Render for Workspace {
                 .child(
                     resizable_panel()
                         .flex_none()
-                        .size(px(232.))
+                        .size(px(self.sidebar_width))
                         .size_range(px(140.)..px(480.))
                         .child(sidebar),
                 )
@@ -382,6 +419,9 @@ impl Render for Workspace {
                             .child(status),
                     ),
             );
+        if let Some(notice) = &self.session_notice {
+            surface = surface.child(div().p_2().text_sm().text_color(theme.danger).child(notice.clone()));
+        }
         if self.palette.is_some() {
             surface = surface.child(self.draw_palette(window, cx));
         }

@@ -25,6 +25,7 @@ mod motion;
 mod pdf_reader;
 pub mod scene;
 pub mod services;
+pub mod session;
 pub mod sim;
 pub mod view;
 pub mod vim;

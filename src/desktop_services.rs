@@ -72,6 +72,15 @@ impl Service {
 }
 
 impl WorkspaceServices for Service {
+    fn load_session(&self) -> Result<Option<lapis_desktop::session::Session>, String> {
+        let config = crate::config::config_path().ok_or("No configuration directory for workspace state")?;
+        crate::desktop_session::load(&self.ctx.vault.root, config.parent().unwrap())
+    }
+    fn save_session(&self, session: &lapis_desktop::session::Session) -> Result<(), String> {
+        let config = crate::config::config_path().ok_or("No configuration directory for workspace state")?;
+        crate::desktop_session::save(&self.ctx.vault.root, config.parent().unwrap(), session)
+    }
+
     fn directory(&self, rel: &str) -> Result<Vec<FileEntry>, String> {
         let directory = self.contained(rel)?;
         let mut entries = vec![];

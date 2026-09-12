@@ -8,6 +8,7 @@ mod backend;
 mod cli;
 mod config;
 mod desktop_services;
+mod desktop_session;
 mod envelope;
 mod error;
 mod hal;

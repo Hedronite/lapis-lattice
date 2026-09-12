@@ -507,3 +507,142 @@ fn resizing_sidebar_and_source_split_preserves_editor_and_selection(cx: &mut Tes
         })
         .unwrap();
 }
+
+struct SessionFixture {
+    session: crate::session::Session,
+    reads: std::sync::Mutex<Vec<String>>,
+}
+impl WorkspaceServices for SessionFixture {
+    fn directory(&self, _: &str) -> Result<Vec<FileEntry>, String> {
+        Ok(vec![])
+    }
+    fn load_session(&self) -> Result<Option<crate::session::Session>, String> {
+        Ok(Some(self.session.clone()))
+    }
+    fn read(&self, path: &str) -> Result<Document, String> {
+        self.reads.lock().unwrap().push(path.into());
+        Fixture { reject_save: false, indexed: false.into() }.read(path)
+    }
+    fn save(&self, _: &Document, _: &str) -> Result<Document, String> {
+        Err("unused fixture save".into())
+    }
+    fn save_copy(&self, d: &Document, text: &str) -> Result<Document, String> {
+        self.save(d, text)
+    }
+    fn search(&self, _: &str) -> Result<SearchPage, String> {
+        Err("unused search".into())
+    }
+    fn reindex(&self, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn build_index(&self) -> Result<u64, String> {
+        Ok(0)
+    }
+}
+#[gpui_kit::test]
+fn session_restore_is_lazy_clamps_changed_text_and_preserves_tab_order(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::base::init(cx);
+        init_workspace(cx);
+        gpui_omarchy::Theme::tokyo_night().apply(cx);
+    });
+    let mut first = crate::session::Tab::new("first.md".into());
+    first.view = View::Split;
+    first.selection = [100, 100];
+    first.split_width = Some(350.);
+    let service = Arc::new(SessionFixture {
+        session: crate::session::Session {
+            tabs: vec![
+                first,
+                crate::session::Tab::new("second.md".into()),
+                crate::session::Tab::new("missing.md".into()),
+            ],
+            active: Some("first.md".into()),
+            sidebar_width: 300.,
+            context_width: 240.,
+            context: true,
+            ..Default::default()
+        },
+        reads: Default::default(),
+    });
+    let services = service.clone();
+    let handle = cx.add_window(move |w, cx| Workspace::new(services, w, cx));
+    handle.update(cx, |this, w, cx| this.restore_session(None, w, cx)).unwrap();
+    cx.run_until_parked();
+    assert_eq!(*service.reads.lock().unwrap(), vec!["first.md"]);
+    let mut visual = VisualTestContext::from_window(handle.into(), cx);
+    visual.update(|w, cx| {
+        w.render_frame(cx);
+        w.render_frame(cx);
+    });
+    handle
+        .read_with(cx, |this, cx| {
+            assert_eq!(this.layout.read(cx).sizes()[0], gpui_kit::px(300.));
+            assert_eq!(this.context_layout.read(cx).sizes()[1], gpui_kit::px(240.));
+            assert_eq!(this.tabs[0].split.read(cx).sizes()[0], gpui_kit::px(350.));
+        })
+        .unwrap();
+
+    handle
+        .read_with(cx, |this, cx| {
+            assert_eq!(this.tabs.len(), 1);
+            assert!(this.tabs[0].view == View::Split);
+            assert_eq!(this.tabs[0].editor.read(cx).selected_range(), 15..15);
+            assert_eq!(this.sidebar_width, 300.);
+            assert!(this.context);
+            assert_eq!(
+                this.session_snapshot(cx).tabs.iter().map(|t| t.path.as_str()).collect::<Vec<_>>(),
+                vec!["first.md", "second.md", "missing.md"]
+            );
+        })
+        .unwrap();
+    handle.update(cx, |this, w, cx| this.open_file("second.md".into(), w, cx)).unwrap();
+    cx.run_until_parked();
+    assert_eq!(*service.reads.lock().unwrap(), vec!["first.md", "second.md"]);
+    handle.update(cx, |this, w, cx| this.open_file("missing.md".into(), w, cx)).unwrap();
+    cx.run_until_parked();
+    handle
+        .read_with(cx, |this, _| {
+            assert_eq!(this.tabs[this.active].document.path, "second.md");
+            assert!(this.error);
+            assert!(this.tab_order.contains(&"missing.md".into()));
+        })
+        .unwrap();
+    handle.update(cx, |this, w, cx| this.close_path("missing.md", w, cx)).unwrap();
+    handle.update(cx, |this, w, cx| this.close_path("first.md", w, cx)).unwrap();
+    assert_eq!(
+        handle.read_with(cx, |this, _| this.tabs[this.active].document.path.clone()).unwrap(),
+        "second.md"
+    );
+
+    handle
+        .read_with(cx, |this, cx| {
+            assert_eq!(this.session_snapshot(cx).tabs.len(), 1);
+            assert_eq!(this.session_snapshot(cx).active.as_deref(), Some("second.md"));
+        })
+        .unwrap();
+}
+#[gpui_kit::test]
+fn closing_loaded_tab_can_activate_lazy_neighbor_and_dirty_tabs_stay(cx: &mut TestAppContext) {
+    let handle = setup(cx);
+    handle
+        .update(cx, |this, w, cx| {
+            this.tab_order.push("neighbor.md".into());
+            this.restored.push(crate::session::Tab::new("neighbor.md".into()));
+            this.tabs[0].editor.update(cx, |s, cx| s.replace("dirty ", w, cx));
+            this.close_path("fixture.md", w, cx);
+            assert_eq!(this.tabs.len(), 1);
+            assert_eq!(this.tab_order.len(), 2);
+            this.close_tab(true, cx);
+            this.focus_active(w, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    handle
+        .read_with(cx, |this, cx| {
+            assert_eq!(this.tabs.len(), 1);
+            assert_eq!(this.tabs[0].document.path, "neighbor.md");
+            assert_eq!(this.session_snapshot(cx).tabs.len(), 1);
+        })
+        .unwrap();
+}

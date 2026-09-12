@@ -87,6 +87,15 @@ impl PdfReader {
             show_text: false,
         }
     }
+    pub fn position(&self) -> (u32, f32) {
+        (self.page, self.zoom)
+    }
+    pub fn restore_position(&mut self, page: u32, zoom: f32, window: &mut Window, cx: &mut Context<Self>) {
+        self.page = page;
+        self.zoom = zoom.clamp(0.25, 4.);
+        self.page_input.update(cx, |s, cx| s.set_value((page.saturating_add(1)).to_string(), window, cx));
+        cx.notify();
+    }
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
     }
