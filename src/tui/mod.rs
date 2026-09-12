@@ -65,14 +65,24 @@ pub async fn run(ctx: Ctx) -> Result<()> {
 
 fn ui_loop(app: &mut App, term: &mut DefaultTerminal) -> Result<()> {
     let mut last_health = Instant::now();
+    let mut redraw = true;
+    let mut status_visible = false;
     while !app.quit {
-        app.drain();
-        app.pointer_tick();
+        redraw |= app.drain();
+        redraw |= app.pointer_tick();
         if last_health.elapsed() > Duration::from_secs(30) {
             app.poll_health();
             last_health = Instant::now();
         }
-        term.draw(|f| app.draw(f)).map_err(|e| LapisError::Internal(format!("draw: {e}")))?;
+        // Keep idle notes quiet. Input, asynchronous results and drag scrolling
+        // invalidate the frame; the transient status has its own expiry.
+        let show_status = !app.status.is_empty() && app.status_at.elapsed() < Duration::from_secs(8);
+        redraw |= show_status != status_visible;
+        status_visible = show_status;
+        if redraw {
+            term.draw(|f| app.draw(f)).map_err(|e| LapisError::Internal(format!("draw: {e}")))?;
+            redraw = false;
+        }
         if event::poll(Duration::from_millis(60)).map_err(|e| LapisError::Internal(e.to_string()))? {
             match event::read().map_err(|e| LapisError::Internal(e.to_string()))? {
                 Event::Key(k) => app.key(k, term),
@@ -80,6 +90,7 @@ fn ui_loop(app: &mut App, term: &mut DefaultTerminal) -> Result<()> {
                 Event::Paste(text) => app.paste(text),
                 _ => {}
             }
+            redraw = true;
         }
     }
     Ok(())

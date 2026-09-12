@@ -777,10 +777,12 @@ impl App {
 
     // ------------------------------------------------------------- messages
 
-    pub(crate) fn drain(&mut self) {
+    pub(crate) fn drain(&mut self) -> bool {
+        let mut changed = false;
         // A burst of genuine external edits must also leave time for input.
         for _ in 0..128 {
             let Ok(m) = self.rx.try_recv() else { break };
+            changed = true;
             match m {
                 Msg::Search(seq, r) => {
                     if let Some(Overlay::Palette(p)) = self.overlay.as_mut()
@@ -884,6 +886,7 @@ impl App {
                 }
             }
         }
+        changed
     }
 }
 

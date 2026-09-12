@@ -73,13 +73,15 @@ fn select_word(text: &mut TextArea<'_>) {
 }
 
 impl App {
-    pub(crate) fn pointer_tick(&mut self) {
+    pub(crate) fn pointer_tick(&mut self) -> bool {
+        let mut changed = false;
         if let Some((event, at)) = self.pointer.last_motion
             && matches!(self.pointer.drag, Some(Drag::Preview))
             && at.elapsed() >= Duration::from_millis(50)
             && !self.regions.preview.inner(Margin::new(1, 1)).contains(Position::new(event.column, event.row))
         {
             self.drag_preview(event);
+            changed = true;
         }
         if let Some((event, at)) = self.pointer.last_motion
             && matches!(self.pointer.drag, Some(Drag::Editor))
@@ -89,8 +91,10 @@ impl App {
             let area = inner(&t.text, self.regions.editor);
             if !area.contains(Position::new(event.column, event.row)) {
                 self.drag_editor(event);
+                changed = true;
             }
         }
+        changed
     }
 
     fn drag_preview(&mut self, m: MouseEvent) {

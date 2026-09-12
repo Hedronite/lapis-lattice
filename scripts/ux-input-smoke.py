@@ -170,6 +170,26 @@ results.append({'case':'mouse-replace-undo', 'body':after,
                 'undo_matches':undone=='anchor\nsecond line\n'})
 s.close()
 
+# Idle redraw suppression must still expire status and drive edge scrolling.
+s = Session('idle-expiry-and-edge-scroll', remote=True, filename='Scroll.yml',
+            content=''.join(f'line-{i:03d}\n' for i in range(100)))
+s.drain(8.2)
+expired = 'Space leader' not in screen_text(s.raw)
+s.send(b'\x1b[<0;34;3M')
+s.send(b'\x1b[<32;40;31M', .7)
+s.send(b'\x1b[<0;40;31m')
+s.send(b' lc')
+copies = re.findall(rb'\x1b\]52;c;([^\x07]*)\x07', s.raw)
+first_copy = base64.b64decode(copies[-1]) if copies else b''
+s.drain(.3)
+s.send(b' lc')
+copies = re.findall(rb'\x1b\]52;c;([^\x07]*)\x07', s.raw)
+second_copy = base64.b64decode(copies[-1]) if copies else b''
+results.append({'case':'idle-expiry-and-edge-scroll', 'status_expired':expired,
+                'selection_scrolled':b'line-030' in first_copy,
+                'release_stopped_scroll':bool(first_copy) and first_copy==second_copy})
+s.close()
+
 # Preview text is copied through OSC 52 in a simulated SSH environment;
 # this verifies dispatch/content without overwriting the runner's OS clipboard.
 s = Session('preview-copy', remote=True)
