@@ -146,6 +146,13 @@ impl Backend {
         }
     }
 
+    pub fn graph_snapshot(&self) -> Result<lapis_lattice::GraphSnapshot> {
+        match self {
+            Backend::Embedded(engine) => lock(engine).graph_snapshot().map_err(Into::into),
+            Backend::Http(_) => Err(LapisError::Usage("Whole-workspace graph snapshots are unavailable from the configured HTTP backend; note links and tree retrieval remain available".into())),
+        }
+    }
+
     /// Where reads come from: the sqlite file, or the lattice URL.
     pub fn source(&self) -> String {
         match self {
@@ -365,6 +372,16 @@ impl Backend {
                     embed_dim: h.extra.get("embed_dim").and_then(Value::as_u64).map(|n| n as u32),
                     graph: Graph { built: true, edges: h.edges, dangling_links: h.dangling_links },
                 })
+            }
+        }
+    }
+
+    /// Explicit embedded full-vault rebuild. HTTP retains its own index lifecycle.
+    pub async fn reindex_all(&self) -> Result<lapis_lattice::IndexReport> {
+        match self {
+            Backend::Embedded(engine) => lock(engine).reindex().map_err(LapisError::from),
+            Backend::Http(_) => {
+                Err(LapisError::Usage("Full indexing is managed by the configured HTTP service".into()))
             }
         }
     }

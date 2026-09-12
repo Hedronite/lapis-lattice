@@ -156,49 +156,6 @@ fn brand_role(p: &Palette, role: &str) -> Color {
     }
 }
 
-/// Themes installed on this machine, via `omarchy-theme-list`.
-/// Empty when the tool is absent — resolved on `PATH`, never a recorded
-/// `/nix/store/...` path, which changes on every Omarchy version bump.
-pub fn theme_list() -> Vec<String> {
-    std::process::Command::new("omarchy-theme-list")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Ask Omarchy to switch. Fails open: a missing or unhappy binary leaves the
-/// current theme alone and returns the reason for the status line, so the user
-/// is never left half-styled.
-pub fn theme_set(name: &str) -> Result<(), String> {
-    match std::process::Command::new("omarchy-theme-set").arg(name).output() {
-        Ok(o) if o.status.success() => Ok(()),
-        Ok(o) => {
-            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
-            Err(if err.is_empty() { format!("omarchy-theme-set {name} failed") } else { err })
-        }
-        Err(e) => Err(format!("omarchy-theme-set unavailable: {e}")),
-    }
-}
-
-/// The theme after `current`, wrapping around. `None` when Omarchy's tools are
-/// not here, which is what tells the caller to cycle the brand palettes instead.
-pub fn next_theme(current: &str) -> Option<String> {
-    let list = theme_list();
-    if list.is_empty() {
-        return None;
-    }
-    let i = list.iter().position(|t| t.eq_ignore_ascii_case(current)).map(|i| (i + 1) % list.len());
-    Some(list[i.unwrap_or(0)].clone())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,15 +256,5 @@ mod tests {
         assert!(load(Path::new("/nonexistent/omarchy/current")).is_none());
         // A directory with no colors.toml is also not an Omarchy theme.
         assert!(load(&PathBuf::from(env!("CARGO_MANIFEST_DIR"))).is_none());
-    }
-
-    /// Fails open: with no Omarchy tools on PATH there is nothing to hop to,
-    /// which is the signal to cycle the brand palettes instead.
-    #[test]
-    fn theme_tools_fail_open() {
-        if theme_list().is_empty() {
-            assert!(next_theme("hedron").is_none());
-            assert!(theme_set("hedron").is_err(), "a missing binary is an error, not a silent success");
-        }
     }
 }

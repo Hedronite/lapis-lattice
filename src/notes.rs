@@ -118,6 +118,15 @@ pub struct Note {
 }
 
 pub fn read(root: &Path, rel: &str) -> Result<Note> {
+    read_impl(root, rel, false)
+}
+
+/// Read-only presentation for terminal references; CLI/MCP continue using `read`.
+pub fn read_for_tui(root: &Path, rel: &str) -> Result<Note> {
+    read_impl(root, rel, true)
+}
+
+fn read_impl(root: &Path, rel: &str, display: bool) -> Result<Note> {
     let (path, abs) = resolve(root, rel)?;
     let kind = kind_of(&path);
     let meta = std::fs::metadata(&abs)?;
@@ -129,7 +138,12 @@ pub fn read(root: &Path, rel: &str) -> Result<Note> {
         // Read-through with pdf-extract (pure Rust, MIT). The lattice's
         // tome_indexer.py owns PDF *indexing*; this is the on-demand text
         // for `read` / MCP read_note, never a second crawler.
-        let (body, pages) = pdf_text(&abs).map_err(|e| LapisError::Usage(format!("{path}: pdf: {e}")))?;
+        let (body, pages) = if display {
+            pdf_extract::extract_text_by_pages(&abs).map(|pages| (display_pdf_pages(&pages), pages.len()))
+        } else {
+            pdf_text(&abs)
+        }
+        .map_err(|e| LapisError::Usage(format!("{path}: pdf: {e}")))?;
         let hash = std::fs::read(&abs).map(|b| content_hash(&b)).unwrap_or_default();
         return Ok(Note {
             title: stem_of(&path),
@@ -162,6 +176,13 @@ pub fn read(root: &Path, rel: &str) -> Result<Note> {
         .or_else(|| if kind == Kind::Markdown { first_heading(&body) } else { None })
         .unwrap_or_else(|| stem_of(&path));
     let tags = hal::tags_from_hal(&hal);
+    let body = if display && kind == Kind::Html {
+        // Keep logical lines unwrapped; the reader owns terminal cell geometry.
+        let text = lapis_desktop::html::to_text(&body, usize::MAX);
+        if text.trim().is_empty() { "This HTML file has no readable static content.".into() } else { text }
+    } else {
+        body
+    };
 
     Ok(Note { path, kind, title, hal, hal_valid, hal_error, tags, body, size, updated_at, hash, pages: None })
 }
@@ -296,6 +317,26 @@ pub fn pdf_text(abs: &Path) -> std::result::Result<(String, usize), pdf_extract:
     let n = pages.len();
     let body = pages.iter().map(|p| p.trim_end()).collect::<Vec<_>>().join("\n\n");
     Ok((body.trim().to_string(), n))
+}
+
+fn display_pdf_pages(pages: &[String]) -> String {
+    if pages.is_empty() {
+        return "This PDF has no readable pages.".into();
+    }
+    pages
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            let text = text.trim();
+            let content = if text.is_empty() {
+                "No extractable text on this page. Read the page image in the desktop workspace."
+            } else {
+                text
+            };
+            format!("Page {} of {}\n\n{content}", index + 1, pages.len())
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n────────────────────\n\n")
 }
 
 /// First H1 text in a Markdown body, via pulldown-cmark's event stream.
@@ -436,6 +477,33 @@ mod tests {
             objs.len() + 1
         ));
         out.into_bytes()
+    }
+
+    #[test]
+    fn terminal_references_show_pages_without_changing_cli_content() {
+        let root = tmp_vault();
+        for (name, content) in [("text.pdf", "Literal **stars**"), ("empty.pdf", "")] {
+            std::fs::write(root.join(name), tiny_pdf(content)).unwrap();
+            let cli = read(&root, name).unwrap();
+            let tui = read_for_tui(&root, name).unwrap();
+            assert_eq!(cli.body, content);
+            assert_eq!(tui.hash, cli.hash);
+            assert_eq!(tui.pages, Some(1));
+            assert!(tui.body.starts_with("Page 1 of 1\n\n"));
+            if content.is_empty() {
+                assert!(tui.body.contains("No extractable text"));
+            } else {
+                assert!(tui.body.ends_with(content));
+            }
+        }
+        let html = "<h1>Read &amp; retain</h1><p>A <b>reference</b>.</p><script>privateScript()</script><pre>  x: 1\n  y: 2</pre>";
+        std::fs::write(root.join("reference.html"), html).unwrap();
+        assert_eq!(read(&root, "reference.html").unwrap().body, html);
+        let body = read_for_tui(&root, "reference.html").unwrap().body;
+        assert!(body.contains("Read & retain"));
+        assert!(body.contains("  x: 1\n  y: 2"));
+        assert!(!body.contains("privateScript"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

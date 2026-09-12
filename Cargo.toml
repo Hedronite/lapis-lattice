@@ -18,9 +18,11 @@ path = "src/main.rs"
 [features]
 default = []
 # GPUI desktop shell. Off by default: `lapis desktop` then reports it is not built in.
-desktop = ["lapis-desktop/gpui"]
+desktop = ["lapis-desktop/gpui", "dep:pdfium-render"]
 
 [dependencies]
+pdfium-render = { version = "=0.9.4", optional = true, default-features = false, features = ["pdfium_7881"] }
+base64 = "0.22"
 lapis-desktop = { path = "crates/lapis-desktop" }
 lapis-lattice = { path = "crates/lapis-lattice", version = "0.4.1" }
 clap = { version = "4", features = ["derive"] }
@@ -31,7 +33,8 @@ notify = "8"
 pdf-extract = "0.12"
 pulldown-cmark = { version = "0.13", default-features = false }
 ratatui = "0.30"
-ratatui-textarea = { version = "0.9", features = ["search"] }
+# Upstream #30 exposes the renderer's scroll and Unicode coordinate mapping.
+ratatui-textarea = { git = "https://github.com/ratatui/ratatui-textarea", rev = "bf06674937cbdde4b00d73b3255d1d49d0bf5fc0", features = ["search"] }
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 rmcp = { version = "3", features = ["server", "transport-io", "macros"] }
@@ -39,7 +42,7 @@ schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "time"] }
 toml = "1"
 yaml_serde = "0.10"
 

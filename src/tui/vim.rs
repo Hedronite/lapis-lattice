@@ -51,7 +51,7 @@ pub enum Action {
     /// `gt` / `gT`
     NextTab,
     PrevTab,
-    /// Space in NORMAL: hand over to the leader.
+    /// Space in NORMAL/VISUAL: hand over to the leader without editing selection.
     Leader,
     /// `?` in NORMAL
     Help,
@@ -64,11 +64,23 @@ pub struct Prompt {
     pub text: String,
 }
 
+/// Logical Vim endpoints differ from the textarea's exclusive selection edges.
+/// Keeping them separately prevents V motions from starting on the following row
+/// and makes the visible range authoritative for keyboard and system clipboard.
+#[derive(Clone, Copy)]
+struct VisualSelection {
+    anchor: (usize, usize),
+    cursor: (usize, usize),
+    linewise: bool,
+}
+
 pub struct Vim {
     pub mode: Mode,
     pending: Option<char>,
     pub prompt: Option<Prompt>,
+    pub(crate) selection_exclusive: bool,
     count: usize,
+    visual: Option<VisualSelection>,
 }
 
 impl Default for Vim {
@@ -79,7 +91,21 @@ impl Default for Vim {
 
 impl Vim {
     pub fn new() -> Self {
-        Self { mode: Mode::Normal, pending: None, prompt: None, count: 0 }
+        Self {
+            mode: Mode::Normal,
+            pending: None,
+            prompt: None,
+            selection_exclusive: false,
+            count: 0,
+            visual: None,
+        }
+    }
+
+    pub(crate) fn clear_pending(&mut self) {
+        self.visual = None;
+        self.pending = None;
+        self.count = 0;
+        self.prompt = None;
     }
 
     pub fn cursor_style(&self) -> Style {
@@ -106,6 +132,86 @@ impl Vim {
 
     /// Feed one key. Returns the action for the app.
     pub fn input(&mut self, input: Input, ta: &mut TextArea<'_>) -> Action {
+        if self.mode != Mode::Visual {
+            self.visual = None;
+        }
+        let motion = if self.prompt.is_some() {
+            input.key == Key::Enter
+        } else {
+            matches!(
+                input.key,
+                Key::Esc
+                    | Key::Left
+                    | Key::Right
+                    | Key::Up
+                    | Key::Down
+                    | Key::Home
+                    | Key::End
+                    | Key::Backspace
+                    | Key::PageUp
+                    | Key::PageDown
+            ) || matches!(input.key, Key::Char(c) if "hjklweb0^$Gg{}nN123456789".contains(c) && !input.ctrl)
+        };
+        let restore = self.visual.filter(|_| motion);
+        if let Some(selection) = restore {
+            ta.cancel_selection();
+            Self::jump(ta, selection.cursor);
+        }
+        let action = self.input_inner(input, ta);
+        if self.mode == Mode::Visual {
+            if let Some(mut selection) = restore {
+                selection.cursor = (ta.cursor().0, ta.cursor().1);
+                self.visual = Some(selection);
+                self.draw_visual(ta);
+            }
+        } else {
+            self.visual = None;
+        }
+        action
+    }
+
+    fn jump(ta: &mut TextArea<'_>, pos: (usize, usize)) {
+        ta.move_cursor(CursorMove::Jump(
+            pos.0.min(u16::MAX as usize) as u16,
+            pos.1.min(u16::MAX as usize) as u16,
+        ));
+    }
+
+    fn draw_visual(&self, ta: &mut TextArea<'_>) {
+        let Some(selection) = self.visual else { return };
+        let low = selection.anchor.min(selection.cursor);
+        let high = selection.anchor.max(selection.cursor);
+        let (start, end) = if selection.linewise {
+            (
+                (low.0, 0),
+                if high.0 + 1 < ta.lines().len() {
+                    (high.0 + 1, 0)
+                } else {
+                    (high.0, ta.lines()[high.0].chars().count())
+                },
+            )
+        } else {
+            (low, (high.0, (high.1 + 1).min(ta.lines()[high.0].chars().count())))
+        };
+        ta.cancel_selection();
+        let (anchor, cursor) = if selection.anchor <= selection.cursor { (start, end) } else { (end, start) };
+        Self::jump(ta, anchor);
+        ta.start_selection();
+        Self::jump(ta, cursor);
+    }
+
+    fn begin_visual(&mut self, ta: &mut TextArea<'_>, linewise: bool) {
+        self.selection_exclusive = true;
+        self.visual = Some(VisualSelection {
+            anchor: (ta.cursor().0, ta.cursor().1),
+            cursor: (ta.cursor().0, ta.cursor().1),
+            linewise,
+        });
+        self.mode = Mode::Visual;
+        self.draw_visual(ta);
+    }
+
+    fn input_inner(&mut self, input: Input, ta: &mut TextArea<'_>) -> Action {
         if input.key == Key::Null {
             return Action::None;
         }
@@ -441,13 +547,11 @@ impl Vim {
                 return Action::None;
             }
             Input { key: Key::Char('v'), ctrl: false, .. } if self.mode == Mode::Normal => {
-                ta.start_selection();
-                self.mode = Mode::Visual;
+                self.begin_visual(ta, false);
                 return Action::None;
             }
             Input { key: Key::Char('V'), ctrl: false, .. } if self.mode == Mode::Normal => {
-                Self::select_line(ta);
-                self.mode = Mode::Visual;
+                self.begin_visual(ta, true);
                 return Action::None;
             }
             Input { key: Key::Esc, .. } => {
@@ -478,7 +582,9 @@ impl Vim {
                 }
                 return Action::None;
             }
-            Input { key: Key::Char(' '), .. } if self.mode == Mode::Normal => return Action::Leader,
+            Input { key: Key::Char(' '), .. } if matches!(self.mode, Mode::Normal | Mode::Visual) => {
+                return Action::Leader;
+            }
             Input { key: Key::Char('?'), .. } if self.mode == Mode::Normal => return Action::Help,
             Input { key: Key::Char('s'), ctrl: true, .. } => return Action::Save,
             Input { key: Key::Char('l'), ctrl: true, .. } => return Action::ToggleCheckbox,
@@ -512,7 +618,9 @@ impl Vim {
                 return Action::None;
             }
             Input { key: Key::Char('y'), ctrl: false, .. } if self.mode == Mode::Visual => {
-                ta.move_cursor(CursorMove::Forward);
+                if !self.selection_exclusive {
+                    ta.move_cursor(CursorMove::Forward);
+                }
                 let start = ta.selection_range().map(|(s, _)| s);
                 ta.copy();
                 if let Some((r, c)) = start {
@@ -522,13 +630,17 @@ impl Vim {
                 return Action::None;
             }
             Input { key: Key::Char('d'), ctrl: false, .. } if self.mode == Mode::Visual => {
-                ta.move_cursor(CursorMove::Forward);
+                if !self.selection_exclusive {
+                    ta.move_cursor(CursorMove::Forward);
+                }
                 ta.cut();
                 self.mode = Mode::Normal;
                 return Action::None;
             }
             Input { key: Key::Char('c'), ctrl: false, .. } if self.mode == Mode::Visual => {
-                ta.move_cursor(CursorMove::Forward);
+                if !self.selection_exclusive {
+                    ta.move_cursor(CursorMove::Forward);
+                }
                 ta.cut();
                 self.mode = Mode::Insert;
                 return Action::None;
@@ -678,6 +790,55 @@ mod tests {
         assert_eq!(v.input(esc(), &mut t), Action::Blur);
         assert_eq!(v.input(key(' '), &mut t), Action::Leader);
         assert_eq!(v.input(key('?'), &mut t), Action::Help);
+    }
+
+    #[test]
+    fn visual_line_motions_include_the_entire_last_line_in_both_directions() {
+        for keys in ["V G", "GVgg"] {
+            let mut v = Vim::new();
+            let mut t = ta("one\ntwo\nlast 漢字");
+            feed(&mut v, &mut t, &keys.replace(' ', ""));
+            assert_eq!(t.selection_range(), Some(((0, 0), (2, 7))));
+            assert_eq!(v.input(key(' '), &mut t), Action::Leader);
+            // App clipboard consumes exactly the displayed textarea range.
+            t.copy();
+            assert_eq!(t.yank_text(), "one\ntwo\nlast 漢字");
+            assert_eq!(t.lines(), ["one", "two", "last 漢字"]);
+        }
+    }
+
+    #[test]
+    fn visual_line_extension_and_contraction_use_logical_rows() {
+        let mut v = Vim::new();
+        let mut t = ta("one\ntwo\nthree\nfour");
+        feed(&mut v, &mut t, "jVj");
+        assert_eq!(t.selection_range(), Some(((1, 0), (3, 0))));
+        feed(&mut v, &mut t, "kk");
+        assert_eq!(t.selection_range(), Some(((0, 0), (2, 0))));
+        feed(&mut v, &mut t, "jy");
+        assert_eq!(t.yank_text(), "two\n");
+    }
+
+    #[test]
+    fn reverse_visual_characters_share_the_visible_range_with_cut_and_copy() {
+        for operation in ['y', 'd', 'c'] {
+            let mut v = Vim::new();
+            let mut t = ta("a漢字def");
+            feed(&mut v, &mut t, "3lvhh");
+            assert_eq!(t.selection_range(), Some(((0, 1), (0, 4))));
+            v.input(key(operation), &mut t);
+            assert_eq!(t.yank_text(), "漢字d");
+            assert_eq!(t.lines()[0], if operation == 'y' { "a漢字def" } else { "aef" });
+        }
+    }
+
+    #[test]
+    fn visual_line_paste_replaces_last_line() {
+        let mut v = Vim::new();
+        let mut t = ta("---\n# comment\ninvalid: [\n...");
+        feed(&mut v, &mut t, "VG");
+        assert!(super::super::paste::insert(&mut v, &mut t, "new\r\n  value"));
+        assert_eq!(t.lines(), ["new", "  value"]);
     }
 
     #[test]

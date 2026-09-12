@@ -19,12 +19,38 @@
 pub mod gitnexus;
 pub mod graph_data;
 pub mod html;
+pub mod live;
+mod motion;
+pub mod panes;
+#[cfg(feature = "gpui")]
+mod pdf_reader;
 pub mod scene;
+pub mod services;
+pub mod session;
 pub mod sim;
 pub mod view;
+pub mod vim;
 
 #[cfg(feature = "gpui")]
 mod window;
+
+#[cfg(feature = "gpui")]
+mod workspace;
+
+pub fn run_workspace(
+    opts: Options,
+    services: std::sync::Arc<dyn services::WorkspaceServices>,
+) -> Result<(), DesktopError> {
+    #[cfg(feature = "gpui")]
+    {
+        workspace::open(opts, services)
+    }
+    #[cfg(not(feature = "gpui"))]
+    {
+        let _ = (opts, services);
+        Err(DesktopError::NotBuilt(NOT_BUILT.into()))
+    }
+}
 
 use std::path::PathBuf;
 
@@ -115,7 +141,7 @@ mod tests {
 
     #[test]
     fn window_paints_shipped_draw_on_gpui_omarchy() {
-        let src = include_str!("window.rs");
+        let src = format!("{}{}", include_str!("window.rs"), include_str!("window/lifecycle.rs"));
         assert!(src.contains("key_action, paint"), "window consumes the view paint list");
         assert!(src.contains("gpui_omarchy::init"), "window is gpui-omarchy, not Zed-gpui");
         assert!(src.contains("Prim::Stroke"), "edges are strokes, not dot runs");
@@ -130,9 +156,9 @@ mod tests {
         assert!(src.contains("highlight"), "hover lights the neighbourhood");
         assert!(src.contains("show_dangling"), "dangling filter");
         assert!(src.contains("f-domain"), "domain filter");
-        assert!(src.contains("graph_data::global_live"), "default layout is the whole-vault snapshot");
+        assert!(src.contains("graph_snapshot()"), "default layout is the whole-vault snapshot");
         assert!(src.contains("layout: Layout::Global"), "global is the opening mode, not an ego ring");
-        assert!(src.contains("graph_data::local_live"), "local mode cuts the same snapshot");
+        assert!(src.contains("graph_data::within"), "local mode cuts the same snapshot");
         assert!(src.contains("f-layout") && src.contains("f-depth"), "layout and depth are reachable");
         assert!(src.contains("f-existing"), "existing-only filter");
         assert!(src.contains("f-orphans"), "orphans toggle");

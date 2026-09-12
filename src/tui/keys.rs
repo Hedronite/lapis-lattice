@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::DefaultTerminal;
 use ratatui_textarea::Input;
 
@@ -10,9 +10,8 @@ use crate::templates;
 use crate::write;
 use lapis_lattice::Mode as SearchMode;
 
-use super::app::{App, Focus, Overlay, PromptKind, Split, tab_label};
+use super::app::{App, Focus, Overlay, PromptKind, Split};
 use super::leader::{self, Cmd};
-use super::mouse::{self, Action as MouseAction, Target};
 use super::palette::{Item, Palette};
 use super::preview;
 use super::tags_view::Pick;
@@ -99,8 +98,24 @@ impl App {
             Cmd::CopyPath => {
                 if let Some(t) = self.tab() {
                     let rel = t.rel.clone();
-                    self.set_status(format!("path: {rel}"));
+                    self.copy_system(rel);
                 }
+            }
+            Cmd::CopySelection => self.copy_selection(false),
+            Cmd::CutSelection => self.copy_selection(true),
+            Cmd::PasteClipboard => self.paste_system(),
+            Cmd::ToggleMouse => {
+                self.mouse_capture = !self.mouse_capture;
+                let result = if self.mouse_capture {
+                    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)
+                } else {
+                    crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)
+                };
+                self.set_status(match result {
+                    Ok(()) if self.mouse_capture => "mouse capture on: drag to select text".into(),
+                    Ok(()) => "mouse capture off: terminal selection; Space z m restores capture".into(),
+                    Err(e) => format!("mouse capture: {e}"),
+                });
             }
             Cmd::Neighbors => {
                 self.show_neighbors = !self.show_neighbors;
@@ -111,6 +126,7 @@ impl App {
             Cmd::Hal => self.show_hal = !self.show_hal,
             Cmd::Tags => self.open_tags(),
             Cmd::Theme => self.next_theme(),
+            Cmd::FollowTheme => self.follow_host_theme(),
             Cmd::Buffers => {
                 if !self.tabs.is_empty() {
                     self.overlay = Some(Overlay::Buffers(self.active));
@@ -130,8 +146,9 @@ impl App {
             }
             Cmd::TabClose => self.close_tab(false),
             Cmd::Save => self.save(),
+            Cmd::SaveCopy => self.save_copy(),
             Cmd::Help => self.overlay = Some(Overlay::Help(0)),
-            Cmd::Quit => self.quit = true,
+            Cmd::Quit => self.request_quit(),
             Cmd::Refresh => {
                 let root = self.root();
                 let dirs: Vec<String> = self.tree.children.keys().cloned().collect();
@@ -151,6 +168,16 @@ impl App {
         if k.kind != KeyEventKind::Press && k.kind != KeyEventKind::Repeat {
             return;
         }
+        if self.too_small {
+            if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('q') {
+                self.request_quit();
+            }
+            return;
+        }
+        if k.code == KeyCode::F(6) {
+            self.run(Cmd::ToggleMouse, term);
+            return;
+        }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
 
@@ -161,9 +188,21 @@ impl App {
         // Editor prompt lines (/ and :) swallow everything.
         let in_prompt = self.focus == Focus::Editor && self.tab().is_some_and(|t| t.vim.prompt.is_some());
         if !in_prompt {
+            if ctrl && matches!(k.code, KeyCode::Char('c' | 'C')) {
+                self.copy_selection(false);
+                return;
+            }
+            if ctrl && matches!(k.code, KeyCode::Char('v' | 'V')) {
+                self.paste_system();
+                return;
+            }
+            if ctrl && matches!(k.code, KeyCode::Char('x' | 'X')) {
+                self.copy_selection(true);
+                return;
+            }
             match (ctrl, alt, k.code) {
                 (true, _, KeyCode::Char('q')) => {
-                    self.quit = true;
+                    self.request_quit();
                     return;
                 }
                 (true, _, KeyCode::Char('p')) => {
@@ -333,7 +372,7 @@ impl App {
                         && let Some(t) = self.tab_mut()
                     {
                         t.text.move_cursor(ratatui_textarea::CursorMove::Jump(*line as u16, 0));
-                        t.preview_scroll = *line as u16;
+                        t.reader.scroll = *line;
                     }
                     self.focus = Focus::Editor;
                 }
@@ -492,7 +531,7 @@ impl App {
         match k.code {
             KeyCode::Char(' ') => self.overlay = Some(Overlay::Leader(vec![])),
             KeyCode::Char('?') => self.overlay = Some(Overlay::Help(0)),
-            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('q') => self.request_quit(),
             KeyCode::Char('/') => self.overlay = Some(Overlay::Palette(Palette::new(""))),
             KeyCode::Char('g') => self.pending_g = true,
             KeyCode::Char('G') => self.sel = rows.len().saturating_sub(1),
@@ -554,29 +593,64 @@ impl App {
     }
 
     pub(crate) fn key_editor(&mut self, k: KeyEvent, term: &mut DefaultTerminal) {
+        let accepts_register =
+            self.tab().is_some_and(|t| t.vim.mode != vim::Mode::Insert && t.vim.prompt.is_none());
+        if accepts_register && !k.modifiers.contains(KeyModifiers::CONTROL) {
+            if self.clipboard_register == 1 {
+                self.clipboard_register = if matches!(k.code, KeyCode::Char('+' | '*')) { 2 } else { 0 };
+                return;
+            }
+            if k.code == KeyCode::Char('"') {
+                self.clipboard_register = 1;
+                return;
+            }
+            if self.clipboard_register == 2 && k.code == KeyCode::Char('p') {
+                self.clipboard_register = 0;
+                self.paste_system();
+                return;
+            }
+        }
+        if k.code == KeyCode::Esc {
+            self.clipboard_register = 0;
+        }
         let Some(t) = self.tabs.get_mut(self.active) else {
             self.focus = Focus::Sidebar;
             return;
         };
-        if t.readonly && t.vim.mode == vim::Mode::Normal {
+        if t.readonly && t.vim.prompt.is_none() {
             // Read-only buffers: navigation only.
-            if let KeyCode::Char('i' | 'a' | 'o' | 'O' | 'I' | 'A' | 'x' | 'd' | 'c' | 'p' | 'r' | 'R') =
-                k.code
+            if let KeyCode::Char(
+                'i' | 'a' | 'o' | 'O' | 'I' | 'A' | 'x' | 'd' | 'D' | 'c' | 'C' | 'p' | 'r' | 'R' | 'J' | 'u',
+            ) = k.code
             {
                 self.set_status("read-only buffer");
                 return;
             }
         }
-        let before = t.text.lines().len() + t.text.lines().iter().map(String::len).sum::<usize>();
-        let action = t.vim.input(key_input(k), &mut t.text);
-        let after = t.text.lines().len() + t.text.lines().iter().map(String::len).sum::<usize>();
-        if before != after
-            || matches!(t.vim.mode, vim::Mode::Insert | vim::Mode::Replace(_))
-                && !matches!(k.code, KeyCode::Esc)
-        {
-            t.dirty = t.dirty || before != after || matches!(k.code, KeyCode::Char(_));
+        if t.vim.prompt.is_none() {
+            let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+            let undo = k.code == KeyCode::Char('u')
+                && ((t.vim.mode != vim::Mode::Insert && !ctrl) || (t.vim.mode == vim::Mode::Insert && ctrl));
+            let redo = k.code == KeyCode::Char('r') && ctrl;
+            if undo || redo {
+                t.undo_edit(redo);
+                return;
+            }
         }
-        t.refresh_preview();
+        let before_cursor = t.text.cursor();
+        let was_yank = (t.vim.mode == vim::Mode::Visual && k.code == KeyCode::Char('y'))
+            || t.vim.mode == vim::Mode::Operator('y');
+        let action = t.vim.input(key_input(k), &mut t.text);
+        t.record_edit((before_cursor.0, before_cursor.1));
+        let copied = if was_yank && t.vim.mode == vim::Mode::Normal && self.clipboard_register == 2 {
+            Some(t.text.yank_text())
+        } else {
+            None
+        };
+        if let Some(payload) = copied {
+            self.clipboard_register = 0;
+            self.copy_system(payload);
+        }
         match action {
             Action::None => {}
             Action::Save => self.save(),
@@ -601,26 +675,42 @@ impl App {
             self.focus = Focus::Sidebar;
             return;
         };
-        let max = t.preview.len() as u16;
+        if k.code == KeyCode::Char('y') {
+            self.copy_selection(false);
+            return;
+        }
+        if t.reader.selecting() && !k.modifiers.contains(KeyModifiers::CONTROL) {
+            let movement = match k.code {
+                KeyCode::Char('h') | KeyCode::Left => Some((-1, 0)),
+                KeyCode::Char('l') | KeyCode::Right => Some((1, 0)),
+                KeyCode::Char('j') | KeyCode::Down => Some((0, 1)),
+                KeyCode::Char('k') | KeyCode::Up => Some((0, -1)),
+                _ => None,
+            };
+            if let Some((x, y)) = movement {
+                t.reader.move_selection(x, y, page as usize);
+                return;
+            }
+        }
         match k.code {
             KeyCode::Char(' ') => self.overlay = Some(Overlay::Leader(vec![])),
             KeyCode::Char('?') => self.overlay = Some(Overlay::Help(0)),
+            KeyCode::Esc if t.reader.selecting() => t.reader.clear_selection(),
             KeyCode::Esc => self.focus = if self.show_sidebar { Focus::Sidebar } else { Focus::Editor },
-            KeyCode::Char('j') | KeyCode::Down => {
-                t.preview_scroll = (t.preview_scroll + 1).min(max.saturating_sub(1))
-            }
-            KeyCode::Char('k') | KeyCode::Up => t.preview_scroll = t.preview_scroll.saturating_sub(1),
+            KeyCode::Char('v') => t.reader.begin_selection(),
+            KeyCode::Char('j') | KeyCode::Down => t.reader.scroll_by(1),
+            KeyCode::Char('k') | KeyCode::Up => t.reader.scroll_by(-1),
             KeyCode::Char('d') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                t.preview_scroll = (t.preview_scroll + page / 2).min(max.saturating_sub(1));
+                t.reader.scroll_by((page / 2) as isize)
             }
             KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                t.preview_scroll = t.preview_scroll.saturating_sub(page / 2);
+                t.reader.scroll_by(-((page / 2) as isize))
             }
-            KeyCode::PageDown => t.preview_scroll = (t.preview_scroll + page).min(max.saturating_sub(1)),
-            KeyCode::PageUp => t.preview_scroll = t.preview_scroll.saturating_sub(page),
-            KeyCode::Char('G') => t.preview_scroll = max.saturating_sub(1),
-            KeyCode::Char('g') => t.preview_scroll = 0,
-            KeyCode::Char('q') => self.quit = true,
+            KeyCode::PageDown => t.reader.scroll_by(page as isize),
+            KeyCode::PageUp => t.reader.scroll_by(-(page as isize)),
+            KeyCode::Char('G') => t.reader.end(),
+            KeyCode::Char('g') => t.reader.scroll = 0,
+            KeyCode::Char('q') => self.request_quit(),
             _ => {}
         }
     }
@@ -686,83 +776,6 @@ impl App {
                 }
             }
             _ => {}
-        }
-    }
-
-    // ---------------------------------------------------------------- mouse
-
-    pub(crate) fn mouse(&mut self, m: MouseEvent) {
-        let Some(action) = mouse::classify(&self.regions, &m) else { return };
-        match action {
-            MouseAction::Click(target) => {
-                if self.overlay.is_some() {
-                    return;
-                }
-                match target {
-                    Target::Sidebar { row } => {
-                        self.focus = Focus::Sidebar;
-                        let row = row + self.sidebar_scroll;
-                        let rows = self.tree.visible();
-                        if row < rows.len() {
-                            let was = self.sel;
-                            self.sel = row;
-                            if was == row {
-                                // second click opens / toggles
-                                let (_, e) = rows[row].clone();
-                                let root = self.root();
-                                if e.is_dir {
-                                    if !self.tree.expanded.remove(&e.rel) {
-                                        self.tree.load(&root, &e.rel);
-                                        self.tree.expanded.insert(e.rel);
-                                    }
-                                } else {
-                                    self.open_note(&e.rel);
-                                    self.tasks = None;
-                                }
-                            }
-                        }
-                    }
-                    Target::Tabs { x } => {
-                        let widths: Vec<usize> =
-                            self.tabs.iter().map(|t| tab_label(t).chars().count()).collect();
-                        if let Some(i) = mouse::tab_at(&widths, x) {
-                            self.active = i;
-                            self.focus = Focus::Editor;
-                        }
-                    }
-                    Target::Editor => {
-                        self.focus = if self.tasks.is_some() { Focus::Tasks } else { Focus::Editor };
-                    }
-                    Target::Preview => self.focus = Focus::Preview,
-                    Target::Bottom { row } => {
-                        if self.show_neighbors
-                            && let Some(p) = self.neighbors.get(row).and_then(|n| n.path.clone())
-                        {
-                            self.open_note(&p);
-                        }
-                    }
-                }
-            }
-            MouseAction::Scroll { target, down } => match target {
-                Target::Sidebar { .. } => {
-                    let n = self.tree.visible().len();
-                    self.sel = mouse::scroll(self.sel, n, down, 3);
-                }
-                Target::Preview => {
-                    if let Some(t) = self.tab_mut() {
-                        let max = t.preview.len();
-                        t.preview_scroll = mouse::scroll(t.preview_scroll as usize, max, down, 3) as u16;
-                    }
-                }
-                Target::Editor => {
-                    if let Some(tv) = self.tasks.as_mut() {
-                        if down { tv.down() } else { tv.up() }
-                    } else if let Some(t) = self.tab_mut() {
-                        t.text.scroll((if down { 3 } else { -3 }, 0));
-                    }
-                }
-                Target::Tabs { .. } | Target::Bottom { .. } => {}
-            },
         }
     }
 }

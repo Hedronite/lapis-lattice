@@ -7,11 +7,16 @@ license = "MIT"
 
 [features]
 default = []
+# Headless native-widget integration checks, opt-in so CLI CI stays lightweight.
+gui-tests = ["gpui", "gpui-kit/test-support"]
 # Real window via gpui-omarchy (not Zed gpui 0.2). Heavy; everything else compiles without it.
 # Painting primitives (`canvas`, `paint_quad`) come through gpui-kit's `gpui` re-export.
-gpui = ["dep:gpui-omarchy", "dep:gpui-kit"]
+gpui = ["dep:gpui-omarchy", "dep:gpui-kit", "dep:image"]
 
 [dependencies]
+image = { version = "0.25", optional = true, default-features = false }
+pulldown-cmark = { version = "0.13", default-features = false }
+unicode-segmentation = "1.13.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 gpui-omarchy = { version = "0.1.2", optional = true }

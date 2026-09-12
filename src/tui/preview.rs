@@ -7,6 +7,49 @@ use ratatui::text::{Line, Span};
 
 use super::theme;
 
+/// Source-like readers retain every character, including YAML document markers
+/// and literal Markdown-looking text in extracted PDFs.
+pub fn for_file(path: &str, text: &str) -> Vec<Line<'static>> {
+    match crate::notes::kind_of(path) {
+        crate::notes::Kind::Yaml => text
+            .split('\n')
+            .map(|line| {
+                if line.trim_start().starts_with('#') {
+                    Line::from(Span::styled(line.to_string(), theme::dim()))
+                } else if let Some(colon) = line
+                    .find(':')
+                    .filter(|i| line[*i + 1..].starts_with(char::is_whitespace) || *i + 1 == line.len())
+                {
+                    Line::from(vec![
+                        Span::styled(
+                            line[..colon + 1].to_string(),
+                            Style::default().fg(theme::current().regent),
+                        ),
+                        Span::styled(line[colon + 1..].to_string(), theme::code()),
+                    ])
+                } else {
+                    Line::from(Span::styled(line.to_string(), theme::code()))
+                }
+            })
+            .collect(),
+        crate::notes::Kind::Pdf => text
+            .split('\n')
+            .map(|line| {
+                Line::from(Span::styled(
+                    line.to_string(),
+                    if line.starts_with("Page ") {
+                        Style::default().fg(theme::current().regent).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme::cream())
+                    },
+                ))
+            })
+            .collect(),
+        crate::notes::Kind::Html => render_blocks(text, true),
+        _ => render(text),
+    }
+}
+
 #[derive(Default)]
 struct State {
     lines: Vec<Line<'static>>,
@@ -75,6 +118,10 @@ impl State {
 }
 
 pub fn render(md: &str) -> Vec<Line<'static>> {
+    render_blocks(md, false)
+}
+
+fn render_blocks(md: &str, preserve_lines: bool) -> Vec<Line<'static>> {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TASKLISTS);
     opts.insert(Options::ENABLE_TABLES);
@@ -102,7 +149,7 @@ pub fn render(md: &str) -> Vec<Line<'static>> {
                 Tag::Paragraph => {}
                 Tag::BlockQuote(_) => {
                     st.quote += 1;
-                    st.style = Style::default().fg(theme::REGENT).add_modifier(Modifier::ITALIC);
+                    st.style = Style::default().fg(theme::current().regent).add_modifier(Modifier::ITALIC);
                 }
                 Tag::CodeBlock(kind) => {
                     st.flush();
@@ -234,6 +281,7 @@ pub fn render(md: &str) -> Vec<Line<'static>> {
             }
             Event::Code(c) => st.cur.push(Span::styled(format!("`{c}`"), theme::code())),
             Event::Html(h) | Event::InlineHtml(h) => st.cur.push(Span::styled(h.to_string(), theme::dim())),
+            Event::SoftBreak if preserve_lines => st.flush(),
             Event::SoftBreak => st.push_text(" "),
             Event::HardBreak => st.flush(),
             Event::Rule => {
@@ -243,7 +291,7 @@ pub fn render(md: &str) -> Vec<Line<'static>> {
             }
             Event::TaskListMarker(done) => {
                 let (glyph, style) = if done {
-                    ("[x] ", Style::default().fg(theme::OK))
+                    ("[x] ", Style::default().fg(theme::current().ok))
                 } else {
                     ("[ ] ", Style::default().fg(theme::gold()))
                 };
@@ -307,5 +355,20 @@ mod tests {
     fn outline_finds_headings() {
         let o = outline("# A\ntext\n## B\n#notaheading\n### C\n");
         assert_eq!(o, vec![(0, 1, "A".into()), (2, 2, "B".into()), (4, 3, "C".into())]);
+    }
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::*;
+
+    #[test]
+    fn static_html_table_rows_remain_separate_without_changing_markdown_soft_wraps() {
+        let html = "<table><tr><th>Name</th><th>Value</th></tr><tr><td>Alpha</td><td>17</td></tr></table>";
+        let text = lapis_desktop::html::to_text(html, usize::MAX);
+        let lines: Vec<_> = for_file("reference.html", &text).iter().map(ToString::to_string).collect();
+        assert!(lines.iter().any(|s| s == "Name | Value"));
+        assert!(lines.iter().any(|s| s == "Alpha | 17"));
+        assert_eq!(render("soft\nwrap")[0].to_string(), "soft wrap");
     }
 }

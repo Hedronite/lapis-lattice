@@ -7,6 +7,8 @@
 mod backend;
 mod cli;
 mod config;
+mod desktop_services;
+mod desktop_session;
 mod envelope;
 mod error;
 mod hal;
@@ -15,7 +17,9 @@ mod mcp;
 mod notes;
 mod ops;
 mod overlay;
+mod pdf_render;
 mod resolve;
+mod safe_file;
 mod tasks;
 mod taxonomy;
 mod templates;
@@ -65,6 +69,7 @@ async fn main() -> ExitCode {
             };
         }
     };
+    let cli = desktop_services::default_surface(cli, &std::env::current_exe().unwrap_or_default());
     let json = cli.global.json;
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
@@ -84,6 +89,9 @@ fn report_error(e: &LapisError, json: bool) {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    if let Some(Command::PdfRender(args)) = &cli.subcommand {
+        return pdf_render::worker(args).map_err(LapisError::Internal);
+    }
     let cfg = config::load()?;
     let vault_flag = cli.global.vault.clone();
     let lattice_flag = cli.global.lattice.clone();
@@ -106,6 +114,7 @@ async fn run(cli: Cli) -> Result<()> {
 
 async fn dispatch(ctx: Ctx, cmd: Command) -> Result<()> {
     match cmd {
+        Command::PdfRender(_) => unreachable!("PDF worker is handled before configuration"),
         Command::Init(_) => unreachable!("init is handled before vault resolve"),
         Command::Vault { command: VaultCommand::Info } => vault_info(&ctx).await,
         Command::Search(args) => search(&ctx, args).await,
@@ -800,7 +809,7 @@ fn desktop(ctx: &Ctx, args: cli::DesktopArgs) -> Result<()> {
         );
         return Ok(());
     }
-    lapis_desktop::run(opts).map_err(|e| match e {
+    lapis_desktop::run_workspace(opts, desktop_services::service(ctx)).map_err(|e| match e {
         lapis_desktop::DesktopError::NotBuilt(m) => LapisError::Usage(m),
         lapis_desktop::DesktopError::Runtime(m) => LapisError::Internal(m),
     })

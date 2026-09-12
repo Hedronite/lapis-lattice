@@ -82,6 +82,51 @@ pub fn parse(input: &str) -> Parsed {
     }
 }
 
+/// Split the original file without trimming its body. Parser-normalized body
+/// lengths are not byte offsets: using them to splice a save can copy the
+/// first body character into the header or split a UTF-8 character.
+pub fn raw_parts(input: &str) -> (&str, &str) {
+    let mut lines = input.split_inclusive('\n');
+    let Some(first) = lines.next() else { return ("", input) };
+    if first.trim_end_matches(['\r', '\n']) != "---" {
+        return ("", input);
+    }
+    let mut offset = first.len();
+    for line in lines {
+        offset += line.len();
+        if line.trim_end_matches(['\r', '\n']) == "---" {
+            return input.split_at(offset);
+        }
+    }
+    ("", input)
+}
+
+#[cfg(test)]
+mod raw_parts_tests {
+    use super::raw_parts;
+
+    #[test]
+    fn preserves_body_bytes_and_unicode_boundary() {
+        for body in ["anchor\n", "漢字\n\n", "\n  indented\n", "", "no newline"] {
+            let header = "---\ntitle: test\ncustom: keep\n---\n";
+            let file = format!("{header}{body}");
+            assert_eq!(raw_parts(&file), (header, body));
+            assert_eq!(format!("{}{}", raw_parts(&file).0, raw_parts(&file).1), file);
+        }
+    }
+
+    #[test]
+    fn crlf_and_absent_or_unclosed_header() {
+        assert_eq!(
+            raw_parts("---\r\ntitle: x\r\n---\r\nbody\r\n"),
+            ("---\r\ntitle: x\r\n---\r\n", "body\r\n")
+        );
+        for file in ["plain\n", "---\nnot closed", "body\n---\nmore"] {
+            assert_eq!(raw_parts(file), ("", file));
+        }
+    }
+}
+
 fn yaml_kind(v: &yaml_serde::Value) -> &'static str {
     use yaml_serde::Value::*;
     match v {

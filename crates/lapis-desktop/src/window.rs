@@ -15,7 +15,10 @@ use gpui_kit::{
     Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, Size, StatefulInteractiveElement, Styled, Window,
     WindowOptions, canvas, div, point, px,
 };
-use gpui_omarchy::{ActiveTheme, panel};
+use gpui_omarchy::ActiveTheme;
+
+mod lifecycle;
+pub(crate) use lifecycle::OpenNote;
 
 use crate::scene::{Filters, Scene};
 use crate::sim::ForceSim;
@@ -132,8 +135,13 @@ impl Layout {
     }
 }
 
-struct Root {
-    title: String,
+pub(crate) struct Root {
+    services: Option<std::sync::Arc<dyn crate::services::WorkspaceServices>>,
+    snapshot: Option<std::sync::Arc<lapis_lattice::GraphSnapshot>>,
+    loading: bool,
+    load_epoch: u64,
+    preview_epoch: u64,
+    visible: bool,
     vault: PathBuf,
     /// The active note. `--path` sets it; without one the global graph has
     /// no seed and nothing is highlighted.
@@ -156,6 +164,7 @@ struct Root {
     sim: ForceSim,
     meter: Meter,
     camera: Camera,
+    fit_zoom: f32,
     hover: Option<String>,
     press: Option<Press>,
     /// Where the operator dropped a node. Survives filter and layout
@@ -180,32 +189,6 @@ struct Root {
 }
 
 impl Root {
-    /// Default layout is the whole-vault snapshot settled by the force sim.
-    /// Local mode cuts the same snapshot; the hop-ring walk stays reachable
-    /// behind the layout toggle and is never the default.
-    fn reload(&mut self) {
-        let seed = self.seed.clone().unwrap_or_default();
-        let ticks = graph_data::SETTLE_TICKS;
-        let built = match self.layout {
-            Layout::Global => graph_data::global_live(&self.vault, &seed, ticks),
-            Layout::Local if seed.is_empty() => {
-                Err("local mode needs a note: open with `--path <note>` or click one".into())
-            }
-            Layout::Local => graph_data::local_live(&self.vault, &seed, self.depth, ticks),
-            // The retired ego walk has no sim behind it: it is a fixed ring
-            // by definition, so it gets an empty one.
-            Layout::Rings => graph_data::scene_for(&self.vault, &seed, 2, false)
-                .map(|scene| graph_data::Laid { scene, sim: ForceSim::empty() }),
-        };
-        match built {
-            Ok(laid) => {
-                self.adopt(laid);
-                self.error = None;
-            }
-            Err(e) => self.error = Some(e),
-        }
-    }
-
     /// Take a freshly laid-out graph: restore the pins onto both the scene
     /// and the sim, then frame it.
     fn adopt(&mut self, mut laid: graph_data::Laid) {
@@ -220,6 +203,7 @@ impl Root {
         self.sim = laid.sim;
         let board = self.board();
         self.camera.fit(&self.scene, board);
+        self.fit_zoom = self.camera.zoom;
         self.fitted_for = (board[0], board[1]);
         self.meter.idle();
     }
@@ -272,24 +256,6 @@ impl Root {
         }
     }
 
-    fn open_note(&mut self, id: &str) {
-        self.selected = Some(id.to_string());
-        // Clicking a note makes it the active one, so local mode has a seed
-        // even when the window opened with no `--path`.
-        if !id.starts_with("dangling:") {
-            let changed = self.seed.as_deref() != Some(id);
-            self.seed = Some(id.to_string());
-            if changed && self.layout == Layout::Local {
-                self.reload();
-            }
-        }
-        self.peek = if id.starts_with("dangling:") {
-            Some(format!("{id} — this link resolves to nothing"))
-        } else {
-            Some(graph_data::peek(&self.vault, id, 600).unwrap_or_else(|e| e))
-        };
-    }
-
     /// The node under a board-local point, honouring the visible filters.
     fn node_at(&self, at: [f32; 2]) -> Option<String> {
         let f = self.filters.clone();
@@ -298,6 +264,9 @@ impl Root {
     }
 
     fn on_down(&mut self, ev: &MouseDownEvent, cx: &mut Context<Self>) {
+        if self.loading || self.error.is_some() {
+            return;
+        }
         let at = self.local(ev.position);
         let node = self.node_at(at);
         if ev.button == MouseButton::Right {
@@ -317,7 +286,7 @@ impl Root {
         self.press = Some(Press { node, index, from: at, last: at, moved: false });
     }
 
-    fn on_move(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
+    fn on_move(&mut self, ev: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         let at = self.local(ev.position);
         let board = self.board();
 
@@ -325,7 +294,8 @@ impl Root {
             // No button down: this is hover.
             let over = self.node_at(at);
             if over != self.hover {
-                self.hover = over;
+                self.hover = over.clone();
+                self.preview(over, window, cx);
                 cx.notify();
             }
             return;
@@ -373,14 +343,14 @@ impl Root {
         }
     }
 
-    fn on_up(&mut self, _: &MouseUpEvent, cx: &mut Context<Self>) {
+    fn on_up(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(press) = self.press.take() else { return };
         // A short press is still a click, even on a node you could have
         // dragged.
         if !press.moved
             && let Some(id) = press.node
         {
-            self.open_note(&id);
+            self.open_note(&id, window, cx);
         }
         cx.notify();
     }
@@ -398,7 +368,35 @@ impl Root {
         cx.notify();
     }
 
-    fn on_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+    fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if ev.keystroke.modifiers.platform || ev.keystroke.modifiers.control || ev.keystroke.modifiers.alt {
+            return;
+        }
+        if !self.typing && ev.keystroke.key == "tab" {
+            let visible = self.visible();
+            let ids: Vec<String> = visible.nodes.iter().map(|n| n.id.clone()).collect();
+            if !ids.is_empty() {
+                let current = ids.iter().position(|id| Some(id) == self.selected.as_ref());
+                let index = match (current, ev.keystroke.modifiers.shift) {
+                    (Some(i), false) => (i + 1) % ids.len(),
+                    (Some(i), true) => (i + ids.len() - 1) % ids.len(),
+                    (None, false) => 0,
+                    (None, true) => ids.len() - 1,
+                };
+                self.selected = Some(ids[index].clone());
+                self.preview(Some(ids[index].clone()), window, cx);
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if !self.typing && ev.keystroke.key == "enter" {
+            if let Some(id) = self.selected.clone().filter(|id| self.visible().index_of(id).is_some()) {
+                self.open_note(&id, window, cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
         let board = self.board();
         let shift = ev.keystroke.modifiers.shift;
         let mut rebuild = false;
@@ -409,6 +407,7 @@ impl Root {
             KeyAction::ResetCamera => {
                 let board = self.board();
                 self.camera.fit(&self.scene, board);
+                self.fit_zoom = self.camera.zoom;
             }
             KeyAction::StartQuery => self.typing = true,
             KeyAction::QueryPush(c) => self.filters.query.push(c),
@@ -423,7 +422,7 @@ impl Root {
             KeyAction::ToggleDangling => self.filters.show_dangling = !self.filters.show_dangling,
             KeyAction::ToggleOrphans => self.filters.show_orphans = !self.filters.show_orphans,
             KeyAction::CycleLayout => {
-                self.layout = self.layout.next();
+                self.layout = self.next_layout();
                 rebuild = true;
             }
             KeyAction::CycleDomain => self.cycle_domain(),
@@ -441,8 +440,9 @@ impl Root {
             }
         }
         if rebuild {
-            self.reload();
+            self.reload(window, cx);
         }
+        cx.stop_propagation();
         cx.notify();
     }
 
@@ -577,11 +577,12 @@ impl Render for Root {
         let board_now = self.board();
         if self.fitted_for != (board_now[0], board_now[1]) {
             self.camera.fit(&self.scene, board_now);
+            self.fit_zoom = self.camera.zoom;
             self.fitted_for = (board_now[0], board_now[1]);
         }
         // The graph keeps moving until it settles; each frame asks for the
         // next one, and a graph at rest stops asking.
-        let moving = self.advance();
+        let moving = self.visible && !self.loading && self.advance();
         if moving {
             self.meter.frame();
             window.request_animation_frame();
@@ -591,7 +592,7 @@ impl Render for Root {
         let (edge_c, node_c, seed_c, dangling_c, label_c) =
             (theme.border, theme.foreground, theme.accent, theme.danger, theme.secondary);
         let seen = self.visible();
-        let focus = self.hover.as_deref().and_then(|id| seen.index_of(id));
+        let focus = self.hover.as_deref().or(self.selected.as_deref()).and_then(|id| seen.index_of(id));
         let hi = highlight(&seen, focus);
         let pins = self.pins.clone();
         let groups = self.groups.clone();
@@ -692,17 +693,30 @@ impl Render for Root {
             .track_focus(&self.focus)
             .relative()
             .w_full()
-            .h(px(BOARD_H))
+            .flex_1()
+            .min_h(px(120.))
             .overflow_hidden()
             .bg(theme.background)
             .child(painted)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, ev, _, cx| this.on_down(ev, cx)))
-            .on_mouse_down(MouseButton::Right, cx.listener(|this, ev, _, cx| this.on_down(ev, cx)))
-            .on_mouse_move(cx.listener(|this, ev, _, cx| this.on_move(ev, cx)))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, ev, _, cx| this.on_up(ev, cx)))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, ev, _, cx| this.on_up(ev, cx)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, ev, w, cx| {
+                    this.focus.focus(w, cx);
+                    this.on_down(ev, cx)
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, ev, w, cx| {
+                    this.focus.focus(w, cx);
+                    this.on_down(ev, cx)
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, ev, w, cx| this.on_move(ev, w, cx)))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, ev, w, cx| this.on_up(ev, w, cx)))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, ev, w, cx| this.on_up(ev, w, cx)))
             .on_scroll_wheel(cx.listener(|this, ev, _, cx| this.on_wheel(ev, cx)))
-            .on_key_down(cx.listener(|this, ev, _, cx| this.on_key(ev, cx)));
+            .on_key_down(cx.listener(|this, ev, w, cx| this.on_key(ev, w, cx)));
 
         if debug_overlay_on() {
             let (lo, hi) = self.sim.extent();
@@ -757,7 +771,7 @@ impl Render for Root {
                             .text_xs()
                             .line_height(px(LABEL_H))
                             .whitespace_nowrap()
-                            .text_color(with_alpha(label_c, alpha))
+                            .text_color(with_alpha(label_c, alpha.max(0.8)))
                             .child(text),
                     ),
             );
@@ -779,40 +793,54 @@ impl Render for Root {
         let orphans_label =
             format!("orphans: {}", if self.filters.show_orphans { "shown" } else { "hidden" });
         let domain_label = format!("domain: {}", self.filters.domain.clone().unwrap_or_else(|| "all".into()));
-        let zoom_label = format!("zoom {:.0}%", self.camera.zoom * 100.0);
+        let zoom_label = format!("Fit · {:.0}%", self.camera.zoom / self.fit_zoom.max(f32::EPSILON) * 100.0);
         let pin_label = format!("unpin {}", self.pins.len());
         let theme_label = format!("theme: {}", theme.name);
 
         let chip = |id: &'static str, text: String, colour: Hsla| {
-            div().id(id).text_sm().text_color(colour).child(text)
+            div()
+                .id(id)
+                .role(gpui_kit::Role::Button)
+                .aria_label(text.clone())
+                .cursor_pointer()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(theme.normal_fill())
+                .text_sm()
+                .text_color(colour)
+                .child(text)
         };
 
         let mut controls = div()
+            .p_3()
+            .flex_shrink_0()
             .flex()
             .flex_wrap()
             .gap_2()
             .child(chip("f-layout", format!("layout: {mode_label}"), label_c).on_click(cx.listener(
-                |this, _, _, cx| {
-                    this.layout = this.layout.next();
-                    this.reload();
+                |this, _, window, cx| {
+                    this.layout = this.next_layout();
+                    this.reload(window, cx);
                     cx.notify();
                 },
             )))
             .child(chip("f-depth", format!("depth {}", self.depth), label_c).on_click(cx.listener(
-                |this, _, _, cx| {
+                |this, _, window, cx| {
                     this.depth = if this.depth >= graph_data::MAX_DEPTH {
                         graph_data::MIN_DEPTH
                     } else {
                         this.depth + 1
                     };
                     if this.layout == Layout::Local {
-                        this.reload();
+                        this.reload(window, cx);
                     }
                     cx.notify();
                 },
             )))
             .child(chip("f-query", query_label, if self.typing { seed_c } else { label_c }).on_click(
-                cx.listener(|this, _, _, cx| {
+                cx.listener(|this, _, window, cx| {
+                    this.focus.focus(window, cx);
                     this.typing = !this.typing;
                     cx.notify();
                 }),
@@ -836,6 +864,7 @@ impl Render for Root {
             .child(chip("f-zoom", zoom_label, label_c).on_click(cx.listener(|this, _, _, cx| {
                 let board = this.board();
                 this.camera.fit(&this.scene, board);
+                this.fit_zoom = this.camera.zoom;
                 cx.notify();
             })))
             .child(chip("f-unpin", pin_label, label_c).on_click(cx.listener(|this, _, _, cx| {
@@ -865,72 +894,54 @@ impl Render for Root {
             );
         }
 
-        panel(self.title.as_str(), cx).size_full().bg(theme.background).child(controls).child(board).child(
-            div().text_sm().text_color(label_c).child(match (&self.error, &self.peek) {
-                (Some(e), _) => e.clone(),
-                (None, Some(p)) => p.clone(),
-                (None, None) => format!(
-                    "{}  ·  {} of {} nodes, {} links  ·  {}  ·  / query · e existing · o orphans \
-                     · g group · [ ] depth · l layout · drag to pan · wheel or +/- to zoom",
-                    self.seed.as_deref().unwrap_or("whole vault"),
-                    seen.nodes.len(),
-                    self.scene.nodes.len(),
-                    seen.edges.len(),
-                    mode_label,
-                ),
-            }),
-        )
+        let summary = if self.loading {
+            "Loading graph… Notes remain available.".to_string()
+        } else if let Some(error) = &self.error {
+            format!("Graph unavailable: {error}")
+        } else if self.scene.nodes.is_empty() {
+            "No indexed notes. Build the index from Find, then Refresh graph.".into()
+        } else if seen.nodes.is_empty() {
+            "No nodes match these filters. Reset filters to show the graph.".into()
+        } else {
+            format!(
+                "{} of {} notes · {} links{} · {}",
+                seen.nodes.len(),
+                self.scene.nodes.len(),
+                seen.edges.len(),
+                if self.scene.truncated { " · partial snapshot" } else { "" },
+                self.seed.as_deref().unwrap_or("Whole workspace")
+            )
+        };
+        controls = controls
+            .child(chip("graph-refresh", "Refresh graph".into(), seed_c).on_click(cx.listener(
+                |this, _, w, cx| {
+                    this.snapshot = None;
+                    this.reload(w, cx);
+                },
+            )))
+            .child(chip("graph-reset", "Reset filters".into(), label_c).on_click(cx.listener(
+                |this, _, _, cx| {
+                    this.filters = Filters::default();
+                    this.typing = false;
+                    cx.notify();
+                },
+            )));
+        div().size_full().flex().flex_col().min_h_0().bg(theme.background)
+            .child(controls)
+            .child(div().px_3().pb_2().text_sm().text_color(if self.error.is_some() { theme.danger } else { label_c }).child(summary))
+            .child(board)
+            .child(div().id("graph-preview").h(px(72.)).flex_shrink_0().overflow_y_scroll().px_3().py_2().text_sm().text_color(label_c)
+                .child(self.peek.clone().unwrap_or_else(|| "Click a note to open · Tab selects a node · Enter opens · / filters · arrows pan · 0 fits · wheel zooms · drag a node to pin".into())))
     }
 }
 
 pub fn open(opts: Options) -> Result<(), DesktopError> {
-    // No `--path` means no seed: the graph is still the whole vault, and
-    // nothing is marked active. `--path` only chooses which note is.
-    let seed = opts.seed.clone();
-    let vault = opts.vault_root.clone();
-    let title = opts.title.clone();
-    // Default view: the whole indexed vault, laid out by the force sim.
-    let (laid, error) = match graph_data::global_live(
-        &vault,
-        seed.as_deref().unwrap_or_default(),
-        graph_data::SETTLE_TICKS,
-    ) {
-        Ok(l) => (l, None),
-        Err(e) => (graph_data::Laid { scene: Scene::default(), sim: ForceSim::empty() }, Some(e)),
-    };
     gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx: &mut App| {
         gpui_omarchy::init(cx);
-        let focus = cx.focus_handle();
         let opened = cx.open_window(WindowOptions::default(), |window, cx| {
-            window.focus(&focus, cx);
-            cx.new(|_| {
-                let mut root = Root {
-                    title: title.clone(),
-                    vault: vault.clone(),
-                    seed: seed.clone(),
-                    scene: Scene::default(),
-                    error: error.clone(),
-                    selected: None,
-                    peek: None,
-                    filters: Filters::default(),
-                    typing: false,
-                    depth: 2,
-                    layout: Layout::Global,
-                    groups: Vec::new(),
-                    sim: ForceSim::empty(),
-                    meter: Meter::default(),
-                    camera: Camera::default(),
-                    hover: None,
-                    press: None,
-                    pins: BTreeMap::new(),
-                    origin: Rc::new(Cell::new((0.0, 0.0))),
-                    board_px: Rc::new(Cell::new((0.0, 0.0))),
-                    fitted_for: (0.0, 0.0),
-                    draw_ms: Rc::new(Cell::new(0.0)),
-                    skipped_tick: false,
-                    focus: focus.clone(),
-                };
-                root.adopt(graph_data::Laid { scene: laid.scene.clone(), sim: laid.sim.clone() });
+            cx.new(|cx| {
+                let mut root = Root::new(opts.vault_root.clone(), None, opts.seed.clone(), cx);
+                root.show(opts.seed.clone(), window, cx);
                 root
             })
         });

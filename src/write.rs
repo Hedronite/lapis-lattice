@@ -17,6 +17,23 @@ use crate::notes;
 use crate::taxonomy;
 use crate::templates;
 
+/// Source shown by an editor, excluding only Markdown frontmatter.
+pub fn editor_body<'a>(path: &str, original: &'a str) -> &'a str {
+    if notes::kind_of(path) == notes::Kind::Markdown { hal::raw_parts(original).1 } else { original }
+}
+
+/// Compose an explicit editor save. Markdown retains its metadata/newline policy;
+/// YAML and other editable source remain exact text, even when syntactically invalid.
+pub fn editor_content(path: &str, original: &str, text: &str) -> String {
+    if notes::kind_of(path) == notes::Kind::Markdown {
+        let head = hal::raw_parts(original).0;
+        let newline = if text.ends_with('\n') { "" } else { "\n" };
+        set_frontmatter_key(&format!("{head}{text}{newline}"), "updated", &today())
+    } else {
+        text.into()
+    }
+}
+
 pub const HAL_VERSION: &str = "1.0";
 pub const AUTHORITATIVE_MARKER: &str = "<!--hal:authoritative:yaml-->";
 /// Types that get the authoritative marker after the closing `---`.
@@ -243,9 +260,7 @@ fn write_atomic(abs: &Path, text: &str) -> Result<u64> {
     if let Some(parent) = abs.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = abs.with_extension("md.lapis-tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, abs)?;
+    crate::safe_file::replace(abs, text.as_bytes(), None)?;
     Ok(text.len() as u64)
 }
 

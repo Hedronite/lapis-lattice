@@ -33,6 +33,10 @@ hits = []
 for dirpath, dirs, fnames in os.walk("."):
     dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
     for fn in fnames:
+        # A worktree uses a .git pointer file instead of a directory. Neither
+        # form is public source, and both contain local checkout metadata.
+        if fn == ".git":
+            continue
         rel = os.path.normpath(os.path.join(dirpath, fn)).lstrip("./")
         if rel in skip_files:
             continue

@@ -20,8 +20,36 @@ use super::theme;
 
 impl App {
     pub(crate) fn draw(&mut self, f: &mut Frame) {
+        if self.tabs.is_empty() && self.tasks.is_none() {
+            self.show_sidebar = true;
+            self.focus = Focus::Sidebar;
+        } else if !self.show_sidebar && self.focus == Focus::Sidebar {
+            self.focus = if self.tasks.is_some() {
+                Focus::Tasks
+            } else if self.split == Split::PreviewOnly {
+                Focus::Preview
+            } else {
+                Focus::Editor
+            };
+        }
+        if self.tasks.is_none() {
+            if self.focus == Focus::Preview && self.split == Split::EditorOnly {
+                self.focus = Focus::Editor;
+            }
+            if self.focus == Focus::Editor && self.split == Split::PreviewOnly {
+                self.focus = Focus::Preview;
+            }
+        }
         let area = f.area();
         f.render_widget(Block::default().style(theme::base()), area);
+        self.too_small = area.width < 45 || area.height < 12;
+        if self.too_small {
+            self.regions = Regions::default();
+            self.pointer = Default::default();
+            let dirty = self.tabs.iter().filter(|t| t.dirty).count();
+            f.render_widget(Paragraph::new(format!("Lapis\nEnlarge to at least 45 × 12 to edit.\n{dirty} unsaved buffers retained.\nCtrl+Q quits when all buffers are saved.")).wrap(Wrap { trim: true }), area);
+            return;
+        }
         let [main, status] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
         let (side, right) = if self.show_sidebar {
             let [s, r] = Layout::horizontal([Constraint::Percentage(self.sidebar_pct), Constraint::Fill(1)])
@@ -56,7 +84,14 @@ impl App {
             self.regions.editor = body;
             tv.draw(f, body, self.focus == Focus::Tasks);
         } else {
-            match self.split {
+            let split = if self.tabs.is_empty() {
+                Split::EditorOnly
+            } else if area.width < 100 && self.split == Split::Both {
+                if self.focus == Focus::Preview { Split::PreviewOnly } else { Split::EditorOnly }
+            } else {
+                self.split
+            };
+            match split {
                 Split::Both => {
                     let [e, p] =
                         Layout::horizontal([Constraint::Fill(1), Constraint::Percentage(self.preview_pct)])
@@ -108,7 +143,7 @@ impl App {
                     "  "
                 };
                 let style = if e.is_dir {
-                    Style::default().fg(theme::REGENT)
+                    Style::default().fg(theme::current().regent)
                 } else if open.contains(e.rel.as_str()) {
                     Style::default().fg(theme::gold())
                 } else {
@@ -135,18 +170,16 @@ impl App {
         self.sidebar_scroll = state.offset();
     }
 
-    pub(crate) fn draw_tabs(&self, f: &mut Frame, area: Rect) {
-        let mut spans = Vec::new();
-        for (i, t) in self.tabs.iter().enumerate() {
-            let label = tab_label(t);
-            let style = if i == self.active { theme::selected() } else { theme::dim() };
-            spans.push(Span::styled(format!(" {label} "), style));
-            spans.push(Span::raw(" "));
+    pub(crate) fn draw_tabs(&mut self, f: &mut Frame, area: Rect) {
+        let paths: Vec<_> = self.tabs.iter().map(|t| (t.rel.as_str(), t.dirty)).collect();
+        self.tab_slots = super::tabs::layout(&paths, self.active, area.width);
+        for slot in &self.tab_slots {
+            let style = if slot.index == self.active { theme::selected() } else { theme::dim() };
+            f.render_widget(
+                Paragraph::new(slot.label.as_str()).style(style),
+                Rect::new(area.x + slot.cells.start, area.y, slot.cells.end - slot.cells.start, area.height),
+            );
         }
-        if self.tabs.is_empty() {
-            spans.push(Span::styled(" no notes open — Enter on a note, Ctrl+P to search ", theme::dim()));
-        }
-        f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     pub(crate) fn draw_editor(&mut self, f: &mut Frame, area: Rect) {
@@ -158,21 +191,19 @@ impl App {
                 t.text.set_block(Block::default().borders(Borders::ALL).title(title).border_style(border));
                 t.text.set_cursor_style(if focused { t.vim.cursor_style() } else { Style::default() });
                 t.text.set_style(theme::base());
+                t.text.set_selection_style(theme::selected());
+                let wrap = if self.wrap {
+                    ratatui_textarea::WrapMode::WordOrGlyph
+                } else {
+                    ratatui_textarea::WrapMode::None
+                };
+                if t.text.wrap_mode() != wrap {
+                    t.text.set_wrap_mode(wrap);
+                }
                 f.render_widget(&t.text, area);
             }
             None => {
-                let lines = vec![
-                    Line::from(Span::styled("Lapis", theme::accent())),
-                    Line::default(),
-                    Line::from("Enter on a note to open it · Ctrl+P to search the lattice"),
-                    Line::from("Space for the leader menu · ? for help"),
-                ];
-                f.render_widget(
-                    Paragraph::new(Text::from(lines))
-                        .block(Block::default().borders(Borders::ALL).border_style(border))
-                        .wrap(Wrap { trim: true }),
-                    area,
-                );
+                super::welcome::draw(f, area);
             }
         }
     }
@@ -189,15 +220,11 @@ impl App {
             return;
         };
         t.refresh_preview();
-        let max = t.preview.len() as u16;
-        t.preview_scroll = t.preview_scroll.min(max.saturating_sub(1));
-        let mut p = Paragraph::new(Text::from(t.preview.clone()))
-            .block(Block::default().borders(Borders::ALL).title(" preview ").border_style(border))
-            .scroll((t.preview_scroll, 0));
-        if wrap {
-            p = p.wrap(Wrap { trim: false });
-        }
-        f.render_widget(p, area);
+        let block = Block::default().borders(Borders::ALL).title(" preview ").border_style(border);
+        let content = block.inner(area);
+        f.render_widget(block, area);
+        t.reader.reflow(content.width, wrap);
+        t.reader.draw(content, f.buffer_mut(), focused, theme::selected());
     }
 
     pub(crate) fn draw_hal(&self, f: &mut Frame, area: Rect) {
@@ -255,11 +282,14 @@ impl App {
                 spans.push(Span::styled(format!("  {}:{}", c.0 + 1, c.1 + 1), theme::dim()));
             }
             if self.status_at.elapsed() < Duration::from_secs(8) && !self.status.is_empty() {
-                spans.push(Span::styled(format!("  {}", self.status), Style::default().fg(theme::REGENT)));
+                spans.push(Span::styled(
+                    format!("  {}", self.status),
+                    Style::default().fg(theme::current().regent),
+                ));
             }
         }
         let lattice = match self.lattice_ok {
-            Some(true) => Span::styled(" lattice ✓ ", Style::default().fg(theme::OK)),
+            Some(true) => Span::styled(" lattice ✓ ", Style::default().fg(theme::current().ok)),
             Some(false) => Span::styled(" lattice ✗ ", Style::default().fg(theme::warn())),
             None => Span::styled(" lattice … ", theme::dim()),
         };

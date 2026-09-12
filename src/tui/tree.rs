@@ -32,7 +32,10 @@ pub fn list_dir(root: &Path, rel: &str) -> Vec<Entry> {
             continue;
         }
         if !is_dir
-            && !matches!(notes::kind_of(&name), notes::Kind::Markdown | notes::Kind::Pdf | notes::Kind::Html)
+            && !matches!(
+                notes::kind_of(&name),
+                notes::Kind::Markdown | notes::Kind::Pdf | notes::Kind::Html | notes::Kind::Yaml
+            )
         {
             continue;
         }
@@ -101,6 +104,8 @@ mod tests {
             std::fs::create_dir_all(v.join(d)).unwrap();
         }
         std::fs::write(v.join("notes/SPEC.md"), "x").unwrap();
+        std::fs::write(v.join("notes/config.yaml"), "invalid: [").unwrap();
+        std::fs::write(v.join("notes/aliases.yml"), "a: &a [1]").unwrap();
         std::fs::write(v.join("notes/pic.png"), "x").unwrap();
         std::fs::write(v.join("Aeon/notes/media/a.md"), "x").unwrap();
         std::fs::write(v.join("README.md"), "x").unwrap();
@@ -113,6 +118,8 @@ mod tests {
         assert_eq!(rows[pos].1.name, "SPEC.md");
         assert_eq!(rows[pos].0, 1);
         assert!(!rows.iter().any(|(_, e)| e.name == "pic.png"));
+        assert!(rows.iter().any(|(_, e)| e.name == "config.yaml"));
+        assert!(rows.iter().any(|(_, e)| e.name == "aliases.yml"));
         assert!(list_dir(&v, "Aeon/notes/media").is_empty(), "media never listed");
         let _ = std::fs::remove_dir_all(&v);
     }
