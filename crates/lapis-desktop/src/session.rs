@@ -50,17 +50,20 @@ pub struct Session {
     pub context: bool,
     pub sidebar_width: f32,
     pub context_width: f32,
+    #[serde(default)]
+    pub panes: crate::panes::Panes,
 }
 impl Default for Session {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             tabs: vec![],
             active: None,
             folder: String::new(),
             context: false,
             sidebar_width: 232.,
             context_width: 280.,
+            panes: Default::default(),
         }
     }
 }
@@ -72,7 +75,7 @@ fn path_ok(path: &str) -> bool {
 }
 impl Session {
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != 1 {
+        if !matches!(self.version, 1 | 2) {
             return Err(format!("Unsupported workspace session version {}", self.version));
         }
         if self.tabs.len() > 128 {
@@ -113,6 +116,7 @@ impl Session {
         {
             return Err("Invalid saved pane width".into());
         }
+        self.panes.validate(&self.tabs)?;
         Ok(())
     }
 }
@@ -126,7 +130,7 @@ mod tests {
             s.tabs.push(Tab::new(path.into()));
             assert!(s.validate().is_err());
         }
-        let mut s = Session { version: 2, ..Default::default() };
+        let mut s = Session { version: 99, ..Default::default() };
         assert!(s.validate().is_err());
         s.version = 1;
         s.tabs = vec![Tab::new("note.md".into()); 2];

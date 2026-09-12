@@ -2,9 +2,12 @@
 
 mod command;
 mod context;
+mod document;
 mod graph;
 mod history;
 mod palette;
+mod pane_view;
+mod panes;
 mod render;
 mod session;
 #[cfg(all(test, feature = "gui-tests"))]
@@ -76,6 +79,11 @@ struct Workspace {
     graph: Option<Entity<crate::window::Root>>,
     graph_events: Option<Subscription>,
     graph_visible: bool,
+    panes: crate::panes::Panes,
+    document_layout: Entity<gpui_kit::base::ResizableState>,
+    pane_load_epoch: u64,
+    pane_loading: bool,
+    pane_errors: std::collections::BTreeMap<String, String>,
     palette: Option<palette::Palette>,
     query_epoch: u64,
     indexing: bool,
@@ -112,6 +120,11 @@ impl Workspace {
             graph: None,
             graph_events: None,
             graph_visible: false,
+            panes: crate::panes::Panes::default(),
+            document_layout: cx.new(|_| gpui_kit::base::ResizableState::default()),
+            pane_load_epoch: 0,
+            pane_loading: false,
+            pane_errors: Default::default(),
             palette: None,
             query_epoch: 0,
             indexing: false,
@@ -136,14 +149,11 @@ impl Workspace {
             return;
         }
         if let Some(tab) = self.tabs.get(self.active) {
+            self.panes.assign(tab.document.path.clone());
             self.history.commit(tab.document.path.clone().into(), None);
         }
         self.refresh_context(false, window, cx);
-        for (i, tab) in self.tabs.iter().enumerate() {
-            if let Some(pdf) = &tab.pdf {
-                pdf.update(cx, |s, cx| s.set_visible(i == self.active, window, cx));
-            }
-        }
+        self.update_pane_visibility(window, cx);
         if let Some(prompt) = &self.command {
             prompt.input.update(cx, |s, cx| s.focus(window, cx));
             return;
@@ -215,6 +225,7 @@ impl Workspace {
     fn activate(&mut self, index: usize, travel: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         self.hide_graph(cx);
         self.active = index;
+        self.panes.assign(self.tabs[index].document.path.clone());
         self.history.commit(self.tabs[index].document.path.clone().into(), travel);
         self.refresh_context(false, window, cx);
         self.focus_active(window, cx);
@@ -244,6 +255,7 @@ impl Workspace {
             return;
         }
         self.opening = Some(path.clone());
+        let requested = path.clone();
         let service = self.services.clone();
         let task = cx.background_executor().spawn(async move { service.read(&path) });
         cx.spawn_in(window, async move |this, cx| {
@@ -255,91 +267,15 @@ impl Workspace {
                 this.opening = None;
                 match result {
                     Ok(document) => {
-                        let restored = this.restored.iter().find(|t| t.path == document.path).cloned();
-                        let editor = cx.new(|cx| {
-                            let mut input =
-                                TextareaState::new(window, cx).default_value(document.text.clone()).rows(30);
-                            input.set_readonly(document.readonly, cx);
-                            input
-                        });
-                        let events = cx.subscribe(&editor, |_, _, event, cx| {
-                            if matches!(event, InputEvent::Change) {
-                                cx.notify();
-                            }
-                        });
-                        let mut view = match document.kind {
-                            FileKind::Markdown => View::Live,
-                            FileKind::Html | FileKind::Pdf => View::Reading,
-                            _ => View::Source,
-                        };
-                        let pdf = if document.kind == FileKind::Pdf {
-                            Some(cx.new(|cx| {
-                                crate::pdf_reader::PdfReader::new(
-                                    document.path.clone(),
-                                    this.services.clone(),
-                                    window,
-                                    cx,
-                                )
-                            }))
-                        } else {
-                            None
-                        };
-                        let reading_scroll = gpui_kit::ScrollHandle::new();
-                        if let Some(saved) = &restored {
-                            view = match document.kind {
-                                FileKind::Pdf | FileKind::Html => View::Reading,
-                                FileKind::Markdown => saved.view,
-                                _ if saved.view == View::Live => View::Source,
-                                _ => saved.view,
-                            };
-                            editor.update(cx, |s, cx| {
-                                s.set_selected_range(saved.selection[0]..saved.selection[1], cx);
-                                s.set_scroll_offset(
-                                    gpui_kit::point(
-                                        gpui_kit::px(saved.source_scroll[0]),
-                                        gpui_kit::px(saved.source_scroll[1]),
-                                    ),
-                                    cx,
-                                );
-                            });
-                            reading_scroll.set_offset(gpui_kit::point(
-                                gpui_kit::px(saved.reading_scroll[0]),
-                                gpui_kit::px(saved.reading_scroll[1]),
-                            ));
-                            if let Some(pdf) = &pdf {
-                                pdf.update(cx, |s, cx| {
-                                    s.restore_position(saved.pdf_page, saved.pdf_zoom, window, cx)
-                                });
-                            }
-                        }
-                        let live = cx.new(|cx| crate::live::LiveEditor::new(editor.clone(), cx));
-                        if let Some(saved) = &restored {
-                            live.update(cx, |s, cx| s.restore_scroll(saved.live_scroll, cx));
-                        }
-                        editor.update(cx, |s, cx| s.focus(window, cx));
-                        if !this.tab_order.contains(&document.path) {
-                            this.tab_order.push(document.path.clone());
-                        }
-                        this.restored.retain(|t| t.path != document.path);
-                        this.tabs.push(Tab {
-                            document,
-                            editor,
-                            live,
-                            pdf,
-                            _events: events,
-                            split_width: restored.and_then(|t| t.split_width),
-                            reading_scroll,
-                            view,
-                            split: cx.new(|_| gpui_kit::base::ResizableState::default()),
-                            vim: crate::vim::Vim::default(),
-                            close_after_save: false,
-                            saving: false,
-                        });
-                        this.activate(this.tabs.len() - 1, travel, window, cx);
+                        let index = this.install_document(document, window, cx);
+                        this.activate(index, travel, window, cx);
                         this.status.clear();
                         this.error = false;
                     }
                     Err(e) => {
+                        if this.panes.contains(&requested) {
+                            this.pane_errors.insert(requested.clone(), e.clone());
+                        }
                         this.status = e;
                         this.error = true;
                     }
@@ -400,6 +336,7 @@ impl Workspace {
                             let was_active = this.active == index;
                             let path = this.tabs[index].document.path.clone();
                             this.tab_order.retain(|p| p != &path);
+                            this.panes.remove_path(&path);
                             this.tabs.remove(index);
                             this.active = if index < this.active {
                                 this.active - 1
@@ -467,6 +404,7 @@ impl Workspace {
         let Some(tab) = self.tabs.get(self.active) else {
             if let Some(path) = self.tab_order.first().cloned() {
                 self.tab_order.retain(|p| p != &path);
+                self.panes.remove_path(&path);
                 self.restored.retain(|t| t.path != path);
                 self.open_epoch += 1;
                 self.opening = None;
@@ -483,6 +421,7 @@ impl Workspace {
             self.error = false;
             let path = tab.document.path.clone();
             self.tab_order.retain(|p| p != &path);
+            self.panes.remove_path(&path);
             self.tabs.remove(self.active);
             self.active = self.active.min(self.tabs.len().saturating_sub(1));
         }
@@ -501,9 +440,17 @@ impl Workspace {
         {
             match key {
                 "i" if modifiers.shift && self.palette.is_some() => self.build_index(window, cx),
+                "backslash" | "\\" => self.split_pane(modifiers.shift, window, cx),
+                "tab" if modifiers.alt => self.cycle_pane(window, cx),
                 "g" if modifiers.shift => self.toggle_graph(window, cx),
                 "p" => self.open_palette(window, cx),
                 "s" => self.save_to(modifiers.shift, window, cx),
+                "w" if !self.graph_visible
+                    && self.panes.paths.len() > 1
+                    && self.panes.paths[self.panes.focused].is_none() =>
+                {
+                    self.close_pane(self.panes.focused, window, cx)
+                }
                 "w" if self.graph_visible => self.toggle_graph(window, cx),
                 "w" => {
                     self.close_tab(modifiers.shift, cx);

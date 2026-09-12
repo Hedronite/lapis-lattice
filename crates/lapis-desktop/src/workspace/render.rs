@@ -158,7 +158,7 @@ impl Render for Workspace {
                     .on_click(cx.listener(move |this, _, w, cx| this.open_file(open.clone(), w, cx))),
             );
         }
-        let mut navigation = div().flex().items_center().gap_4().px_4().py_2().text_sm();
+        let mut navigation = div().flex().flex_wrap().items_center().gap_4().px_4().py_2().text_sm();
         for (label, forward) in [("‹ Back", false), ("Forward ›", true)] {
             let enabled = self.history.target(forward).is_some();
             navigation = navigation.child(
@@ -173,6 +173,33 @@ impl Render for Workspace {
             );
         }
         navigation = navigation
+            .child(
+                div()
+                    .id("split-documents-across")
+                    .role(Role::Button)
+                    .aria_label("Split documents side by side")
+                    .cursor_pointer()
+                    .child("Split right")
+                    .on_click(cx.listener(|this, _, w, cx| this.split_pane(false, w, cx))),
+            )
+            .child(
+                div()
+                    .id("split-documents-down")
+                    .role(Role::Button)
+                    .aria_label("Split documents above and below")
+                    .cursor_pointer()
+                    .child("Split below")
+                    .on_click(cx.listener(|this, _, w, cx| this.split_pane(true, w, cx))),
+            )
+            .child(
+                div()
+                    .id("next-document-pane")
+                    .role(Role::Button)
+                    .aria_label("Focus next document pane")
+                    .cursor_pointer()
+                    .child("Next pane")
+                    .on_click(cx.listener(|this, _, w, cx| this.cycle_pane(w, cx))),
+            )
             .child(div().flex_1())
             .child(
                 div()
@@ -182,6 +209,8 @@ impl Render for Workspace {
                     .cursor_pointer()
                     .child("Reset layout")
                     .on_click(cx.listener(|this, _, _, cx| {
+                        this.panes.sizes.clear();
+                        this.document_layout = cx.new(|_| gpui_kit::base::ResizableState::default());
                         this.sidebar_width = 232.;
                         this.context_width = 280.;
                         this.layout = cx.new(|_| gpui_kit::base::ResizableState::default());
@@ -214,115 +243,8 @@ impl Render for Workspace {
             if let Some(graph) = &self.graph {
                 content = content.child(div().flex_1().min_h_0().child(graph.clone()));
             }
-        } else if let Some(tab) = self.tabs.get(self.active) {
-            if let Some(pdf) = &tab.pdf {
-                content = content.child(div().flex_1().min_h_0().min_w_0().child(pdf.clone()));
-            } else {
-                let editor = tab.editor.clone();
-                let source = editor.read(cx).value();
-                let kind = tab.document.kind;
-                let view = tab.view;
-                let mut toolbar = div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_5()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .text_sm();
-                for (label, choice) in [
-                    ("Live", View::Live),
-                    ("Source", View::Source),
-                    ("Reading", View::Reading),
-                    ("Split", View::Split),
-                ] {
-                    if choice == View::Live && kind != FileKind::Markdown {
-                        continue;
-                    }
-                    toolbar = toolbar.child(
-                        div()
-                            .id(label)
-                            .role(Role::Button)
-                            .aria_label(format!("{label} view"))
-                            .cursor_pointer()
-                            .text_color(if view == choice { theme.accent } else { theme.secondary })
-                            .child(label)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.tabs[this.active].view = choice;
-                                this.focus_active(window, cx);
-                                cx.notify();
-                            })),
-                    );
-                }
-                toolbar = toolbar
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .id("save")
-                            .role(Role::Button)
-                            .aria_label("Save document")
-                            .cursor_pointer()
-                            .child(if tab.saving { "Saving…" } else { "Save" })
-                            .on_click(cx.listener(|this, _, w, cx| this.save(w, cx))),
-                    )
-                    .child(
-                        div()
-                            .id("save-copy")
-                            .role(Role::Button)
-                            .aria_label("Save a copy")
-                            .cursor_pointer()
-                            .child("Save copy")
-                            .on_click(cx.listener(|this, _, w, cx| this.save_to(true, w, cx))),
-                    );
-                content = content.child(toolbar);
-                let mut working = div().flex().flex_1().min_h_0().min_w_0();
-                let mut split = h_resizable(("source-reading-split", self.active)).with_state(&tab.split);
-                if view == View::Live {
-                    editor.update(cx, |s, _| s.set_editor_style(theme.input_style()));
-                    working = working.child(div().flex_1().min_w_0().h_full().child(tab.live.clone()));
-                }
-                if matches!(view, View::Source | View::Split) {
-                    editor.update(cx, |s, _| s.set_editor_style(theme.input_style()));
-                    let pane =
-                        div().flex_1().min_w_0().h_full().p_5().child(gpui_kit::base::Textarea::new(&editor));
-                    if view == View::Split {
-                        let panel = resizable_panel().child(pane);
-                        split = split.child(if let Some(width) = tab.split_width {
-                            panel.size(px(width))
-                        } else {
-                            panel
-                        });
-                    } else {
-                        working = working.child(pane);
-                    }
-                }
-                if matches!(view, View::Reading | View::Split) {
-                    let reader = if kind == FileKind::Html {
-                        gpui_omarchy::html("reading", source.clone(), window, cx)
-                    } else {
-                        gpui_omarchy::markdown("reading", source.clone(), window, cx)
-                    };
-                    let pane = div()
-                        .id(("reading-scroll", self.active))
-                        .track_scroll(&tab.reading_scroll)
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .overflow_y_scroll()
-                        .p_6()
-                        .child(reader.text_size(px(16.)));
-                    if view == View::Split {
-                        split = split.child(resizable_panel().child(pane));
-                    } else {
-                        working = working.child(pane);
-                    }
-                }
-                if view == View::Split {
-                    working = working.child(split);
-                }
-                content = content.child(working);
-            }
+        } else if !self.tabs.is_empty() || self.panes.paths.len() > 1 {
+            content = content.child(self.document_panes(window, cx));
         } else {
             content = content.child(
                 div()

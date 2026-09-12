@@ -39,12 +39,20 @@ impl Workspace {
                 this.layout = cx.new(|_| gpui_kit::base::ResizableState::default());
                 this.context_layout = cx.new(|_| gpui_kit::base::ResizableState::default());
                 this.context = session.context;
+                this.panes = session.panes;
+                this.active = usize::MAX;
+                this.document_layout = cx.new(|_| gpui_kit::base::ResizableState::default());
                 this.tab_order = session.tabs.iter().map(|t| t.path.clone()).collect();
                 this.restored = session.tabs;
                 this.directory(session.folder, window, cx);
-                if let Some(path) = seed.or(session.active).or_else(|| this.tab_order.first().cloned()) {
+                if let Some(path) =
+                    seed.or(session.active).or_else(|| this.panes.paths[this.panes.focused].clone()).or_else(
+                        || (this.panes.paths.len() == 1).then(|| this.tab_order.first().cloned()).flatten(),
+                    )
+                {
                     this.open_file(path, window, cx);
                 }
+                this.load_visible_panes(window, cx);
                 cx.notify();
             });
         })
@@ -86,13 +94,24 @@ impl Workspace {
             })
             .collect();
         crate::session::Session {
-            version: 1,
+            version: 2,
             tabs,
-            active: self
-                .tabs
-                .get(self.active)
-                .map(|t| t.document.path.clone())
-                .or_else(|| self.tab_order.first().cloned()),
+            active: if self.panes.paths.len() > 1 {
+                self.panes.paths[self.panes.focused].clone()
+            } else {
+                self.tabs
+                    .get(self.active)
+                    .map(|t| t.document.path.clone())
+                    .or_else(|| self.tab_order.first().cloned())
+            },
+            panes: {
+                let mut panes = self.panes.clone();
+                let sizes = self.document_layout.read(cx).sizes();
+                if sizes.len() == panes.paths.len() {
+                    panes.sizes = sizes.iter().map(|v| v.as_f32().clamp(80., 10000.)).collect();
+                }
+                panes
+            },
             folder: self.folder.clone(),
             context: self.context,
             sidebar_width: self
@@ -122,6 +141,7 @@ impl Workspace {
                 self.active = index;
             }
         } else {
+            self.panes.remove_path(path);
             self.restored.retain(|t| t.path != path);
             self.tab_order.retain(|p| p != path);
             self.open_epoch += 1;

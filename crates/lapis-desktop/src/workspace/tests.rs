@@ -649,3 +649,5 @@ fn closing_loaded_tab_can_activate_lazy_neighbor_and_dirty_tabs_stay(cx: &mut Te
 }
 
 mod graph;
+
+mod panes;
