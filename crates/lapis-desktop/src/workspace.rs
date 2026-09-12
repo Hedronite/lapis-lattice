@@ -5,6 +5,7 @@ mod context;
 mod document;
 mod graph;
 mod history;
+mod menu;
 mod palette;
 mod pane_view;
 mod panes;
@@ -85,6 +86,7 @@ struct Workspace {
     pane_loading: bool,
     pane_errors: std::collections::BTreeMap<String, String>,
     palette: Option<palette::Palette>,
+    menu: Option<menu::Menu>,
     query_epoch: u64,
     indexing: bool,
     register: crate::vim::Register,
@@ -126,6 +128,7 @@ impl Workspace {
             pane_loading: false,
             pane_errors: Default::default(),
             palette: None,
+            menu: None,
             query_epoch: 0,
             indexing: false,
             register: crate::vim::Register::default(),
@@ -133,6 +136,10 @@ impl Workspace {
         };
         workspace.focus.focus(window, cx);
         workspace
+    }
+    /// The window's workspace: session, files and the external-change watch.
+    pub(crate) fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_change_watch(window, cx);
     }
     fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.graph_visible {
@@ -446,6 +453,7 @@ impl Workspace {
                 "tab" if modifiers.alt => self.cycle_pane(window, cx),
                 "g" if modifiers.shift => self.toggle_graph(window, cx),
                 "p" => self.open_palette(window, cx),
+                "k" => self.open_menu(menu::Kind::Commands, window, cx),
                 "s" => self.save_to(modifiers.shift, window, cx),
                 "w" if !self.graph_visible
                     && self.panes.paths.len() > 1
@@ -466,6 +474,13 @@ impl Workspace {
                 _ => return,
             }
             cx.stop_propagation();
+            return;
+        }
+        if self.menu.is_some() {
+            if self.menu_key(key, window, cx) {
+                cx.stop_propagation();
+                cx.notify();
+            }
             return;
         }
         if self.palette.is_some() {
@@ -611,6 +626,7 @@ pub fn open(opts: Options, services: Arc<dyn WorkspaceServices>) -> Result<(), D
         let seed = opts.seed;
         let opened = cx.open_window(options, move |window, cx| {
             let entity = cx.new(|cx| Workspace::new(services, window, cx));
+            entity.update(cx, |this, cx| this.start(window, cx));
             let weak = entity.downgrade();
             window.on_window_should_close(cx, move |_, cx| {
                 weak.update(cx, |this, cx| this.may_close(cx)).unwrap_or(true)

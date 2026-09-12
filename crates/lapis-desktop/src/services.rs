@@ -51,6 +51,26 @@ pub struct SearchPage {
     pub can_build_index: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct TemplateInfo {
+    pub id: String,
+    pub name: String,
+}
+#[derive(Debug, Clone)]
+pub struct TaskRow {
+    pub id: String,
+    pub path: String,
+    pub line: Option<usize>,
+    pub content: String,
+    pub checked: bool,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Period {
+    Daily,
+    Weekly,
+    Monthly,
+}
+
 /// Blocking operations. Call on a background executor, never during GPUI paint/input.
 pub trait WorkspaceServices: Send + Sync {
     fn load_session(&self) -> Result<Option<crate::session::Session>, String> {
@@ -81,6 +101,49 @@ pub trait WorkspaceServices: Send + Sync {
     }
     fn pdf_page(&self, _path: &str, _page: u32, _width: u32, _cancel: ArcCancel) -> Result<PdfPage, String> {
         Err("PDF page rendering is unavailable in this service".into())
+    }
+
+    // Notes workflows. Each returns the vault-relative path it produced or acted on.
+    fn templates(&self) -> Result<Vec<TemplateInfo>, String> {
+        Err("Templates are unavailable in this service".into())
+    }
+    fn create_note(&self, _title: &str, _folder: &str, _template: Option<&str>) -> Result<String, String> {
+        Err("Creating notes is unavailable in this service".into())
+    }
+    fn periodic(&self, _period: Period) -> Result<String, String> {
+        Err("Periodic notes are unavailable in this service".into())
+    }
+    fn capture(&self, _text: &str) -> Result<String, String> {
+        Err("Quick capture is unavailable in this service".into())
+    }
+    fn tags(&self) -> Result<Vec<(String, u64)>, String> {
+        Err("Tags are unavailable in this service".into())
+    }
+    fn tagged(&self, _tag: &str) -> Result<Vec<String>, String> {
+        Err("Tags are unavailable in this service".into())
+    }
+    fn tasks(&self) -> Result<Vec<TaskRow>, String> {
+        Err("Tasks are unavailable in this service".into())
+    }
+    /// Returns the task's new checked state.
+    fn toggle_task(&self, _id: &str) -> Result<bool, String> {
+        Err("Tasks are unavailable in this service".into())
+    }
+    /// Returns where the note went.
+    fn trash(&self, _path: &str) -> Result<String, String> {
+        Err("Trash is unavailable in this service".into())
+    }
+    fn trash_list(&self) -> Result<Vec<String>, String> {
+        Err("Trash is unavailable in this service".into())
+    }
+    /// Returns the restored path.
+    fn restore(&self, _trashed: &str) -> Result<String, String> {
+        Err("Trash is unavailable in this service".into())
+    }
+    /// Vault-relative paths changed outside the workspace since the last call. A
+    /// service without a watcher returns nothing.
+    fn changed_paths(&self) -> Vec<String> {
+        vec![]
     }
 }
 

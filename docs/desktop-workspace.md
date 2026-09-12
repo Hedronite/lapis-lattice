@@ -6,6 +6,22 @@ The sidebar opens folders and supported files independently of the search index.
 
 Markdown opens in Live view. Source, Reading and Split reuse the same editor state and undo history. The file/sidebar, context and source/reading dividers are resizable; Reset layout restores default widths. On normal exit, Lapis saves tab order, active file, folder, view modes, text/reader positions, PDF page/zoom and pane widths in per-vault metadata under the app configuration directory. The next launch reads only visible document panes; hidden tabs load when selected. Missing files remain retryable/closable tabs. Invalid or unsupported session metadata is reported and retained unchanged. Session metadata contains no note text and does not replace explicit saves or provide crash recovery. Split right and Split below create document panes independently of the source/preview Split view. YAML is editable text; HTML is a static read-only reference. PDF page reading requires the packaged native runtime; see [PDF runtime packaging](pdf-runtime.md).
 
+## Notes workflows
+
+Commands (sidebar button, Ctrl/Cmd+K) list the note workflows over the same
+operations as the CLI and TUI: new note in the current folder, today's daily /
+this week's / this month's note, new note from a template, quick capture into the
+inbox, a tags browser (tag, then the notes carrying it), open tasks across the
+vault (Enter toggles one), move the active note to the trash bucket, restore from
+trash, and the active document's HAL properties. Type to filter; Enter runs or
+picks; Esc closes. Trashing needs a clean buffer: unsaved changes are kept and
+reported instead.
+
+Files changed outside the workspace (an agent, the CLI, another editor) are
+noticed within about a second: the file list refreshes, a clean open document is
+reloaded from disk and says so, and a document with unsaved changes keeps its
+buffer and reports that the file changed. The vault watch ignores `.lapis`.
+
 ## Editing
 
 Vim normal mode is the default. Native mouse selection and application clipboard shortcuts complement the command layer. Shift+arrow selection remains available. Supported commands in this development slice:
