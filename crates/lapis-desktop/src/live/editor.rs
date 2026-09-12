@@ -21,6 +21,10 @@ pub struct LiveEditor {
     input_error: Option<String>,
     follow_cursor: bool,
     lines: Vec<layout::Line>,
+    /// Set whenever the projection is rebuilt; cleared once the lines are reshaped.
+    relayout: bool,
+    layout_key: Option<layout::LayoutKey>,
+    generation: u32,
     bounds: Bounds<Pixels>,
     scroll: Pixels,
     restored_scroll: Option<Pixels>,
@@ -37,9 +41,19 @@ impl LiveEditor {
             }
             cx.notify();
         });
+        // `TextareaState` notifies its observers on every caret-blink toggle (500 ms
+        // while focused), not only on edits and selection moves. The projection paints
+        // its own steady caret, so a blink must not rebuild the projection or reshape
+        // every line: invalidate only when the source text or selection differs from
+        // what the last layout consumed. `changed` is already true while an edit or
+        // an unlaid-out selection is pending, so that redraw is never lost.
         let observe = cx.observe(&source, |this, source, cx| {
-            this.changed |= source.read(cx).text() != this.text.as_str();
-            cx.notify();
+            let state = source.read(cx);
+            let text_changed = state.text() != this.text.as_str();
+            if text_changed || this.changed || state.selected_range() != this.selection {
+                this.changed |= text_changed;
+                cx.notify();
+            }
         });
         Self {
             source,
@@ -50,6 +64,9 @@ impl LiveEditor {
             input_error: None,
             follow_cursor: true,
             lines: vec![],
+            relayout: true,
+            layout_key: None,
+            generation: 0,
             bounds: Bounds::default(),
             scroll: px(0.),
             restored_scroll: None,
@@ -61,6 +78,11 @@ impl LiveEditor {
     }
     pub fn scroll_position(&self) -> f32 {
         self.scroll.as_f32()
+    }
+    /// Counts line reshapes, so tests can show that a frame without a projection,
+    /// width, font or palette change keeps its lines.
+    pub fn layout_generation(&self) -> u32 {
+        self.generation
     }
     pub fn restore_scroll(&mut self, value: f32, cx: &mut Context<Self>) {
         self.restored_scroll = Some(px(value.max(0.)));
@@ -77,6 +99,7 @@ impl LiveEditor {
             self.projection = Projection::new(&self.text, selection.clone());
             self.selection = selection;
             self.changed = false;
+            self.relayout = true;
         }
     }
     pub fn source_at_point(&self, position: Point<Pixels>) -> usize {

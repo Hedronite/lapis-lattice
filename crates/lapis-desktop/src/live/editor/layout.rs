@@ -5,10 +5,23 @@ use std::sync::Arc;
 
 pub(super) struct Line {
     pub shaped: Arc<WrappedLine>,
+    /// Top of the line in content space; `origin` is placed from it and the scroll.
+    pub y: Pixels,
     pub origin: Point<Pixels>,
     pub height: Pixels,
     pub block: usize,
     pub display: usize,
+}
+/// Everything besides the projection that shaped lines depend on.
+#[derive(PartialEq)]
+pub(super) struct LayoutKey {
+    width: Pixels,
+    font: gpui_kit::SharedString,
+    accent: (f32, f32, f32, f32),
+    foreground: (f32, f32, f32, f32),
+}
+fn channels(color: gpui_kit::Hsla) -> (f32, f32, f32, f32) {
+    (color.h, color.s, color.l, color.a)
 }
 impl LiveEditor {
     pub(super) fn layout(
@@ -20,8 +33,48 @@ impl LiveEditor {
     ) {
         self.sync_source(cx);
         self.bounds = bounds;
-        self.lines.clear();
         let width = (bounds.size.width - px(48.)).max(px(40.));
+        let key = LayoutKey {
+            width,
+            font: theme.font.clone(),
+            accent: channels(theme.accent),
+            foreground: channels(theme.foreground),
+        };
+        // GPUI redraws the whole window whenever any rendered view notifies, so this runs
+        // on frames that changed nothing here, such as the widget caret blink or a redraw
+        // elsewhere. Only a new projection, width, font or palette reshapes the lines.
+        if self.relayout || self.layout_key.as_ref() != Some(&key) {
+            self.shape(width, theme, window);
+            self.layout_key = Some(key);
+            self.relayout = false;
+        }
+        self.place(bounds);
+        if let Some(scroll) = self.restored_scroll.take() {
+            self.scroll = scroll;
+            self.follow_cursor = false;
+        }
+        if self.follow_cursor
+            && self.anchor.is_none()
+            && let Some(p) = self.point_for_source(self.source.read(cx).cursor())
+        {
+            if p.y < bounds.top() + px(18.) {
+                self.scroll -= bounds.top() + px(18.) - p.y;
+            } else if p.y + px(28.) > bounds.bottom() - px(18.) {
+                self.scroll += p.y + px(46.) - bounds.bottom();
+            }
+        }
+        self.scroll = self.scroll.clamp(px(0.), (self.height - bounds.size.height).max(px(0.)));
+        self.place(bounds);
+        self.follow_cursor = false;
+    }
+    fn place(&mut self, bounds: Bounds<Pixels>) {
+        for line in &mut self.lines {
+            line.origin = bounds.origin + point(px(24.), line.y - self.scroll);
+        }
+    }
+    fn shape(&mut self, width: Pixels, theme: &gpui_omarchy::Theme, window: &mut Window) {
+        self.generation = self.generation.wrapping_add(1);
+        self.lines.clear();
         let mut y = px(18.);
         for (index, block) in self.projection.blocks.iter().enumerate() {
             let font_size = match block.kind {
@@ -65,7 +118,8 @@ impl LiveEditor {
                 let height = line.size(line_height).height;
                 self.lines.push(Line {
                     display,
-                    origin: bounds.origin + point(px(24.), y - self.scroll),
+                    y,
+                    origin: Point::default(),
                     height: line_height,
                     block: index,
                     shaped: Arc::new(line),
@@ -77,26 +131,6 @@ impl LiveEditor {
             y += if block.kind == Kind::Blank { px(0.) } else { px(8.) };
         }
         self.height = y + px(16.);
-        let old_scroll = self.scroll;
-        if let Some(scroll) = self.restored_scroll.take() {
-            self.scroll = scroll;
-            self.follow_cursor = false;
-        }
-        if self.follow_cursor
-            && self.anchor.is_none()
-            && let Some(p) = self.point_for_source(self.source.read(cx).cursor())
-        {
-            if p.y < bounds.top() + px(18.) {
-                self.scroll -= bounds.top() + px(18.) - p.y;
-            } else if p.y + px(28.) > bounds.bottom() - px(18.) {
-                self.scroll += p.y + px(46.) - bounds.bottom();
-            }
-        }
-        self.scroll = self.scroll.clamp(px(0.), (self.height - bounds.size.height).max(px(0.)));
-        for line in &mut self.lines {
-            line.origin.y += old_scroll - self.scroll;
-        }
-        self.follow_cursor = false;
     }
     pub(super) fn paint(&self, window: &mut Window, cx: &mut Context<Self>) {
         let theme = cx.omarchy().clone();

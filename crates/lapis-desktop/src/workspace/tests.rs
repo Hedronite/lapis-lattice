@@ -651,3 +651,78 @@ fn closing_loaded_tab_can_activate_lazy_neighbor_and_dirty_tabs_stay(cx: &mut Te
 mod graph;
 
 mod panes;
+
+#[gpui_kit::test]
+fn live_editor_ignores_cursor_blink_until_text_or_selection_changes(cx: &mut TestAppContext) {
+    use gpui_kit::EntityInputHandler;
+    use std::{cell::Cell, rc::Rc, time::Duration};
+    let handle = setup(cx);
+    let mut visual = VisualTestContext::from_window(handle.into(), cx);
+    visual.update(|w, cx| w.render_frame(cx));
+    let (live, editor) =
+        handle.read_with(cx, |this, _| (this.tabs[0].live.clone(), this.tabs[0].editor.clone())).unwrap();
+    let live_notified = Rc::new(Cell::new(0));
+    let widget_notified = Rc::new(Cell::new(0));
+    cx.update(|cx| {
+        let n = live_notified.clone();
+        cx.observe(&live, move |_, _| n.set(n.get() + 1)).detach();
+        let n = widget_notified.clone();
+        cx.observe(&editor, move |_, _| n.set(n.get() + 1)).detach();
+    });
+    // Each blink also draws a frame, as the real window does for any rendered view.
+    let blink = |visual: &mut VisualTestContext, cx: &mut TestAppContext| {
+        for _ in 0..8 {
+            cx.executor().advance_clock(Duration::from_millis(500));
+            cx.run_until_parked();
+            visual.update(|w, cx| w.render_frame(cx));
+        }
+    };
+    let generation = |cx: &TestAppContext| {
+        handle.read_with(cx, |this, cx| this.tabs[0].live.read(cx).layout_generation()).unwrap()
+    };
+    let caret = |cx: &TestAppContext| {
+        handle
+            .read_with(cx, |this, cx| {
+                let t = &this.tabs[0];
+                t.live.read(cx).point_for_source(t.editor.read(cx).cursor()).unwrap()
+            })
+            .unwrap()
+    };
+    // The focused native widget toggles its caret every 500 ms and notifies each time.
+    let shaped = generation(cx);
+    blink(&mut visual, cx);
+    assert!(widget_notified.get() >= 4, "focused widget blinks: {}", widget_notified.get());
+    assert_eq!(live_notified.get(), 0, "caret blink alone must not invalidate the live projection");
+    assert_eq!(generation(cx), shaped, "blink frames must not reshape the lines");
+    // Vim motions move the caret through the widget selection with no frame in between.
+    let first = caret(cx);
+    editor.update(cx, |s, cx| s.set_selected_range(8..8, cx));
+    cx.run_until_parked();
+    assert!(live_notified.get() >= 1, "a caret move invalidates the projection");
+    visual.update(|w, cx| w.render_frame(cx));
+    let second = caret(cx);
+    assert!(second.y > first.y, "projection follows the caret to the second line");
+    let shaped = generation(cx);
+    assert!(shaped > 1, "a caret move rebuilds the projection and its lines");
+    live_notified.set(0);
+    blink(&mut visual, cx);
+    assert_eq!(live_notified.get(), 0, "blink after a settled caret move stays quiet");
+    assert_eq!(generation(cx), shaped, "blink frames after a caret move keep the lines");
+    handle
+        .update(cx, |this, w, cx| {
+            this.tabs[0].editor.update(cx, |s, cx| s.replace_text_in_range(None, "x", w, cx))
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert!(live_notified.get() >= 1, "an edit invalidates the projection");
+    assert_eq!(text(handle, cx), "one two\nxsecond\n");
+    visual.update(|w, cx| w.render_frame(cx));
+    assert!(generation(cx) > shaped, "an edit reshapes the lines");
+    let shaped = generation(cx);
+    live_notified.set(0);
+    blink(&mut visual, cx);
+    assert_eq!(live_notified.get(), 0, "blink after a settled edit stays quiet");
+    assert_eq!(generation(cx), shaped, "blink frames after an edit keep the lines");
+    visual.update(|w, cx| w.press("k", cx));
+    assert!(caret(cx).y < second.y, "Vim motion still moves the painted caret");
+}
