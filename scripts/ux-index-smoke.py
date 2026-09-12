@@ -3,19 +3,29 @@
 builds in the background, and health afterwards is built rather than silently empty.
 
 Uses a disposable synthetic vault (or a caller-supplied copy with no index) and an
-isolated XDG_CONFIG_HOME. Never runs `lapis init` and never edits notes.
+isolated XDG_CONFIG_HOME. Never runs `lapis init` and never edits notes on its own;
+`--save-during-build` edits exactly one note through the editor.
+
+Optional routes (both opt-in, used for evidence runs on the standard fixture):
+  --fault              make `.lapis` unwritable before the first Space i, expect an
+                       explicit failure with a retry hint, restore, retry.
+  --save-during-build  insert a marker into the open note and Ctrl+S while the build
+                       runs; expect the note to be re-indexed after the build.
 """
-import argparse, fcntl, hashlib, json, os, pty, re, select, struct, subprocess, termios, time
+import argparse, fcntl, hashlib, json, os, pty, re, select, stat, struct, subprocess, termios, time
 from pathlib import Path
 from ux_terminal import screen_text
 
 WIDTH, HEIGHT = 120, 40
-ap = argparse.ArgumentParser(description=__doc__)
+MARKER = 's1bsavemarker'
+ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 ap.add_argument('--bin', required=True)
 ap.add_argument('--out', required=True)
 ap.add_argument('--vault', help='existing Collection-NNN/Note-NNNNN.md vault without .lapis (default: synthetic)')
 ap.add_argument('--notes', type=int, default=1500)
 ap.add_argument('--timeout', type=float, default=600, help='seconds allowed for the build itself')
+ap.add_argument('--fault', action='store_true', help='inject an unwritable .lapis for the first build')
+ap.add_argument('--save-during-build', action='store_true', help='save the open note while the build runs')
 ap.add_argument('--check', action='store_true', help='exit non-zero when any expectation fails')
 args = ap.parse_args()
 out = Path(args.out).resolve()
@@ -40,6 +50,7 @@ if not args.vault:
                         f'See [[Note-{(i + 1) % args.notes:05d}]].\n')
 if (vault / '.lapis' / 'lattice.sqlite').exists():
     ap.error('the vault already has an index; the missing-index route needs none')
+first_note = vault / 'Collection-000' / 'Note-00000.md'
 before = corpus(vault)
 markdown = sum(1 for rel in before if rel.endswith('.md'))
 config = out / 'config'
@@ -56,7 +67,7 @@ fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', HEIGHT, WIDTH, 0, 0))
 os.set_blocking(fd, False)
 raw = bytearray()
 started = time.monotonic()
-marks, failures, progress = {}, [], []
+marks, failures, progress, notes = {}, [], [], {}
 
 
 def drain(seconds):
@@ -100,15 +111,39 @@ def wait(name, predicate, timeout=20, watch=None):
         drain(0.02)
 
 
-def send(data):
+def send(data, delay=0.1):
     os.write(fd, data)
-    drain(0.1)
+    drain(delay)
 
 
 def record_progress(text):
     line = status_line(text)
     if re.search(r'indexing \d+/\d+', line) and (not progress or progress[-1]['status'] != line.strip()):
         progress.append({'ms': (time.monotonic() - started) * 1000, 'status': line.strip()})
+
+
+def build_done(text):
+    line = status_line(text)
+    return 'search is ready' in line or ': indexed (' in line
+
+
+lapis_dir = vault / '.lapis'
+locked = []
+
+
+def lock_index():
+    # The engine opened the (empty) database at startup; take away write access to the
+    # directory and every file in it so the build's DELETE/INSERT and WAL fail.
+    for path in [lapis_dir, *lapis_dir.iterdir()]:
+        mode = stat.S_IMODE(path.stat().st_mode)
+        locked.append((path, mode))
+        path.chmod(0o500 if path.is_dir() else 0o400)
+
+
+def unlock_index():
+    for path, mode in reversed(locked):
+        path.chmod(mode)
+    locked.clear()
 
 
 try:
@@ -124,13 +159,53 @@ try:
         send(bytes([ch]))
     wait('search-offers-setup', lambda t: 'search index not built' in t and 'Space i' in t)
     send(b'\x1b')
+    if args.fault:
+        lock_index()
+        try:
+            send(b' ')
+            send(b'i')
+            text = wait('build-failed', lambda t: 'build failed' in status_line(t) or build_done(t), timeout=60)
+            if build_done(text):
+                notes['fault'] = 'ineffective: the build succeeded with .lapis read-only (root or permissive filesystem)'
+            else:
+                notes['fault'] = status_line(text).strip()
+                if 'Space i retries' not in status_line(text):
+                    failures.append('failed build did not show the retry hint')
+                # The hint persists after the transient status expires, until the retry.
+                wait('retry-hint', lambda t: 'index failed · Space i retries' in status_line(t), timeout=15)
+        finally:
+            unlock_index()
     # Explicit action; the build runs in the background.
     send(b' ')
     send(b'i')
     wait('indexing-shown', lambda t: 'indexing' in status_line(t), watch=record_progress)
-    # Input is still served during the build: the cursor moves down a line.
-    send(b'j')
-    wait('ready', lambda t: 'search is ready' in status_line(t), timeout=args.timeout, watch=record_progress)
+    if args.save_during_build:
+        # Insert a marker at the top of the open note and save while the build runs.
+        stat_before = first_note.stat()
+        send(b'i')
+        send(MARKER.encode() + b' ', 0.3)
+        send(b'\x1b')
+        at_save = status_line(screen()).strip()
+        notes['status_at_save'] = at_save
+        if not re.search(r'indexing', at_save):
+            failures.append(f'save was not sent during the build: {at_save!r}')
+        send(b'\x13', 0)
+        saved = time.monotonic()
+        while time.monotonic() - saved < 5:
+            current = first_note.stat()
+            if (current.st_ino, current.st_mtime_ns) != (stat_before.st_ino, stat_before.st_mtime_ns):
+                marks['saved-during-build'] = (time.monotonic() - started) * 1000
+                break
+            drain(0.02)
+        else:
+            failures.append('note was not saved during the build')
+    else:
+        # Input is still served during the build: the cursor moves down a line.
+        send(b'j')
+    wait('ready', build_done, timeout=args.timeout, watch=record_progress)
+    if args.save_during_build:
+        # The path saved mid-build is re-indexed once the build lands.
+        wait('queued-reindexed', lambda t: 'Note-00000.md: indexed (' in status_line(t), timeout=60)
     after = screen()
     if 'no search index' in status_line(after) or 'index failed' in status_line(after):
         failures.append('setup indicator still shown after the build')
@@ -139,6 +214,7 @@ try:
 except TimeoutError as error:
     failures.append(str(error))
 finally:
+    unlock_index()
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         done, _ = os.waitpid(pid, os.WNOHANG)
@@ -167,15 +243,29 @@ if health:
         failures.append(f"documents_indexed {health['documents_indexed']} != {markdown} notes")
 if not progress:
     failures.append('no files/total indexing progress was displayed')
+marker_hit = None
+if args.save_during_build:
+    search = subprocess.run([args.bin, '--vault', str(vault), '--json', 'search', MARKER, '--embedder', 'none'],
+                            env=env, text=True, capture_output=True)
+    (out / 'marker-search.json').write_text(search.stdout + search.stderr)
+    paths = re.findall(r'"path":\s*"([^"]+)"', search.stdout)
+    marker_hit = 'Collection-000/Note-00000.md' in paths
+    if not marker_hit:
+        failures.append(f'marker saved during the build is not indexed afterwards (hits: {paths[:3]})')
+    if MARKER not in first_note.read_text():
+        failures.append('marker missing from the saved note')
 after_files = corpus(vault)
-if after_files != before:
-    changed = sorted(set(before) ^ set(after_files) | {k for k in before if after_files.get(k) != before[k]})
-    failures.append(f'vault files changed outside .lapis: {changed[:5]}')
+changed = sorted(set(before) ^ set(after_files) | {k for k in before if after_files.get(k) != before[k]})
+expected_changed = ['Collection-000/Note-00000.md'] if args.save_during_build else []
+if changed != expected_changed:
+    failures.append(f'vault files changed outside .lapis: {changed[:5]} (expected {expected_changed})')
 
 result = {'binary_sha256': digest(Path(args.bin)), 'vault': 'synthetic' if not args.vault else str(vault),
           'notes': markdown, 'terminal': f'PTY xterm-256color {WIDTH}x{HEIGHT}; no terminal renderer',
-          'pty_ms': marks, 'progress_seen': progress, 'health_after': health,
-          'files_unchanged': after_files == before, 'init_run': False, 'failures': failures}
+          'routes': {'fault': args.fault, 'save_during_build': args.save_during_build},
+          'pty_ms': marks, 'progress_seen': progress, 'notes': notes, 'health_after': health,
+          'marker_indexed_after_build': marker_hit, 'files_changed': changed,
+          'files_unchanged': not changed, 'init_run': False, 'failures': failures}
 (out / 'results.json').write_text(json.dumps(result, indent=2) + '\n')
 print(json.dumps({k: v for k, v in result.items() if k != 'progress_seen'} | {'progress_updates': len(progress)}, indent=2))
 if args.check and failures:
