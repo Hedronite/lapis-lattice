@@ -499,6 +499,7 @@ pub fn health(conn: &Connection, db_path: &Path) -> Result<Health> {
     Ok(Health {
         status: if built { "ok".into() } else { "degraded".into() },
         documents_indexed,
+        stale_documents: 0,
         db_path: db_path.display().to_string(),
         embedder,
         embed_model,

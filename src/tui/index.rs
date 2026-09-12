@@ -10,6 +10,7 @@ pub(crate) struct IndexHealth {
     pub(crate) embedded: bool,
     pub(crate) built: bool,
     pub(crate) documents: u64,
+    pub(crate) stale: u64,
 }
 
 /// Search-index lifecycle as the TUI presents it. Files never wait on it.
@@ -24,6 +25,8 @@ pub(crate) enum IndexState {
         total: u64,
     },
     Ready(u64),
+    /// Built index with paths missing, new, or mtime-drifted on disk.
+    Stale(u64),
     Failed(String),
     /// An HTTP lattice owns its own index lifecycle.
     Managed,
@@ -32,7 +35,7 @@ pub(crate) enum IndexState {
 impl IndexState {
     /// Missing or failed: the user has a build action to take.
     pub(crate) fn needs_setup(&self) -> bool {
-        matches!(self, IndexState::Missing | IndexState::Failed(_))
+        matches!(self, IndexState::Missing | IndexState::Stale(_) | IndexState::Failed(_))
     }
 
     /// The state after a health answer. A build in flight owns the state, and a
@@ -40,6 +43,8 @@ impl IndexState {
     pub(crate) fn observe(&self, health: &IndexHealth) -> IndexState {
         let reported = if !health.embedded {
             IndexState::Managed
+        } else if health.built && health.stale > 0 {
+            IndexState::Stale(health.stale)
         } else if health.built {
             IndexState::Ready(health.documents)
         } else {
@@ -133,32 +138,34 @@ impl App {
 mod tests {
     use super::{IndexHealth, IndexState};
 
-    fn health(embedded: bool, built: bool, documents: u64) -> IndexHealth {
-        IndexHealth { embedded, built, documents }
+    fn health(embedded: bool, built: bool, documents: u64, stale: u64) -> IndexHealth {
+        IndexHealth { embedded, built, documents, stale }
     }
 
     #[test]
     fn health_answers_map_to_setup_states() {
         let unknown = IndexState::Unknown;
-        assert_eq!(unknown.observe(&health(true, false, 0)), IndexState::Missing);
+        assert_eq!(unknown.observe(&health(true, false, 0, 0)), IndexState::Missing);
         assert!(IndexState::Missing.needs_setup());
         assert_eq!(
-            unknown.observe(&health(true, true, 0)),
+            unknown.observe(&health(true, true, 0, 0)),
             IndexState::Ready(0),
             "built with no notes is ready"
         );
-        assert_eq!(unknown.observe(&health(true, true, 12)), IndexState::Ready(12));
-        assert_eq!(unknown.observe(&health(false, false, 0)), IndexState::Managed);
+        assert_eq!(unknown.observe(&health(true, true, 12, 0)), IndexState::Ready(12));
+        assert_eq!(unknown.observe(&health(true, true, 12, 3)), IndexState::Stale(3));
+        assert!(IndexState::Stale(1).needs_setup());
+        assert_eq!(unknown.observe(&health(false, false, 0, 0)), IndexState::Managed);
         assert!(!IndexState::Managed.needs_setup());
     }
 
     #[test]
     fn a_build_in_flight_and_a_failure_survive_health_polls() {
         let building = IndexState::Indexing { done: 3, total: 9 };
-        assert_eq!(building.observe(&health(true, false, 0)), building);
+        assert_eq!(building.observe(&health(true, false, 0, 0)), building);
         let failed = IndexState::Failed("disk full".into());
-        assert_eq!(failed.observe(&health(true, false, 0)), failed);
+        assert_eq!(failed.observe(&health(true, false, 0, 0)), failed);
         assert!(failed.needs_setup());
-        assert_eq!(failed.observe(&health(true, true, 5)), IndexState::Ready(5));
+        assert_eq!(failed.observe(&health(true, true, 5, 0)), IndexState::Ready(5));
     }
 }

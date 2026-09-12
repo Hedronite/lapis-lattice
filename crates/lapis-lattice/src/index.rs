@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -50,6 +51,44 @@ pub fn reindex(conn: &Connection, vault: &Path, progress: &mut dyn FnMut(u64, u6
     let edges: u64 =
         conn.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get::<_, i64>(0)).map(|n| n as u64)?;
     Ok(IndexReport { documents, chunks: chunks_n, edges, embedded: 0, embed_error: None })
+}
+
+/// How many indexed paths likely drifted from disk. Zero before the first build.
+pub fn stale_count(conn: &Connection, vault: &Path) -> Result<u64> {
+    if crate::sqlite::meta_get(conn, "graph_built").as_deref() != Some("1") {
+        return Ok(0);
+    }
+    let on_disk = walk(vault)?;
+    let mut indexed = HashSet::new();
+    let mut stale = 0u64;
+    let mut stmt = conn.prepare("SELECT path, mtime FROM documents")?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect::<Vec<_>>();
+    for (rel, stored_mtime) in rows {
+        indexed.insert(rel.clone());
+        let abs = vault.join(&rel);
+        if !abs.is_file() {
+            stale += 1;
+            continue;
+        }
+        let disk_mtime = fs::metadata(&abs)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        if disk_mtime != stored_mtime {
+            stale += 1;
+        }
+    }
+    for rel in &on_disk {
+        if !indexed.contains(rel) {
+            stale += 1;
+        }
+    }
+    Ok(stale)
 }
 
 /// Reindex exactly one vault-relative path. A file that no longer exists is
