@@ -293,9 +293,10 @@ impl App {
             IndexState::Missing => {
                 Some(Span::styled(" no search index · Space i builds ", Style::default().fg(theme::warn())))
             }
-            IndexState::Stale(n) => {
-                Some(Span::styled(format!(" index stale ({n}) · Space i rebuilds "), Style::default().fg(theme::warn())))
-            }
+            IndexState::Stale(n) => Some(Span::styled(
+                format!(" index stale ({n}) · Space i rebuilds "),
+                Style::default().fg(theme::warn()),
+            )),
             IndexState::Failed(_) => {
                 Some(Span::styled(" index failed · Space i retries ", Style::default().fg(theme::warn())))
             }

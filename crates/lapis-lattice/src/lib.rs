@@ -381,7 +381,11 @@ mod tests {
 
         std::fs::write(d.join("notes/New.md"), "# New\n").unwrap();
         assert_eq!(e.health().unwrap().stale_documents, 1, "unindexed file counts as stale");
-        std::fs::write(d.join("Welcome.md"), "---\nname: Welcome\ntags: [intro]\n---\n# Welcome\n\nChanged.\n").unwrap();
+        std::fs::write(
+            d.join("Welcome.md"),
+            "---\nname: Welcome\ntags: [intro]\n---\n# Welcome\n\nChanged.\n",
+        )
+        .unwrap();
         assert!(e.health().unwrap().stale_documents >= 1, "mtime drift counts as stale");
 
         let tags = e.analytics("tags").unwrap();
