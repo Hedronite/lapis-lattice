@@ -1,6 +1,6 @@
 # Reading and editing files in the terminal
 
-The file sidebar includes Markdown, YAML/YML, PDF and HTML/HTM. Enter opens the selected file; the usual Vim, pointer selection and clipboard actions remain available. `Space l c` copies the selected text in normal or visual mode; Ctrl+C is an alternative.
+The file sidebar includes Markdown, YAML/YML, PDF and HTML/HTM. Enter opens the selected file; the usual Vim, pointer selection and clipboard actions remain available. `Space l c` copies the selected text in normal or visual mode; Ctrl+C is an alternative. `v` selects characters inclusively in either direction. `V` selects whole lines; `j`/`k` and `gg`/`G` extend or contract that selection, including the final line without an EOF newline. Clipboard and literal paste consume the same highlighted range.
 
 Markdown and YAML are editable. Save with `:w` or Ctrl+S. Markdown retains its frontmatter and existing update/newline policy. YAML is literal source: comments, document separators, indentation, invalid syntax and a missing trailing newline are retained. It is never parsed and reserialized during an editor save. CRLF input is normalized to LF in the editor.
 

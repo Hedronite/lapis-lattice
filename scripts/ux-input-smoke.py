@@ -146,7 +146,7 @@ for name, selection in [('paste-undo', b''), ('visual-paste-undo', b'vlll')]:
     if selection: s.send(selection)
     s.send(b'\x1b[200~'+payload.encode()+b'\x1b[201~', 0.4)
     after = s.saved().split('---\n', 2)[-1]
-    expected = payload + ('hor\nsecond line\n' if selection else 'anchor\nsecond line\n')
+    expected = payload + ('or\nsecond line\n' if selection else 'anchor\nsecond line\n')
     s.send(b'u')
     undone = s.saved().split('---\n', 2)[-1]
     s.send(b'\x12')
@@ -189,6 +189,32 @@ copies = re.findall(rb'\x1b\]52;c;([^\x07]*)\x07', s.raw)
 unchanged = s.saved().split('---\n',2)[-1]
 results.append({'case':'visual-leader-copy', 'copy_matches':bool(copies) and base64.b64decode(copies[-1])==b'anchor\n',
                 'buffer_unchanged':unchanged=='anchor\nsecond line\n'})
+s.close()
+
+# Inclusive Vim endpoints must agree with app clipboard and literal paste.
+for name, selection, content, expected_copy in [
+    ('linewise-forward-copy', b'VG', 'one\ntwo\nlast 漢字', 'one\ntwo\nlast 漢字'),
+    ('linewise-reverse-copy', b'GVgg', 'one\ntwo\nlast 漢字', 'one\ntwo\nlast 漢字'),
+    ('character-reverse-copy', b'3lvhh', 'a漢字def', '漢字d'),
+]:
+    s = Session(name, remote=True, filename='Selection.yml', content=content)
+    s.send(selection+b' lc')
+    copies = re.findall(rb'\x1b\]52;c;([^\x07]*)\x07', s.raw)
+    unchanged = s.saved()
+    results.append({'case':name, 'copy_matches':bool(copies) and base64.b64decode(copies[-1]).decode()==expected_copy,
+                    'buffer_unchanged':unchanged==content})
+    s.close()
+
+s = Session('linewise-replace-undo', filename='Selection.yml', content='---\n# comment\ninvalid: [\n...')
+s.send(b'VG')
+s.send(b'\x1b[200~new\r\n  value\x1b[201~')
+after = s.saved()
+s.send(b'u')
+undone = s.saved()
+s.send(b'\x12')
+redone = s.saved()
+results.append({'case':'linewise-replace-undo', 'replacement_matches':after=='new\n  value',
+                'undo_matches':undone=='---\n# comment\ninvalid: [\n...', 'redo_matches':redone==after})
 s.close()
 
 if args.large:
