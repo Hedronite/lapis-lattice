@@ -127,6 +127,9 @@ for name, mode, data in [
     ('paste-crlf-insert', b'i', payload.replace('\n', '\r\n').encode()),
     ('bracketed-insert', b'i', b'\x1b[200~'+payload.encode()+b'\x1b[201~'),
     ('bracketed-normal', b'', b'\x1b[200~'+payload.encode()+b'\x1b[201~'),
+    # Unbracketed terminals: the burst must be inserted literally, not run as keys.
+    ('paste-lf-normal', b'', payload.encode()),
+    ('paste-crlf-normal', b'', payload.replace('\n', '\r\n').encode()),
 ]:
     s = Session(name)
     if mode: s.send(mode)
@@ -384,7 +387,7 @@ for filename, marker in [('reference.pdf','Page 1 of 3'), ('scanned.pdf','No ext
 
 report = {'binary':str(Path(args.bin).resolve()), 'binary_sha256':hashlib.sha256(Path(args.bin).read_bytes()).hexdigest(),
           'initial_sha256':hashlib.sha256(initial.encode()).hexdigest(), 'results':results, 'save_receipts':save_receipts}
-failed_cases = {r['case'] for r in results if any(value is False for value in r.values()) and r['case'] not in ('paste-lf-insert', 'paste-crlf-insert')}
+failed_cases = {r['case'] for r in results if any(value is False for value in r.values())}
 failed_cases.update(r['case'] for r in save_receipts if r['outcome'] == 'timeout')
 report['failure_screens'] = {s.root.name:screen_text(s.raw) for s in sessions if s.root.name in failed_cases}
 report['failure_terminal_tails_base64'] = {
@@ -394,7 +397,7 @@ report['failure_terminal_tails_base64'] = {
 (out/'results.json').write_text(json.dumps(report, indent=2)+'\n')
 print(json.dumps(report, indent=2))
 if args.check:
-    required = [r for r in results if r['case'] not in ('paste-lf-insert', 'paste-crlf-insert')]
-    timeouts = [r for r in save_receipts if r['outcome'] == 'timeout' and r['case'] not in ('paste-lf-insert', 'paste-crlf-insert')]
+    required = results
+    timeouts = [r for r in save_receipts if r['outcome'] == 'timeout']
     if timeouts or any(value is False for result in required for value in result.values()):
         raise SystemExit('required TUI input regression failed; see retained results')
