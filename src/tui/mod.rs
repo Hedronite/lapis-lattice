@@ -16,6 +16,7 @@ mod history;
 mod index;
 mod leader;
 mod mouse;
+mod nav;
 mod neighbors_view;
 mod omarchy;
 mod palette;
