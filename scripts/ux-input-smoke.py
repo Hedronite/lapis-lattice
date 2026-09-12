@@ -186,6 +186,19 @@ if args.large:
                     'redo_matches':body_of(redone)==expected})
     s.close()
 
+# Tiny windows keep buffers intact and never accept invisible text edits.
+s = Session('undersized-input')
+fcntl.ioctl(s.fd, termios.TIOCSWINSZ, struct.pack('HHHH',10,40,0,0))
+s.drain(0.2)
+s.send(b'iHIDDEN')
+s.send(b'\x1b[200~invisible paste\x1b[201~')
+fcntl.ioctl(s.fd, termios.TIOCSWINSZ, struct.pack('HHHH',32,120,0,0))
+s.drain(0.2)
+s.send(b'\x1b')
+after = s.saved()
+results.append({'case':'undersized-input', 'content_matches':after.split('---\n',2)[-1]=='anchor\nsecond line\n'})
+s.close()
+
 # Destructive navigation must not discard an unsaved tab.
 s = Session('dirty-trash-close')
 s.send(b'iunsaved')

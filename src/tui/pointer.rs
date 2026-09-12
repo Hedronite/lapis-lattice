@@ -4,10 +4,9 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Margin, Position, Rect};
-use ratatui::text::Line;
 use ratatui_textarea::{CursorMove, DataCursor, TextArea};
 
-use super::app::{App, Focus, tab_label};
+use super::app::{App, Focus};
 use super::mouse::{self, Action as MouseAction, Target};
 use super::vim::Mode;
 
@@ -267,11 +266,11 @@ impl App {
                         }
                     }
                     Target::Tabs { x } => {
-                        let widths: Vec<usize> =
-                            self.tabs.iter().map(|t| Line::from(tab_label(t)).width()).collect();
-                        if let Some(i) = mouse::tab_at(&widths, x) {
+                        if let Some(i) = self.tab_slots.iter().find(|s| s.cells.contains(&x)).map(|s| s.index)
+                        {
                             self.active = i;
                             self.focus = Focus::Editor;
+                            self.after_open();
                         }
                     }
                     Target::Editor => {
@@ -303,6 +302,10 @@ impl App {
                     } else if let Some(t) = self.tab_mut() {
                         t.text.scroll((if down { 3 } else { -3 }, 0));
                     }
+                }
+                Target::Tabs { .. } if !self.tabs.is_empty() => {
+                    self.active = mouse::scroll(self.active, self.tabs.len(), down, 1);
+                    self.after_open();
                 }
                 Target::Tabs { .. } | Target::Bottom { .. } => {}
             },

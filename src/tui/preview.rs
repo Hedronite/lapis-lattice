@@ -102,7 +102,7 @@ pub fn render(md: &str) -> Vec<Line<'static>> {
                 Tag::Paragraph => {}
                 Tag::BlockQuote(_) => {
                     st.quote += 1;
-                    st.style = Style::default().fg(theme::REGENT).add_modifier(Modifier::ITALIC);
+                    st.style = Style::default().fg(theme::current().regent).add_modifier(Modifier::ITALIC);
                 }
                 Tag::CodeBlock(kind) => {
                     st.flush();
@@ -243,7 +243,7 @@ pub fn render(md: &str) -> Vec<Line<'static>> {
             }
             Event::TaskListMarker(done) => {
                 let (glyph, style) = if done {
-                    ("[x] ", Style::default().fg(theme::OK))
+                    ("[x] ", Style::default().fg(theme::current().ok))
                 } else {
                     ("[ ] ", Style::default().fg(theme::gold()))
                 };

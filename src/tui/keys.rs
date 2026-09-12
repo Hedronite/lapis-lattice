@@ -126,6 +126,7 @@ impl App {
             Cmd::Hal => self.show_hal = !self.show_hal,
             Cmd::Tags => self.open_tags(),
             Cmd::Theme => self.next_theme(),
+            Cmd::FollowTheme => self.follow_host_theme(),
             Cmd::Buffers => {
                 if !self.tabs.is_empty() {
                     self.overlay = Some(Overlay::Buffers(self.active));
@@ -165,6 +166,12 @@ impl App {
 
     pub(crate) fn key(&mut self, k: KeyEvent, term: &mut DefaultTerminal) {
         if k.kind != KeyEventKind::Press && k.kind != KeyEventKind::Repeat {
+            return;
+        }
+        if self.too_small {
+            if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('q') {
+                self.request_quit();
+            }
             return;
         }
         if k.code == KeyCode::F(6) {

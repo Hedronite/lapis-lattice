@@ -45,6 +45,15 @@ impl Reader {
         self.anchor = None;
     }
 
+    /// A palette swap changes styles without moving the reading cursor or selection.
+    pub(crate) fn restyle(&mut self, lines: &[Line<'_>]) {
+        let anchor = self.anchor;
+        let cursor = self.cursor;
+        self.replace(lines);
+        self.cursor = cursor.min(self.glyphs.len());
+        self.anchor = anchor.map(|a| a.min(self.glyphs.len()));
+    }
+
     fn push(&mut self, symbol: &str, style: Style) {
         let start = self.text.len();
         self.text.push_str(symbol);

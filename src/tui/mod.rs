@@ -23,11 +23,13 @@ mod pointer;
 mod preview;
 mod reader;
 mod save;
+mod tabs;
 mod tags_view;
 mod tasks_view;
 mod theme;
 mod tree;
 mod vim;
+mod welcome;
 
 use std::time::{Duration, Instant};
 

@@ -72,20 +72,6 @@ pub fn classify(r: &Regions, m: &MouseEvent) -> Option<Action> {
     }
 }
 
-/// Tab under column offset `x`, given each tab's label width. Cells are laid
-/// out as ` label ` plus a separator, i.e. `label + 3` columns each.
-pub fn tab_at(label_widths: &[usize], x: u16) -> Option<usize> {
-    let mut left = 0u16;
-    for (i, w) in label_widths.iter().enumerate() {
-        let w = *w as u16 + 3;
-        if x >= left && x < left + w {
-            return Some(i);
-        }
-        left += w;
-    }
-    None
-}
-
 /// Wheel step, clamped to `[0, max - 1]`.
 pub fn scroll(cur: usize, max: usize, down: bool, step: usize) -> usize {
     if down { (cur + step).min(max.saturating_sub(1)) } else { cur.saturating_sub(step) }
@@ -140,16 +126,5 @@ mod tests {
         assert_eq!(scroll(98, 100, true, 3), 99);
         assert_eq!(scroll(2, 100, false, 3), 0);
         assert_eq!(scroll(0, 0, true, 3), 0);
-    }
-
-    #[test]
-    fn tab_hit_by_label_width() {
-        // " a.md " = 4+3 = 7 cols, then " notes.md " = 8+3 = 11 cols
-        let w = [4usize, 8];
-        assert_eq!(tab_at(&w, 0), Some(0));
-        assert_eq!(tab_at(&w, 6), Some(0));
-        assert_eq!(tab_at(&w, 7), Some(1));
-        assert_eq!(tab_at(&w, 17), Some(1));
-        assert_eq!(tab_at(&w, 18), None);
     }
 }

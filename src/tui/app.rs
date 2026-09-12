@@ -128,6 +128,7 @@ pub(crate) struct App {
     pub(crate) line_numbers: bool,
     pub(crate) focus: Focus,
     pub(crate) tabs: Vec<Tab>,
+    pub(crate) tab_slots: Vec<super::tabs::Slot>,
     pub(crate) active: usize,
     pub(crate) overlay: Option<Overlay>,
     pub(crate) tasks: Option<TasksView>,
@@ -150,7 +151,9 @@ pub(crate) struct App {
     pub(crate) pending_templates: Option<Vec<templates::Template>>,
     /// Name of the live Omarchy theme, when this is an Omarchy box.
     pub(crate) omarchy_theme: Option<String>,
+    pub(crate) follow_theme: bool,
     pub(crate) mouse_capture: bool,
+    pub(crate) too_small: bool,
     pub(crate) clipboard_register: u8,
     pub(crate) quit: bool,
 }
@@ -161,6 +164,7 @@ impl App {
         let trash_bucket = crate::ops::trash_bucket(&ctx);
         let mut tree = Tree::default();
         tree.load(&ctx.vault.root, "");
+        let follow_theme = ctx.cfg.theme.is_omarchy();
         let mut app = App {
             ctx,
             tree,
@@ -174,6 +178,7 @@ impl App {
             line_numbers: true,
             focus: Focus::Sidebar,
             tabs: vec![],
+            tab_slots: vec![],
             active: 0,
             overlay: None,
             tasks: None,
@@ -195,7 +200,9 @@ impl App {
             pointer: super::pointer::Pointer::default(),
             pending_templates: None,
             omarchy_theme: None,
+            follow_theme,
             mouse_capture: true,
+            too_small: false,
             clipboard_register: 0,
             quit: false,
         };
@@ -416,7 +423,7 @@ impl App {
                 ta.set_cursor_line_style(Style::default());
                 ta.set_line_number_style(theme::dim());
                 ta.set_selection_style(theme::selected());
-                ta.set_search_style(Style::default().bg(theme::gold()).fg(theme::BLUE_DEEP));
+                ta.set_search_style(Style::default().bg(theme::gold()).fg(theme::current().blue_deep));
                 let readonly = n.kind != notes::Kind::Markdown;
                 let mut tab = Tab {
                     rel: n.path.clone(),
@@ -536,31 +543,33 @@ impl App {
         t.record_edit((row, col));
     }
 
-    /// `Space z t`. On Omarchy this hops the OS theme so every app moves
-    /// together; the watcher then restyles us. Off Omarchy — or if the Omarchy
-    /// tools are missing or unhappy — it fails open onto the brand palettes
-    /// rather than leaving the user half-styled.
+    /// Theme overrides belong to this app; never mutate the desktop theme.
     pub(crate) fn next_theme(&mut self) {
-        if self.ctx.cfg.theme.is_omarchy() {
-            let current = self.omarchy_theme.clone().unwrap_or_default();
-            if let Some(next) = omarchy::next_theme(&current) {
-                match omarchy::theme_set(&next) {
-                    Ok(()) => {
-                        self.set_status(format!("omarchy theme: {next}"));
-                        return;
-                    }
-                    Err(e) => {
-                        // fail open: say why, keep the current palette, fall
-                        // through to the private palettes below
-                        self.set_status(format!("omarchy theme unchanged: {e}"));
-                        return;
-                    }
-                }
-            }
-        }
+        self.follow_theme = false;
         let next = theme::current().next();
         theme::install(next);
-        self.set_status(format!("theme: {}", next.name));
+        self.restyle_readers();
+        self.set_status(format!("theme: {} (app only); Space z T follows the host", next.name));
+    }
+
+    pub(crate) fn follow_host_theme(&mut self) {
+        self.follow_theme = true;
+        if let Some(loaded) = omarchy::state_root().and_then(|root| omarchy::load(&root)) {
+            theme::install(loaded.palette);
+            self.omarchy_theme = Some(loaded.name.clone());
+            self.set_status(format!("following host theme: {}", loaded.name));
+        } else {
+            theme::install(palette_from_config(&self.ctx.cfg.theme));
+            self.set_status("host theme unavailable; using configured palette");
+        }
+        self.restyle_readers();
+    }
+
+    fn restyle_readers(&mut self) {
+        for tab in &mut self.tabs {
+            tab.reader.restyle(&preview::render(&tab.preview_for));
+            tab.text.set_search_style(Style::default().bg(theme::gold()).fg(theme::current().blue_deep));
+        }
     }
 
     pub(crate) fn open_tasks(&mut self, view: View) {
@@ -839,7 +848,9 @@ impl App {
                     if let Some(state) = omarchy::state_root()
                         && path.starts_with(&state)
                     {
-                        if let Some(l) = omarchy::load(&state) {
+                        if self.follow_theme
+                            && let Some(l) = omarchy::load(&state)
+                        {
                             theme::install(l.palette);
                             let note = if l.fallbacks.is_empty() {
                                 String::new()
@@ -848,6 +859,7 @@ impl App {
                             };
                             self.set_status(format!("theme: {}{note}", l.name));
                             self.omarchy_theme = Some(l.name);
+                            self.restyle_readers();
                         }
                         continue;
                     }

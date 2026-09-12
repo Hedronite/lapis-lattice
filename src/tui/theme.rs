@@ -1,4 +1,4 @@
-//! Lapis palette: blue ground, cream ink, regent grey chrome, gold accents.
+//! Lapis palette: quiet navy ground, cream ink, restrained brand accents.
 //!
 //! Named palettes are switchable at runtime (`Space z t`); the active one lives
 //! in a process-wide slot so the draw code keeps calling `theme::chrome()` etc.
@@ -11,13 +11,10 @@ use std::sync::RwLock;
 use ratatui::style::{Color, Modifier, Style};
 
 pub const BLUE: Color = Color::Rgb(0x1F, 0x2D, 0x68);
-pub const BLUE_DEEP: Color = Color::Rgb(0x16, 0x20, 0x4C);
-pub const BLUE_SOFT: Color = Color::Rgb(0x2A, 0x3C, 0x84);
 pub const REGENT: Color = Color::Rgb(0x80, 0x9D, 0xAF);
 pub const CREAM: Color = Color::Rgb(0xF3, 0xE9, 0xD2);
 pub const GOLD: Color = Color::Rgb(0xD9, 0xB8, 0x5C);
 pub const COPPER: Color = Color::Rgb(0xC8, 0x7F, 0x4A);
-pub const MUTED: Color = Color::Rgb(0x5C, 0x6E, 0x9C);
 pub const OK: Color = Color::Rgb(0x8F, 0xC9, 0x8A);
 pub const WARN: Color = Color::Rgb(0xE8, 0x9C, 0x5A);
 
@@ -39,14 +36,14 @@ pub struct Palette {
 
 pub const LAPIS: Palette = Palette {
     name: "lapis",
-    blue: BLUE,
-    blue_deep: BLUE_DEEP,
-    blue_soft: BLUE_SOFT,
+    blue: Color::Rgb(0x12, 0x17, 0x22),
+    blue_deep: Color::Rgb(0x0D, 0x11, 0x1A),
+    blue_soft: Color::Rgb(0x24, 0x34, 0x52),
     regent: REGENT,
     cream: CREAM,
     gold: GOLD,
     copper: COPPER,
-    muted: MUTED,
+    muted: Color::Rgb(0x83, 0x93, 0xA8),
     ok: OK,
     warn: WARN,
 };
@@ -57,13 +54,13 @@ pub const PARCHMENT: Palette = Palette {
     blue: Color::Rgb(0xF3, 0xE9, 0xD2),
     blue_deep: Color::Rgb(0xE6, 0xDA, 0xBE),
     blue_soft: Color::Rgb(0xE0, 0xD2, 0xB0),
-    regent: Color::Rgb(0x4E, 0x62, 0x86),
-    cream: Color::Rgb(0x1F, 0x2D, 0x68),
-    gold: Color::Rgb(0x9A, 0x74, 0x1A),
-    copper: Color::Rgb(0xA3, 0x5B, 0x2A),
-    muted: Color::Rgb(0x8C, 0x8A, 0x7E),
-    ok: Color::Rgb(0x3E, 0x7D, 0x3A),
-    warn: Color::Rgb(0xB0, 0x5E, 0x1E),
+    regent: Color::Rgb(0x44, 0x57, 0x79),
+    cream: BLUE,
+    gold: Color::Rgb(0x82, 0x61, 0x11),
+    copper: Color::Rgb(0x91, 0x4D, 0x22),
+    muted: Color::Rgb(0x62, 0x66, 0x61),
+    ok: Color::Rgb(0x32, 0x6D, 0x30),
+    warn: Color::Rgb(0x8F, 0x45, 0x13),
 };
 
 /// Near-black ground for dim rooms; regent and gold kept.
@@ -76,7 +73,7 @@ pub const OBSIDIAN: Palette = Palette {
     cream: Color::Rgb(0xE8, 0xE4, 0xDA),
     gold: GOLD,
     copper: COPPER,
-    muted: Color::Rgb(0x5A, 0x60, 0x70),
+    muted: Color::Rgb(0x87, 0x90, 0xA4),
     ok: OK,
     warn: WARN,
 };
@@ -148,7 +145,7 @@ pub fn base() -> Style {
     Style::default().bg(p.blue).fg(p.cream)
 }
 pub fn chrome() -> Style {
-    Style::default().fg(current().regent)
+    Style::default().fg(current().muted)
 }
 pub fn focused() -> Style {
     Style::default().fg(current().gold)
@@ -185,7 +182,7 @@ pub fn heading(level: u8) -> Style {
     }
 }
 pub fn link() -> Style {
-    Style::default().fg(current().regent).add_modifier(Modifier::UNDERLINED)
+    Style::default().fg(current().muted).add_modifier(Modifier::UNDERLINED)
 }
 pub fn mode(mode: &str) -> Style {
     let p = current();
@@ -213,13 +210,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn built_in_reading_roles_have_legible_contrast() {
+        let luminance = |color: Color| {
+            let Color::Rgb(r, g, b) = color else { panic!("built-in colors must be explicit RGB") };
+            [r, g, b]
+                .into_iter()
+                .zip([0.2126, 0.7152, 0.0722])
+                .map(|(v, weight)| {
+                    let v = f64::from(v) / 255.0;
+                    (if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }) * weight
+                })
+                .sum::<f64>()
+        };
+        for p in PALETTES {
+            let pairs = [
+                (p.cream, p.blue),
+                (p.regent, p.blue),
+                (p.muted, p.blue),
+                (p.gold, p.blue),
+                (p.copper, p.blue),
+                (p.ok, p.blue),
+                (p.warn, p.blue),
+                (p.cream, p.blue_soft),
+                (p.regent, p.blue_deep),
+            ];
+            for (ink, ground) in pairs {
+                let (a, b) = (luminance(ink), luminance(ground));
+                let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+                assert!(ratio >= 4.5, "{} {ink:?} on {ground:?}: {ratio:.2}", p.name);
+            }
+        }
+    }
+
+    #[test]
     fn lapis_palette_constants() {
         assert_eq!(BLUE, Color::Rgb(0x1F, 0x2D, 0x68));
         assert_eq!(REGENT, Color::Rgb(0x80, 0x9D, 0xAF));
         assert_eq!(CREAM, Color::Rgb(0xF3, 0xE9, 0xD2));
         assert_eq!(GOLD, Color::Rgb(0xD9, 0xB8, 0x5C));
-        // the default palette IS the brand
-        assert_eq!(LAPIS.blue, BLUE);
+        // Canonical brand pigment stays intact; working surfaces are quieter.
+        assert_ne!(LAPIS.blue, BLUE);
         assert_eq!(LAPIS.regent, REGENT);
         assert_eq!(named("lapis"), Some(LAPIS));
         assert_eq!(named("LAPIS "), Some(LAPIS));
@@ -237,7 +267,7 @@ mod tests {
         assert_eq!(parse_hex("#GGGGGG"), None);
         let p = LAPIS.with_overrides([("gold", "#FFFFFF"), ("nope", "#000000"), ("blue", "bad")]);
         assert_eq!(p.gold, Color::Rgb(0xFF, 0xFF, 0xFF));
-        assert_eq!(p.blue, BLUE, "bad value ignored");
+        assert_eq!(p.blue, LAPIS.blue, "bad value ignored");
         assert_eq!(p.name, "custom");
         assert_eq!(
             LAPIS.with_overrides([("cream", "#F3E9D2")]).name,

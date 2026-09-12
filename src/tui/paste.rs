@@ -20,6 +20,10 @@ fn single_line(payload: &str) -> String {
 
 impl App {
     pub(crate) fn paste(&mut self, payload: String) {
+        if self.too_small {
+            self.set_status("enlarge the terminal before pasting");
+            return;
+        }
         if let Some(overlay) = self.overlay.as_mut() {
             match overlay {
                 Overlay::Palette(p) => {
