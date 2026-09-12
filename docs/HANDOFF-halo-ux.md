@@ -27,14 +27,14 @@ branch describe **implementation checkpoints**, not acceptance.
 Read in this order, then work. Do not invent a new plan.
 
 1. This file (`docs/HANDOFF-halo-ux.md`).
-2. Vault foundry (authoritative IDs and evidence):
-   - `foundry/lapis/GOAL-ux.md`
-   - `foundry/lapis/SPEC-ux.md`
-   - `foundry/lapis/CHECKLIST-ux.md` (32 IDs; **0 closed**)
-   - `foundry/lapis/RUBRIC-ux.md`
-   - `foundry/lapis/REVIEW-ux.md`
-   - `foundry/lapis/CHECKPOINT.md` (or `CHECKPOINT-ux.md` if that is the living name)
-   - `foundry/lapis/HANDOFF-codex-pause-2026-09-12.md` (Codex pause note)
+2. Vault foundry (authoritative IDs and evidence; private, not in this clone):
+   - `GOAL-ux.md`
+   - `SPEC-ux.md`
+   - `CHECKLIST-ux.md` (32 IDs; **0 closed**)
+   - `RUBRIC-ux.md`
+   - `REVIEW-ux.md`
+   - `CHECKPOINT.md` (or `CHECKPOINT-ux.md` if that is the living name)
+   - `HANDOFF-codex-pause-2026-09-12.md` (Codex pause note)
    - `evidence/ux/` (mostly empty / pending)
 3. Repo checkpoints on this tip:
    - [docs/desktop-workspace.md](desktop-workspace.md)
@@ -85,7 +85,7 @@ default), not a forced HTTP `:8080` client.
 
 ## GOAL-ux — U0–U7 working summary
 
-Authoritative wording is `foundry/lapis/GOAL-ux.md`. This table is the
+Authoritative wording is vault `GOAL-ux.md`. This table is the
 **landed-vs-gate map** at `3e94191` so Halo does not restart. Status means
 *code on the branch*, not CHECKLIST closure.
 
@@ -237,17 +237,20 @@ Measurement recipe: [docs/ux-performance.md](ux-performance.md). Fixture:
 
 ## Pointers
 
-### Vault foundry (SoT)
+### Vault foundry (SoT, private)
+
+These names are the GOAL-ux pack. They are not published in this repository
+(operator-topology gate). Halo already knows the vault tree.
 
 | Doc | Use |
 | --- | --- |
-| `foundry/lapis/GOAL-ux.md` | U0–U7 intent |
-| `foundry/lapis/SPEC-ux.md` | Contracts, non-goals, file/clipboard/session law |
-| `foundry/lapis/CHECKLIST-ux.md` | 32 IDs; still 0 closed |
-| `foundry/lapis/RUBRIC-ux.md` | What “pass” means; native vs headless |
-| `foundry/lapis/REVIEW-ux.md` | Halo updates this; no invented greens |
-| `foundry/lapis/CHECKPOINT.md` | Living slice note (name may be `CHECKPOINT-ux.md`) |
-| `foundry/lapis/HANDOFF-codex-pause-2026-09-12.md` | Codex pause; Halo named |
+| `GOAL-ux.md` | U0–U7 intent |
+| `SPEC-ux.md` | Contracts, non-goals, file/clipboard/session law |
+| `CHECKLIST-ux.md` | 32 IDs; still 0 closed |
+| `RUBRIC-ux.md` | What “pass” means; native vs headless |
+| `REVIEW-ux.md` | Halo updates this; no invented greens |
+| `CHECKPOINT.md` | Living slice note (name may be `CHECKPOINT-ux.md`) |
+| `HANDOFF-codex-pause-2026-09-12.md` | Codex pause; Halo named |
 | `evidence/ux/` | Artifacts or explicit `pending` |
 
 ### Repo on `feat/ux` @ `3e94191`
