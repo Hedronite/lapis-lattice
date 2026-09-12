@@ -16,7 +16,7 @@ use ratatui_textarea::TextArea;
 use crate::http::{Document, ListParams, Neighbor};
 use crate::ops::{self, Ctx, SearchQuery};
 use crate::tasks::Task;
-use crate::{hal, notes, tasks, templates, write};
+use crate::{notes, tasks, templates, write};
 use lapis_lattice::{Hit, Mode as SearchMode};
 
 use super::mouse::Regions;
@@ -109,7 +109,7 @@ impl Tab {
         let body = self.body();
         if body != self.preview_for {
             self.revision = next_revision();
-            self.reader.replace(&preview::render(&body));
+            self.reader.replace(&preview::for_file(&self.rel, &body));
             self.preview_for = body;
         }
     }
@@ -408,14 +408,14 @@ impl App {
             self.after_open();
             return;
         }
-        match notes::read(&self.root(), rel) {
+        match notes::read_for_tui(&self.root(), rel) {
             Ok(n) => {
-                let saved_source = if n.kind == notes::Kind::Markdown {
+                let saved_source = if matches!(n.kind, notes::Kind::Markdown | notes::Kind::Yaml) {
                     std::fs::read_to_string(self.root().join(&n.path)).ok()
                 } else {
                     None
                 };
-                let body = saved_source.as_deref().map(|s| hal::raw_parts(s).1).unwrap_or(&n.body);
+                let body = saved_source.as_deref().map(|s| write::editor_body(&n.path, s)).unwrap_or(&n.body);
                 let mut ta = TextArea::from(
                     body.replace("\r\n", "\n").split('\n').map(str::to_string).collect::<Vec<_>>(),
                 );
@@ -424,7 +424,8 @@ impl App {
                 ta.set_line_number_style(theme::dim());
                 ta.set_selection_style(theme::selected());
                 ta.set_search_style(Style::default().bg(theme::gold()).fg(theme::current().blue_deep));
-                let readonly = n.kind != notes::Kind::Markdown;
+                let readonly = !matches!(n.kind, notes::Kind::Markdown | notes::Kind::Yaml)
+                    || std::fs::metadata(self.root().join(&n.path)).is_ok_and(|m| m.permissions().readonly());
                 let mut tab = Tab {
                     rel: n.path.clone(),
                     text: ta,
@@ -469,13 +470,13 @@ impl App {
         if self.tabs[i].dirty {
             return;
         }
-        if let Ok(n) = notes::read(&self.root(), rel) {
-            let saved_source = if n.kind == notes::Kind::Markdown {
+        if let Ok(n) = notes::read_for_tui(&self.root(), rel) {
+            let saved_source = if matches!(n.kind, notes::Kind::Markdown | notes::Kind::Yaml) {
                 std::fs::read_to_string(self.root().join(rel)).ok()
             } else {
                 None
             };
-            let body = saved_source.as_deref().map(|s| hal::raw_parts(s).1).unwrap_or(&n.body);
+            let body = saved_source.as_deref().map(|s| write::editor_body(&n.path, s)).unwrap_or(&n.body);
             let t = &mut self.tabs[i];
             if saved_source.is_some() && saved_source == t.saved_source {
                 return;
@@ -567,7 +568,7 @@ impl App {
 
     fn restyle_readers(&mut self) {
         for tab in &mut self.tabs {
-            tab.reader.restyle(&preview::render(&tab.preview_for));
+            tab.reader.restyle(&preview::for_file(&tab.rel, &tab.preview_for));
             tab.text.set_search_style(Style::default().bg(theme::gold()).fg(theme::current().blue_deep));
         }
     }

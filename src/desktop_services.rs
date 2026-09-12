@@ -36,14 +36,9 @@ struct Service {
 
 impl Service {
     fn content(document: &Document, text: &str) -> String {
-        if document.kind == FileKind::Markdown {
-            let head = hal::raw_parts(&document.original).0;
-            let newline = if text.ends_with('\n') { "" } else { "\n" };
-            write::set_frontmatter_key(&format!("{head}{text}{newline}"), "updated", &write::today())
-        } else {
-            text.into()
-        }
+        write::editor_content(&document.path, &document.original, text)
     }
+
     fn contained(&self, rel: &str) -> Result<PathBuf, String> {
         let root = self.ctx.vault.root.canonicalize().map_err(|e| e.to_string())?;
         let path = if rel.is_empty() {

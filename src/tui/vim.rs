@@ -51,7 +51,7 @@ pub enum Action {
     /// `gt` / `gT`
     NextTab,
     PrevTab,
-    /// Space in NORMAL: hand over to the leader.
+    /// Space in NORMAL/VISUAL: hand over to the leader without editing selection.
     Leader,
     /// `?` in NORMAL
     Help,
@@ -487,7 +487,9 @@ impl Vim {
                 }
                 return Action::None;
             }
-            Input { key: Key::Char(' '), .. } if self.mode == Mode::Normal => return Action::Leader,
+            Input { key: Key::Char(' '), .. } if matches!(self.mode, Mode::Normal | Mode::Visual) => {
+                return Action::Leader;
+            }
             Input { key: Key::Char('?'), .. } if self.mode == Mode::Normal => return Action::Help,
             Input { key: Key::Char('s'), ctrl: true, .. } => return Action::Save,
             Input { key: Key::Char('l'), ctrl: true, .. } => return Action::ToggleCheckbox,

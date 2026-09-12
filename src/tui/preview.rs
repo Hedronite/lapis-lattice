@@ -7,6 +7,48 @@ use ratatui::text::{Line, Span};
 
 use super::theme;
 
+/// Source-like readers retain every character, including YAML document markers
+/// and literal Markdown-looking text in extracted PDFs.
+pub fn for_file(path: &str, text: &str) -> Vec<Line<'static>> {
+    match crate::notes::kind_of(path) {
+        crate::notes::Kind::Yaml => text
+            .split('\n')
+            .map(|line| {
+                if line.trim_start().starts_with('#') {
+                    Line::from(Span::styled(line.to_string(), theme::dim()))
+                } else if let Some(colon) = line
+                    .find(':')
+                    .filter(|i| line[*i + 1..].starts_with(char::is_whitespace) || *i + 1 == line.len())
+                {
+                    Line::from(vec![
+                        Span::styled(
+                            line[..colon + 1].to_string(),
+                            Style::default().fg(theme::current().regent),
+                        ),
+                        Span::styled(line[colon + 1..].to_string(), theme::code()),
+                    ])
+                } else {
+                    Line::from(Span::styled(line.to_string(), theme::code()))
+                }
+            })
+            .collect(),
+        crate::notes::Kind::Pdf => text
+            .split('\n')
+            .map(|line| {
+                Line::from(Span::styled(
+                    line.to_string(),
+                    if line.starts_with("Page ") {
+                        theme::link()
+                    } else {
+                        Style::default().fg(theme::cream())
+                    },
+                ))
+            })
+            .collect(),
+        _ => render(text),
+    }
+}
+
 #[derive(Default)]
 struct State {
     lines: Vec<Line<'static>>,

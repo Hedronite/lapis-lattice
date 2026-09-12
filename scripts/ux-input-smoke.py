@@ -22,14 +22,15 @@ save_receipts = []
 sessions = []
 
 class Session:
-    def __init__(self, name, remote=False, editor=False):
+    def __init__(self, name, remote=False, editor=False, filename="Clipboard.md", content=initial):
         sessions.append(self)
         self.root = out / name
         self.root.mkdir(exist_ok=True)
         self.vault = self.root / 'vault'
         self.vault.mkdir(exist_ok=True)
-        self.note = self.vault / 'Clipboard.md'
-        self.note.write_text(initial)
+        self.note = self.vault / filename
+        if isinstance(content, bytes): self.note.write_bytes(content)
+        else: self.note.write_text(content)
         config = self.root / 'config' / 'lapis'
         config.mkdir(parents=True, exist_ok=True)
         (config / 'config.toml').write_text('[lattice]\nmode = "embedded"\n')
@@ -180,6 +181,16 @@ copies = re.findall(rb'\x1b\]52;c;([^\x07]*)\x07', s.raw)
 results.append({'case':'preview-copy', 'content_matches':bool(copies) and base64.b64decode(copies[-1]) == b'anchor'})
 s.close()
 
+# The leader must remain a command prefix during Vim visual selection.
+# Otherwise `Space l c` falls through to a destructive visual change.
+s = Session('visual-leader-copy', remote=True)
+s.send(b'V lc')
+copies = re.findall(rb'\x1b\]52;c;([^\x07]*)\x07', s.raw)
+unchanged = s.saved().split('---\n',2)[-1]
+results.append({'case':'visual-leader-copy', 'copy_matches':bool(copies) and base64.b64decode(copies[-1])==b'anchor\n',
+                'buffer_unchanged':unchanged=='anchor\nsecond line\n'})
+s.close()
+
 if args.large:
     s = Session('large-paste')
     unit = 'line\t漢字 ' + 'x' * (64 - len('line\t漢字 \n'.encode())) + '\n'
@@ -277,6 +288,53 @@ else:
     copy_retained = False
 results.append({'case':'dirty-conflict', 'dirty_quit_guard':stayed, 'external_save_guard':conflict_retained, 'conflict_copy_preserved':copy_retained})
 if stayed: s.close()
+
+# YAML is literal source, including document separators and invalid structures.
+yaml_initial = '---\n# retained comment\n  unknown: &data [a, b]\ninvalid: [\n...'
+yaml_payload = '# pasted\n  # indented\n'
+s = Session('yaml-raw-save', filename='Settings.yml', content=yaml_initial)
+s.send(b'\x1b[200~' + yaml_payload.replace('\n','\r\n').encode() + b'\x1b[201~')
+after = s.saved()
+s.send(b'u')
+undone = s.saved()
+s.send(b'\x12')
+redone = s.saved()
+s.send(b'i# local\r')
+s.send(b'\x1b')
+s.note.write_text('agent: replacement\n')
+s.drain(0.2)
+s.saved()
+s.send(b' lS', 0.4)
+copies = list(s.vault.glob('Settings (Lapis copy *).yml'))
+results.append({'case':'yaml-raw-save', 'literal_source':after==yaml_payload+yaml_initial,
+                'undo_matches':undone==yaml_initial, 'redo_matches':redone==yaml_payload+yaml_initial,
+                'conflict_retained':s.note.read_text()=='agent: replacement\n',
+                'copy_keeps_extension':len(copies)==1,
+                'copy_keeps_source':bool(copies) and copies[0].read_text().endswith(yaml_initial),
+                'no_metadata_injection':bool(copies) and 'updated:' not in copies[0].read_text()})
+s.close()
+
+html = '<h1>Read &amp; retain</h1><p>Static reference body.</p><script>neverVisible()</script><table><tr><td>Name</td><td>Value</td></tr></table>'
+s = Session('html-static-reading', filename='Reference.html', content=html)
+visible = screen_text(s.raw)
+s.send(b'\x1b[200~not inserted\x1b[201~')
+s.send(b'\x13')
+results.append({'case':'html-static-reading', 'heading_visible':'Read & retain' in visible,
+                'body_visible':'Static reference body.' in visible,
+                'scripts_hidden':'neverVisible' not in visible, 'readonly_bytes':s.note.read_text()==html,
+                'save_rejected':'read-only' in screen_text(s.raw)})
+s.close()
+
+reference_root = Path(__file__).resolve().parent.parent/'testdata/ux-reference'
+for filename, marker in [('reference.pdf','Page 1 of 3'), ('scanned.pdf','No extractable text on this page.')]:
+    data = (reference_root/filename).read_bytes()
+    s = Session('pdf-'+filename, filename=filename, content=data)
+    visible = screen_text(s.raw)
+    s.send(b'\x1b[200~not inserted\x1b[201~')
+    s.send(b'\x13')
+    results.append({'case':'pdf-'+filename, 'reading_state_visible':''.join(marker.split()) in ''.join(visible.split()),
+                    'readonly_bytes':s.note.read_bytes()==data, 'save_rejected':'read-only' in screen_text(s.raw)})
+    s.close()
 
 report = {'binary':str(Path(args.bin).resolve()), 'binary_sha256':hashlib.sha256(Path(args.bin).read_bytes()).hexdigest(),
           'initial_sha256':hashlib.sha256(initial.encode()).hexdigest(), 'results':results, 'save_receipts':save_receipts}

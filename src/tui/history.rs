@@ -98,7 +98,7 @@ impl super::app::Tab {
         self.dirty = self
             .saved_source
             .as_ref()
-            .is_none_or(|source| crate::hal::raw_parts(source).1.replace("\r\n", "\n") != body);
+            .is_none_or(|source| crate::write::editor_body(&self.rel, source).replace("\r\n", "\n") != body);
     }
 
     pub(crate) fn undo_edit(&mut self, redo: bool) -> bool {
