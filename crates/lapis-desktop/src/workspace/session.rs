@@ -126,6 +126,8 @@ impl Workspace {
             self.tab_order.retain(|p| p != path);
             self.open_epoch += 1;
             self.opening = None;
+            self.status = format!("Closed {path}");
+            self.error = false;
         }
         self.focus_active(window, cx);
         cx.notify();

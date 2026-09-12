@@ -609,6 +609,7 @@ fn session_restore_is_lazy_clamps_changed_text_and_preserves_tab_order(cx: &mut 
         })
         .unwrap();
     handle.update(cx, |this, w, cx| this.close_path("missing.md", w, cx)).unwrap();
+    assert!(!handle.read_with(cx, |this, _| this.error).unwrap());
     handle.update(cx, |this, w, cx| this.close_path("first.md", w, cx)).unwrap();
     assert_eq!(
         handle.read_with(cx, |this, _| this.tabs[this.active].document.path.clone()).unwrap(),
