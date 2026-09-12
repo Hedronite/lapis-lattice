@@ -30,6 +30,8 @@ impl App {
             Cmd::SearchText => self.overlay = Some(Overlay::Palette(Palette::new(""))),
             Cmd::Commands => self.overlay = Some(Overlay::Palette(Palette::new(">"))),
             Cmd::BuildIndex => self.build_index(),
+            Cmd::Back => self.navigate(false),
+            Cmd::Forward => self.navigate(true),
             Cmd::ToggleSidebar => {
                 self.show_sidebar = !self.show_sidebar;
                 if !self.show_sidebar && self.focus == Focus::Sidebar {
@@ -214,6 +216,19 @@ impl App {
                     self.overlay = Some(Overlay::Pane);
                     return;
                 }
+                // Vim jump-list habit and the browser habit, outside insert/prompt input.
+                (true, _, KeyCode::Char('o')) if self.editor_is_normal() => {
+                    self.navigate(false);
+                    return;
+                }
+                (false, true, KeyCode::Left) => {
+                    self.navigate(false);
+                    return;
+                }
+                (false, true, KeyCode::Right) => {
+                    self.navigate(true);
+                    return;
+                }
                 (_, true, KeyCode::Char(c)) if c.is_ascii_digit() => {
                     let n = (c as u8 - b'1') as usize;
                     if n < self.tabs.len() {
@@ -314,6 +329,11 @@ impl App {
                         self.focus = Focus::Editor;
                     }
                     Some(Item::Command { cmd, .. }) => self.run(cmd, term),
+                    None if p.error.take().is_some() => {
+                        p.asked.clear();
+                        self.overlay = Some(Overlay::Palette(p));
+                        self.lattice_search(SearchMode::Bm25);
+                    }
                     None => self.overlay = Some(Overlay::Palette(p)),
                 },
                 KeyCode::Down => {
@@ -334,6 +354,7 @@ impl App {
                 }
                 KeyCode::Backspace => {
                     p.input.pop();
+                    p.error = None;
                     if p.is_commands() {
                         p.refresh_commands();
                     } else if p.input.is_empty() {
@@ -344,6 +365,7 @@ impl App {
                 }
                 KeyCode::Char(c) => {
                     p.input.push(c);
+                    p.error = None;
                     if p.is_commands() {
                         p.refresh_commands();
                     }
