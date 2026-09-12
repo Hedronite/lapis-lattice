@@ -48,9 +48,9 @@ impl App {
             prompt.text.push_str(&single_line(&payload));
             return;
         }
+        let cursor = t.text.cursor();
         if insert(&mut t.vim, &mut t.text, &payload) {
-            t.dirty = true;
-            t.refresh_preview();
+            t.record_edit((cursor.0, cursor.1));
         }
     }
 }

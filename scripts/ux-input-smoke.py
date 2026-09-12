@@ -85,6 +85,54 @@ for name, mode, data in [
               'bracketed_enabled':b'\x1b[?2004h' in s.raw}
     s.close()
     results.append(result)
+# A selection replacement must undo as a single transaction, including after
+# an explicit save and the resulting filesystem watcher notification.
+for name, selection in [('paste-undo', b''), ('visual-paste-undo', b'vlll')]:
+    s = Session(name)
+    if selection: s.send(selection)
+    s.send(b'\x1b[200~'+payload.encode()+b'\x1b[201~', 0.4)
+    after = s.saved().split('---\n', 2)[-1]
+    expected = payload + ('hor\nsecond line\n' if selection else 'anchor\nsecond line\n')
+    s.send(b'u')
+    undone = s.saved().split('---\n', 2)[-1]
+    s.send(b'\x12')
+    redone = s.saved().split('---\n', 2)[-1]
+    results.append({'case':name, 'content_matches':after==expected,
+                    'undo_matches':undone=='anchor\nsecond line\n', 'redo_matches':redone==expected})
+    s.close()
+
+# Real crossterm mouse packets through a PTY, measured against the rendered
+# 120x32 layout. This checks app dispatch, not the user's native pointer route.
+s = Session('mouse-replace-undo')
+s.send(b'\x1b[<0;34;3M')
+s.send(b'\x1b[<32;40;3M')
+s.send(b'\x1b[<0;40;3m')
+s.send(b'\x1b[200~'+payload.encode()+b'\x1b[201~', 0.4)
+after = s.saved().split('---\n', 2)[-1]
+s.send(b'u')
+undone = s.saved().split('---\n', 2)[-1]
+results.append({'case':'mouse-replace-undo', 'body':after,
+                'content_matches':after==payload+'\nsecond line\n',
+                'undo_matches':undone=='anchor\nsecond line\n'})
+s.close()
+
+# Quit and save must retain dirty content when an agent changes the same file.
+s = Session('dirty-conflict')
+s.send(b'iunsaved')
+s.send(b'\x1b')
+s.send(b'\x11')
+stayed = os.waitpid(s.pid, os.WNOHANG)[0] == 0
+if stayed:
+    external = initial.replace('anchor', 'external')
+    s.note.write_text(external)
+    s.drain(0.2)
+    s.saved()
+    conflict_retained = s.note.read_text() == external
+else:
+    conflict_retained = False
+results.append({'case':'dirty-conflict', 'dirty_quit_guard':stayed, 'external_save_guard':conflict_retained})
+if stayed: s.close()
+
 report = {'binary':str(Path(args.bin).resolve()), 'binary_sha256':hashlib.sha256(Path(args.bin).read_bytes()).hexdigest(),
           'initial_sha256':hashlib.sha256(initial.encode()).hexdigest(), 'results':results}
 (out/'results.json').write_text(json.dumps(report, indent=2)+'\n')

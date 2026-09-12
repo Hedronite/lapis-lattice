@@ -37,6 +37,8 @@ pub(crate) enum Msg {
     Reindexed(String, std::result::Result<Option<u64>, String>),
     Tasks(Vec<Task>),
     Health(bool),
+    ClipboardCopy(std::result::Result<String, String>),
+    ClipboardPaste(String, (usize, usize), std::result::Result<String, String>),
     Fs(PathBuf),
 }
 
@@ -91,6 +93,7 @@ pub(crate) struct Tab {
     pub(crate) readonly: bool,
     /// Exact disk contents last read/saved, for detecting external edits.
     pub(crate) saved_source: Option<String>,
+    pub(crate) history: super::history::History,
 }
 
 impl Tab {
@@ -137,9 +140,12 @@ pub(crate) struct App {
     pub(crate) trash_bucket: String,
     pub(crate) regions: Regions,
     pub(crate) pending_g: bool,
+    pub(crate) pointer: super::pointer::Pointer,
     pub(crate) pending_templates: Option<Vec<templates::Template>>,
     /// Name of the live Omarchy theme, when this is an Omarchy box.
     pub(crate) omarchy_theme: Option<String>,
+    pub(crate) mouse_capture: bool,
+    pub(crate) clipboard_register: u8,
     pub(crate) quit: bool,
 }
 
@@ -180,8 +186,11 @@ impl App {
             trash_bucket,
             regions: Regions::default(),
             pending_g: false,
+            pointer: super::pointer::Pointer::default(),
             pending_templates: None,
             omarchy_theme: None,
+            mouse_capture: true,
+            clipboard_register: 0,
             quit: false,
         };
         app.start_watcher();
@@ -393,6 +402,7 @@ impl App {
                 let mut ta = TextArea::from(
                     body.replace("\r\n", "\n").split('\n').map(str::to_string).collect::<Vec<_>>(),
                 );
+                ta.set_max_histories(0);
                 ta.set_cursor_line_style(Style::default());
                 ta.set_line_number_style(theme::dim());
                 ta.set_selection_style(theme::selected());
@@ -410,6 +420,7 @@ impl App {
                     preview_for: String::new(),
                     readonly,
                     saved_source,
+                    history: super::history::History::default(),
                 };
                 tab.refresh_preview();
                 self.tabs.push(tab);
@@ -438,6 +449,9 @@ impl App {
 
     pub(crate) fn reload_tab(&mut self, rel: &str) {
         let Some(i) = self.tabs.iter().position(|t| t.rel == rel) else { return };
+        if self.tabs[i].dirty {
+            return;
+        }
         if let Ok(n) = notes::read(&self.root(), rel) {
             let saved_source = if n.kind == notes::Kind::Markdown {
                 std::fs::read_to_string(self.root().join(rel)).ok()
@@ -446,10 +460,14 @@ impl App {
             };
             let body = saved_source.as_deref().map(|s| hal::raw_parts(s).1).unwrap_or(&n.body);
             let t = &mut self.tabs[i];
+            if saved_source.is_some() && saved_source == t.saved_source {
+                return;
+            }
             let cursor = t.text.cursor();
             let mut ta = TextArea::from(
                 body.replace("\r\n", "\n").split('\n').map(str::to_string).collect::<Vec<_>>(),
             );
+            ta.set_max_histories(0);
             ta.set_cursor_line_style(Style::default());
             ta.set_line_number_style(theme::dim());
             ta.set_selection_style(theme::selected());
@@ -459,6 +477,7 @@ impl App {
             t.hal_valid = n.hal_valid;
             t.dirty = false;
             t.saved_source = saved_source;
+            t.history = super::history::History::default();
             t.refresh_preview();
         }
     }
@@ -524,6 +543,10 @@ impl App {
 
     pub(crate) fn toggle_checkbox_at_cursor(&mut self) {
         let Some(t) = self.tab_mut() else { return };
+        if t.readonly {
+            self.set_status("read-only buffer");
+            return;
+        }
         let c = t.text.cursor();
         let (row, col) = (c.0, c.1);
         let line = t.text.lines()[row].clone();
@@ -542,7 +565,7 @@ impl App {
         t.text.delete_line_by_end();
         t.text.insert_str(&new_line);
         t.text.move_cursor(CursorMove::Jump(row as u16, col.min(new_line.chars().count()) as u16));
-        t.dirty = true;
+        t.record_edit((row, col));
     }
 
     /// `Space z t`. On Omarchy this hops the OS theme so every app moves
@@ -737,7 +760,10 @@ impl App {
         ratatui::restore();
         let status = std::process::Command::new(&editor).arg(&abs).status();
         *term = ratatui::init();
-        let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
+        let _ = crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
+        if self.mouse_capture {
+            let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+        }
         match status {
             Ok(_) => {
                 self.reload_tab(&rel);
@@ -818,6 +844,21 @@ impl App {
                         t.set_tasks(list);
                     }
                 }
+                Msg::ClipboardCopy(result) => self.set_status(match result {
+                    Ok(message) => message,
+                    Err(error) => format!("clipboard: {error}; Vim register retained"),
+                }),
+                Msg::ClipboardPaste(rel, cursor, result) => match result {
+                    Ok(payload)
+                        if self.overlay.is_none()
+                            && self.focus == Focus::Editor
+                            && self.tab().is_some_and(|t| t.rel == rel && t.text.cursor() == cursor) =>
+                    {
+                        self.paste(payload)
+                    }
+                    Ok(_) => self.set_status("clipboard paste cancelled: active editor changed"),
+                    Err(error) => self.set_status(format!("clipboard: {error}")),
+                },
                 Msg::Health(ok) => self.lattice_ok = Some(ok),
                 Msg::Fs(path) => {
                     // A theme swap restyles in place; no restart, no reindex.

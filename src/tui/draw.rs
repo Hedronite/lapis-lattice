@@ -158,6 +158,15 @@ impl App {
                 t.text.set_block(Block::default().borders(Borders::ALL).title(title).border_style(border));
                 t.text.set_cursor_style(if focused { t.vim.cursor_style() } else { Style::default() });
                 t.text.set_style(theme::base());
+                t.text.set_selection_style(theme::selected());
+                let wrap = if self.wrap {
+                    ratatui_textarea::WrapMode::WordOrGlyph
+                } else {
+                    ratatui_textarea::WrapMode::None
+                };
+                if t.text.wrap_mode() != wrap {
+                    t.text.set_wrap_mode(wrap);
+                }
                 f.render_widget(&t.text, area);
             }
             None => {

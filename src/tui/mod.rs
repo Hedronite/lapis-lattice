@@ -6,17 +6,20 @@
 //! `block_in_place`. The watcher is non-recursive and capped (no EMFILE).
 
 mod app;
+mod clipboard;
 mod draw;
 mod keys;
 
 mod hal_view;
 mod help;
+mod history;
 mod leader;
 mod mouse;
 mod neighbors_view;
 mod omarchy;
 mod palette;
 mod paste;
+mod pointer;
 mod preview;
 mod tags_view;
 mod tasks_view;
@@ -60,6 +63,7 @@ fn ui_loop(app: &mut App, term: &mut DefaultTerminal) -> Result<()> {
     let mut last_health = Instant::now();
     while !app.quit {
         app.drain();
+        app.pointer_tick();
         if last_health.elapsed() > Duration::from_secs(30) {
             app.poll_health();
             last_health = Instant::now();

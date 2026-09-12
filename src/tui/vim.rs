@@ -68,6 +68,7 @@ pub struct Vim {
     pub mode: Mode,
     pending: Option<char>,
     pub prompt: Option<Prompt>,
+    pub(crate) selection_exclusive: bool,
     count: usize,
 }
 
@@ -79,7 +80,7 @@ impl Default for Vim {
 
 impl Vim {
     pub fn new() -> Self {
-        Self { mode: Mode::Normal, pending: None, prompt: None, count: 0 }
+        Self { mode: Mode::Normal, pending: None, prompt: None, selection_exclusive: false, count: 0 }
     }
 
     pub(crate) fn clear_pending(&mut self) {
@@ -447,11 +448,13 @@ impl Vim {
                 return Action::None;
             }
             Input { key: Key::Char('v'), ctrl: false, .. } if self.mode == Mode::Normal => {
+                self.selection_exclusive = false;
                 ta.start_selection();
                 self.mode = Mode::Visual;
                 return Action::None;
             }
             Input { key: Key::Char('V'), ctrl: false, .. } if self.mode == Mode::Normal => {
+                self.selection_exclusive = true;
                 Self::select_line(ta);
                 self.mode = Mode::Visual;
                 return Action::None;
@@ -518,7 +521,9 @@ impl Vim {
                 return Action::None;
             }
             Input { key: Key::Char('y'), ctrl: false, .. } if self.mode == Mode::Visual => {
-                ta.move_cursor(CursorMove::Forward);
+                if !self.selection_exclusive {
+                    ta.move_cursor(CursorMove::Forward);
+                }
                 let start = ta.selection_range().map(|(s, _)| s);
                 ta.copy();
                 if let Some((r, c)) = start {
@@ -528,13 +533,17 @@ impl Vim {
                 return Action::None;
             }
             Input { key: Key::Char('d'), ctrl: false, .. } if self.mode == Mode::Visual => {
-                ta.move_cursor(CursorMove::Forward);
+                if !self.selection_exclusive {
+                    ta.move_cursor(CursorMove::Forward);
+                }
                 ta.cut();
                 self.mode = Mode::Normal;
                 return Action::None;
             }
             Input { key: Key::Char('c'), ctrl: false, .. } if self.mode == Mode::Visual => {
-                ta.move_cursor(CursorMove::Forward);
+                if !self.selection_exclusive {
+                    ta.move_cursor(CursorMove::Forward);
+                }
                 ta.cut();
                 self.mode = Mode::Insert;
                 return Action::None;
