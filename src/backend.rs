@@ -22,12 +22,18 @@ use crate::notes::{self, Kind};
 const IDENTIFIER_WINDOW: u32 = 50;
 const IDENTIFIER_MODALITY: &str = "identifier";
 
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
 /// What `lapis doctor` and `vault info` report, per `schema/v0.2/health.schema.json`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Health {
     pub status: String,
     pub documents_indexed: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub stale_documents: u64,
     pub db_path: String,
     /// Resolved, not requested: `none` until vectors land (slice 2).
     pub embedder: String,
@@ -344,6 +350,7 @@ impl Backend {
                 Ok(Health {
                     status: h.status,
                     documents_indexed: h.documents_indexed,
+                    stale_documents: h.stale_documents,
                     db_path: h.db_path,
                     embedder: h.embedder.to_string(),
                     embed_model: h.embed_model,
@@ -360,6 +367,7 @@ impl Backend {
                 Ok(Health {
                     status: h.status,
                     documents_indexed: h.documents_indexed,
+                    stale_documents: h.extra.get("stale_documents").and_then(Value::as_u64).unwrap_or(0),
                     db_path: h.db_path.unwrap_or_else(|| c.base().to_string()),
                     // the HTTP lattice owns its own embedder; report what it says
                     embedder: h

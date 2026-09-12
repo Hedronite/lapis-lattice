@@ -258,7 +258,12 @@ impl App {
             let health = backend
                 .health()
                 .await
-                .map(|h| IndexHealth { embedded, built: h.graph.built, documents: h.documents_indexed })
+                .map(|h| IndexHealth {
+                    embedded,
+                    built: h.graph.built,
+                    documents: h.documents_indexed,
+                    stale: h.stale_documents,
+                })
                 .map_err(|e| e.to_string());
             let _ = tx.send(Msg::Health(health));
         });

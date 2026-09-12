@@ -151,11 +151,18 @@ pub struct Graph {
 pub struct Health {
     pub status: String,
     pub documents_indexed: u64,
+    /// Indexed paths missing on disk, new walkable files, or mtime drift.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub stale_documents: u64,
     pub db_path: String,
     pub embedder: &'static str,
     pub embed_model: Option<String>,
     pub embed_dim: Option<u32>,
     pub graph: Graph,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// The embedding space recorded in an index, read without a provider round-trip.
@@ -308,7 +315,9 @@ impl Engine {
     }
 
     pub fn health(&self) -> Result<Health> {
-        sqlite::health(&self.conn, &self.db_path())
+        let mut h = sqlite::health(&self.conn, &self.db_path())?;
+        h.stale_documents = index::stale_count(&self.conn, &self.vault)?;
+        Ok(h)
     }
 
     pub fn analytics(&self, query: &str) -> Result<Analytics> {
@@ -364,10 +373,20 @@ mod tests {
 
         let h = e.health().unwrap();
         assert_eq!(h.documents_indexed, 2);
+        assert_eq!(h.stale_documents, 0);
         assert!(h.graph.built, "reindex stamps graph_built");
         assert!(h.graph.dangling_links >= 1);
         assert_eq!(h.embedder, "none");
         assert_eq!(h.status, "ok");
+
+        std::fs::write(d.join("notes/New.md"), "# New\n").unwrap();
+        assert_eq!(e.health().unwrap().stale_documents, 1, "unindexed file counts as stale");
+        std::fs::write(
+            d.join("Welcome.md"),
+            "---\nname: Welcome\ntags: [intro]\n---\n# Welcome\n\nChanged.\n",
+        )
+        .unwrap();
+        assert!(e.health().unwrap().stale_documents >= 1, "mtime drift counts as stale");
 
         let tags = e.analytics("tags").unwrap();
         assert_eq!(tags.query, "tags");
