@@ -23,6 +23,7 @@ ap.add_argument('--host', required=True, help='e.g. "castle; release built on ci
 ap.add_argument('--ids', default='U1c,U2b,U2d')
 ap.add_argument('--native', help='JSON list of native rows done by a person, merged into the record')
 ap.add_argument('--schema', help='path to evidence.schema.json to validate against (needs jsonschema)')
+ap.add_argument('--artifact-prefix', default='', help='prefix for artifact paths, e.g. runtime/tip-<sha7>-tui/ when the records live in evidence/ux/')
 args = ap.parse_args()
 out = Path(args.out).resolve()
 out.mkdir(parents=True, exist_ok=True)
@@ -173,11 +174,13 @@ for id_ in ids:
         'fixture': {'id': spec['fixture'], 'manifest_sha256': fixture_manifest_sha(spec['fixture']), 'privacy': 'synthetic'},
         'steps': steps, 'expected': spec['expected'],
         'actual': f"{verdict.upper()}: {actual_rows}. Failed rows: {failed_rows or 'none'}." + (f" Native rows outstanding: {missing_native}." if missing_native else ''),
-        'artifacts': artifacts, 'limitations': limitations, 'blocker': None, 'measurements': measurements,
-        'rows': row_results,
+        'artifacts': [args.artifact_prefix + a for a in artifacts + [f'{id_}-{args.code_sha[:7]}-rows.json']],
+        'limitations': limitations, 'blocker': None, 'measurements': measurements,
     }
     path = out / f'{id_}-{args.code_sha[:7]}-tui-evidence.json'
     path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + '\n')
+    # The row → route mapping stays next to the record as an artifact, outside the schema.
+    (out / f'{id_}-{args.code_sha[:7]}-rows.json').write_text(json.dumps({'id': id_, 'rows': row_results}, indent=2) + '\n')
     written.append((id_, verdict, str(path)))
 
 if args.schema:
@@ -185,10 +188,8 @@ if args.schema:
         import jsonschema
         schema = json.loads(Path(args.schema).read_text())
         for _, _, p in written:
-            rec = json.loads(Path(p).read_text())
-            rec.pop('rows', None)
-            jsonschema.validate(rec, schema)
-        print('schema: all records valid (without the informal rows field)')
+            jsonschema.validate(json.loads(Path(p).read_text()), schema)
+        print('schema: all records valid')
     except ImportError:
         print('schema: jsonschema not installed; skipped')
 for id_, verdict, p in written:
