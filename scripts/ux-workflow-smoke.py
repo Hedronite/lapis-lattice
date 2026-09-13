@@ -258,11 +258,41 @@ def r_help():
     s.send(b'?'); s.wait('help', lambda t: ' help ' in t); s.keys(b'\x1b')
 
 
+def click(x, y):
+    # SGR mouse press + release at 1-based terminal coordinates.
+    s.send(f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode(), 0.3)
+
+
+def r_mouse_parity():
+    open_note(s, 'Alpha')
+    # Keyboard: Shift+Tab cycles focus back to the sidebar; mouse reaches the same panes by click.
+    s.send(b'\x1b[Z', 0.3); s.wait('backtab-to-sidebar', lambda t: s.status().lstrip().startswith('FILES'))
+    # Sidebar rows (list starts under the border): notes, Alpha, Beta, Gamma once expanded.
+    rows = s.screen().splitlines()
+    beta_row = next(i for i, line in enumerate(rows) if line[:28].strip().endswith('Beta.md'))
+    # First click selects the row, the second opens it (folders toggle the same way).
+    click(6, beta_row + 1)
+    s.wait('click-selects-beta', lambda t: s.status().lstrip().startswith('FILES') and 'notes/Alpha.md' in s.status())
+    click(6, beta_row + 1)
+    # Opening by click keeps the sidebar focused, like Enter does.
+    s.wait('click-opens-beta', lambda t: 'notes/Beta.md' in s.status())
+    # Tab bar: clicking the first tab switches back to Alpha; Alt+1 does the same by keyboard.
+    tabs_line = s.screen().splitlines()[0]
+    alpha_x = tabs_line.index('Alpha.md') + 1
+    click(alpha_x, 1)
+    s.wait('click-tab-alpha', lambda t: 'notes/Alpha.md' in s.status())
+    s.send(b'\x1b2', 0.3); s.wait('alt-2-beta', lambda t: 'notes/Beta.md' in s.status())
+    # Preview and editor panes take focus by click; Tab reaches them by keyboard.
+    click(100, 10); s.wait('click-preview', lambda t: s.status().lstrip().startswith('PREVIEW'))
+    click(45, 10); s.wait('click-editor', lambda t: s.status().lstrip().startswith('NORMAL'))
+    return {'beta_row': beta_row, 'alpha_tab_x': alpha_x}
+
+
 for name, fn in [('index', r_index), ('outline', r_outline), ('history', r_history), ('palette-states', r_palette_states),
                  ('buffers', r_buffers), ('tasks', r_tasks), ('daily', r_daily), ('new-note', r_new_note),
                  ('template', r_template), ('capture', r_capture), ('tags', r_tags), ('hal', r_hal),
                  ('neighbors', r_neighbors), ('trash-restore', r_trash_restore), ('external-editor', r_external_editor),
-                 ('help', r_help)]:
+                 ('help', r_help), ('mouse-parity', r_mouse_parity)]:
     s.route(name, fn)
 s.close()
 
