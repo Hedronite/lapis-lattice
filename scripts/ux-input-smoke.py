@@ -17,6 +17,7 @@ out = Path(args.out).resolve()
 out.mkdir(parents=True, exist_ok=True)
 initial = '---\ntitle: Clipboard fixture\ncustom: preserve-me\n---\nanchor\nsecond line\n'
 payload = 'first line\n    indented line\n\nlast line\n'
+command_like = ':q!\n:wq\ndd\nZZ\n:!echo pwned\n'
 
 save_receipts = []
 sessions = []
@@ -130,13 +131,16 @@ for name, mode, data in [
     # Unbracketed terminals: the burst must be inserted literally, not run as keys.
     ('paste-lf-normal', b'', payload.encode()),
     ('paste-crlf-normal', b'', payload.replace('\n', '\r\n').encode()),
+    # Command-like lines must land as text, never run: the note stays open and unchanged
+    # apart from the insertion (checked by the expected body below).
+    ('command-like-normal', b'', command_like.encode()),
 ]:
     s = Session(name)
     if mode: s.send(mode)
     s.send(data, 0.4)
     saved = s.saved()
     body = saved.split('---\n', 2)[-1]
-    expected = ('typed ' if name == 'typed-save' else payload) + 'anchor\nsecond line\n'
+    expected = ('typed ' if name == 'typed-save' else command_like if name == 'command-like-normal' else payload) + 'anchor\nsecond line\n'
     result = {'case':name, 'body':body, 'expected':expected, 'content_matches':body==expected,
               'custom_preserved':'custom: preserve-me' in saved,
               'bracketed_enabled':b'\x1b[?2004h' in s.raw}
