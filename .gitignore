@@ -20,3 +20,6 @@ lattice.sqlite*
 # Rust
 /target
 Cargo.lock.bak
+
+.ux-evidence/
+scripts/__pycache__/

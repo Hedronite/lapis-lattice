@@ -6,7 +6,7 @@ row of the ID to the routes/cases that cover it.
 The verdict is computed from what ran here: `pass` only when every row of the ID is
 covered by passing routes and the ID has no outstanding native row; otherwise
 `pending` with the missing rows in `limitations`. Native rows (a person pasting in
-Zed on castle, a lathe terminal) can be supplied with --native as a JSON list of
+Zed on castle, a linux-smoke-host terminal) can be supplied with --native as a JSON list of
 {row, host, terminal, steps, result} entries and are merged verbatim.
 
 This does not touch a real vault; the smokes create disposable fixtures under --out.
@@ -87,7 +87,7 @@ ROWS = {
             'terminal restoration after an external editor': ('case', ['external-editor']),
             '1 MiB payload integrates with one undo/redo': ('case', ['large-paste']),
         },
-        'native_rows': ['castle / Zed terminal: actual multiline paste with the terminal paste shortcut', 'lathe / installed terminal: actual multiline paste'],
+        'native_rows': ['castle / Zed terminal: actual multiline paste with the terminal paste shortcut', 'linux-smoke-host / installed terminal: actual multiline paste'],
         'fixture': 'clipboard-fixture (ux-input-smoke.py)',
     },
     'U2b': {
