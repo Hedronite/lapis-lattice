@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Run the TUI PTY routes against one binary and write one evidence record per
-checklist ID (U1c, U2b, U2d) in the UX evidence schema shape, mapping every rubric
+checklist ID (U1c, U2b, U2d, U4b) in the UX evidence schema shape, mapping every rubric
 row of the ID to the routes/cases that cover it.
 
 The verdict is computed from what ran here: `pass` only when every row of the ID is
@@ -20,7 +20,7 @@ ap.add_argument('--bin', required=True)
 ap.add_argument('--out', required=True)
 ap.add_argument('--code-sha', required=True, help='full git SHA the binary was built from')
 ap.add_argument('--host', required=True, help='e.g. "castle; release built on citadel"')
-ap.add_argument('--ids', default='U1c,U2b,U2d')
+ap.add_argument('--ids', default='U1c,U2b,U2d,U4b')
 ap.add_argument('--native', help='JSON list of native rows done by a person, merged into the record')
 ap.add_argument('--schema', help='path to evidence.schema.json to validate against (needs jsonschema)')
 ap.add_argument('--artifact-prefix', default='', help='prefix for artifact paths, e.g. runtime/tip-<sha7>-tui/ when the records live in evidence/ux/')
@@ -53,7 +53,7 @@ if any(i in ids for i in ('U2b', 'U2d')):
     rc = run('ux-workflow-smoke', [])
     results['workflow'] = json.loads((out / 'ux-workflow-smoke' / 'results.json').read_text())
     results['workflow']['exit'] = rc
-if 'U1c' in ids:
+if any(i in ids for i in ('U1c', 'U4b')):
     rc = run('ux-input-smoke', ['--large'])
     text = (out / 'ux-input-smoke.log').read_text()
     results['input'] = json.loads(text[text.index('{'):text.rindex('}') + 1])
@@ -119,6 +119,17 @@ ROWS = {
         },
         'native_rows': [],
         'fixture': 'workflow-fixture (ux-workflow-smoke.py)',
+    },
+    'U4b': {
+        'expected': 'HTML static reading and YAML source editing pass representative/malformed files; indentation and unknown HAL fields survive intended edits.',
+        'surface': 'tui', 'kind': 'acceptance',
+        'rows': {
+            'static HTML reading and read-only guard': ('case', ['html-static-reading']),
+            'malformed YAML source editing': ('case', ['yaml-raw-save']),
+            'indentation and unknown HAL fields survive': ('case', ['yaml-raw-save']),
+        },
+        'native_rows': [],
+        'fixture': 'clipboard-fixture (ux-input-smoke.py)',
     },
 }
 
