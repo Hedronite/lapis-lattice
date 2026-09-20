@@ -172,6 +172,8 @@ pub struct SearchQuery {
     pub mmr: bool,
     pub include_archives: bool,
     pub embedder: Option<String>,
+    /// Post-retrieve Jev shadow gate. Does not replace the index.
+    pub rerank_jev: bool,
 }
 
 impl Default for SearchQuery {
@@ -186,6 +188,7 @@ impl Default for SearchQuery {
             mmr: false,
             include_archives: false,
             embedder: None,
+            rerank_jev: false,
         }
     }
 }
@@ -228,11 +231,16 @@ fn prepare_search(q: SearchQuery) -> Result<(SearchParams, u32, u32)> {
 }
 
 pub async fn search(ctx: &Ctx, q: SearchQuery) -> Result<SearchPage> {
+    let rerank_jev = q.rerank_jev;
     let (params, limit, offset) = prepare_search(q)?;
     let mut result = ctx.backend()?.search(&params).await?;
     let total = result.hits.len();
     result.hits = result.hits.into_iter().skip(offset as usize).collect();
     result.count = result.hits.len();
+    if rerank_jev {
+        crate::jev::apply_rerank(&mut result, crate::jev::Transport::resolve()).await?;
+        result.count = result.hits.len();
+    }
     let requested = offset + limit;
     let truncated = total as u32 >= requested && requested < SEARCH_CAP;
     Ok(SearchPage { result, truncated, next: if truncated { Some(requested) } else { None }, limit, offset })
@@ -511,6 +519,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// Offline: `--rerank-jev` without a key leaves retrieve hits and does not
+    /// treat that as an approval.
+    #[tokio::test]
+    async fn rerank_without_key_is_unavailable_not_approve() {
+        let (d, ctx) = golden_ctx();
+        let old_force = std::env::var_os("LAPIS_JEV_TRANSPORT");
+        unsafe { std::env::set_var("LAPIS_JEV_TRANSPORT", "none") };
+        let page = search(
+            &ctx,
+            SearchQuery {
+                query: "GOAL-struct".into(),
+                limit: 10,
+                embedder: Some("none".into()),
+                per_doc: true,
+                rerank_jev: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        match old_force {
+            Some(v) => unsafe { std::env::set_var("LAPIS_JEV_TRANSPORT", v) },
+            None => unsafe { std::env::remove_var("LAPIS_JEV_TRANSPORT") },
+        }
+        assert!(!page.result.hits.is_empty(), "retrieve still answers");
+        assert!(page.result.hits.iter().all(|h| h.jev.is_none()));
+        let meta = page.result.jev.expect("page jev");
+        assert_eq!(meta["status"], "unavailable");
+        assert_eq!(meta["approved"], false);
+        assert_eq!(meta["shadow"], true);
+        assert_eq!(meta["reranked"], false);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// G4a: boost is defined and called once; TUI/MCP/CLI do not re-fuse.
     #[test]
     fn identifier_boost_is_one_site() {
@@ -528,6 +570,9 @@ mod tests {
         assert!(include_str!("tui/app.rs").contains("ops::search"), "TUI palette uses ops::search");
         assert!(include_str!("mcp.rs").contains("ops::search"), "MCP uses ops::search");
         assert!(include_str!("main.rs").contains("ops::search"), "CLI uses ops::search");
+        assert!(include_str!("main.rs").contains("rerank_jev"), "CLI wires --rerank-jev");
+        assert!(include_str!("mcp.rs").contains("rerank_jev"), "MCP wires rerank_jev");
+        assert!(!include_str!("tui/app.rs").contains("rerank_jev"), "TUI palette does not call the Jev gate");
     }
 
     /// G4b: no second `Hit`; sources we own stay under 1000 lines.

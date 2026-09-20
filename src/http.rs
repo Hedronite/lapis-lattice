@@ -151,6 +151,9 @@ pub struct SearchResult {
     pub latency: Latency,
     pub count: usize,
     pub hits: Vec<Hit>,
+    /// Shadow Jev report when `--rerank-jev` ran. Never a Lattice secret.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jev: Option<Value>,
 }
 
 impl SearchResult {
@@ -165,6 +168,7 @@ impl SearchResult {
             latency: Latency::default(),
             count: hits.len(),
             hits,
+            jev: None,
         }
     }
 }
@@ -194,6 +198,7 @@ impl From<RawHit> for Hit {
             chunk_id: r.chunk_id,
             chunk_index: r.chunk_index,
             path,
+            jev: None,
         }
     }
 }
@@ -574,6 +579,7 @@ impl Client {
             latency: raw.latency.unwrap_or_default(),
             count: hits.len(),
             hits,
+            jev: None,
         })
     }
 
@@ -777,6 +783,7 @@ mod tests {
             tags: vec![],
             chunk_id: None,
             chunk_index: None,
+            jev: None,
         };
         let j = serde_json::to_value(&hit).unwrap();
         assert_eq!(j["rank"], 1);

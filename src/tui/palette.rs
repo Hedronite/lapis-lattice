@@ -116,6 +116,7 @@ mod tests {
             tags: vec![],
             chunk_id: None,
             chunk_index: None,
+            jev: None,
         };
         let mut p = Palette::new("spec");
         p.pending = true;

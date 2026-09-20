@@ -70,6 +70,9 @@ pub struct Hit {
     pub chunk_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chunk_index: Option<i64>,
+    /// Post-retrieve judge annotation. Never written to sqlite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jev: Option<serde_json::Value>,
 }
 
 /// Retrieval arm selection. The embedded engine is FTS-only in 0.2, so
