@@ -141,6 +141,7 @@ fn hit_from_doc(d: Document) -> Hit {
         chunk_id: None,
         chunk_index: None,
         path,
+        jev: None,
     }
 }
 

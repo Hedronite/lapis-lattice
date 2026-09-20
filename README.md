@@ -87,6 +87,7 @@ Default search, list, neighbors (hop-1), and doctor talk to the embedded index. 
 lapis init ~/Notes
 lapis --vault ~/Notes
 lapis --vault ~/Notes --json search welcome
+lapis --vault ~/Notes --json search welcome --rerank-jev
 lapis --vault ~/Notes --json list
 lapis --vault ~/Notes doctor
 ```
@@ -101,6 +102,7 @@ lapis --vault ~/Notes doctor
 |---|---|
 | TUI (files / editor / tasks), JSON CLI envelope, MCP | Windows |
 | Embedded CLI search / list / hop-1 / doctor (no `:8080`) | Homebrew tap / formula; macOS Developer ID + notarization |
+| `lapis search … --rerank-jev` (shadow Jev gate; Facet TypeSafe) | TUI palette Jev rerank |
 | Tasks, dailies, templates (`note`, `daily`, `weekly`, `monthly`, `adr`) | Hop-2 ego and `tree-retrieve` on the embedded default (honest HTTP-required) |
 | HTML and YAML as first-class kinds | Dummy / fallback embeddings (will not ship) |
 | TUI Omarchy live-follow (`colors.toml`) | TUI palette search on the embedded default (still talks HTTP `:8080`) |

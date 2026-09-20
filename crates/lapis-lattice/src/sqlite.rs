@@ -423,6 +423,7 @@ fn hit_from_row(r: HitRow) -> Hit {
         chunk_id: Some(r.chunk_id),
         chunk_index: r.chunk_index,
         path: r.path,
+        jev: None,
     }
 }
 

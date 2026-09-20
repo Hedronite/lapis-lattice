@@ -11,6 +11,10 @@ not rewritten. After merge: tag `v0.4.1`, publish `lapis-lattice@0.4.1`.
 - Stranger README/install: live vs next table (crates.io `0.1.0` today; `cargo add lapis-lattice@0.4.1` after publish) vs Release/git for the `lapis` binary.
 - Operator-topology scrub: private build-host references removed from the public tree; `scrub-gate.sh` enforces.
 - `pack-release` fails when root `lapis` crate version ≠ git tag.
+- `lapis search … --rerank-jev` (MCP `search.rerank_jev`): post-retrieve
+  Jev Noul/Score/Choice over top-k hits via the Facet TypeSafe recipe.
+  Shadow only; empty/uncertain ≠ approve. Key from Facet env /
+  `$TYPESAFE_API_KEY`, never Lattice. See [docs/jev-native.md](docs/jev-native.md).
 
 ## 0.4.0 — 2026-09-11
 

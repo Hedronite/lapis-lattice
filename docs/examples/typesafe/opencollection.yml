@@ -1,0 +1,85 @@
+# Lapis Jev hit-rerank (Facet TypeSafe recipe). Transport SoT: Facet
+# docs/examples/typesafe. Hydrate typesafeApiKey via `facet env set --secret`
+# from $TYPESAFE_API_KEY. Never bake a key here or in Lattice bodies.
+# jevShadow=true is classify-only.
+opencollection: 1.0.0
+info:
+  name: TypeSafe Jev (Lapis rerank)
+  summary: Post-retrieve query↔chunk gate via Facet System One. Secret typesafeApiKey from Facet env — never YAML/Lattice.
+  version: 0.1.0
+bundled: true
+config:
+  environments:
+    - name: typesafe
+      variables:
+        - name: typesafeApi
+          value: https://api.typesafe.ai
+        - secret: true
+          name: typesafeApiKey
+          type: string
+        - name: jevModel
+          value: jev-latest
+        - name: state
+          value: "lapis search rerank: does this chunk answer the query?"
+        - name: jevShadow
+          value: "true"
+items:
+  - info:
+      name: System One
+      type: folder
+      seq: 1
+    items:
+      - info:
+          name: Hit rerank
+          type: http
+          seq: 1
+        http:
+          method: POST
+          url: "{{typesafeApi}}/v1/systemone"
+          headers:
+            - name: Authorization
+              value: "Bearer {{typesafeApiKey}}"
+            - name: Content-Type
+              value: application/json
+            - name: Accept
+              value: application/json
+          body:
+            type: json
+            data: |-
+              {
+                "state": "{{state}}",
+                "model": "{{jevModel}}",
+                "questions": {
+                  "answers": {
+                    "type": "noul",
+                    "instructions": "Does this chunk answer the search query?",
+                    "criteria": {
+                      "true": "The chunk contains information that directly answers the query",
+                      "false": "The chunk is off-topic or does not answer the query"
+                    }
+                  },
+                  "relevance": {
+                    "type": "score",
+                    "instructions": "How relevant is this chunk to the query?",
+                    "criteria": [
+                      "Unrelated; no useful overlap with the query",
+                      "Tangentially related; shared terms only",
+                      "Partially useful; some supporting detail",
+                      "Directly answers the query"
+                    ]
+                  },
+                  "cite": {
+                    "type": "choice",
+                    "instructions": "How does this chunk relate to the query as a citation?",
+                    "criteria": {
+                      "supports": "The chunk supports an answer to the query",
+                      "contradicts": "The chunk contradicts or refutes an answer to the query",
+                      "unrelated": "The chunk is not a citation for the query"
+                    }
+                  }
+                }
+              }
+        settings:
+          timeout: 30000
+          followRedirects: true
+          maxRedirects: 0

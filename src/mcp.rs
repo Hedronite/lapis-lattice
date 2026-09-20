@@ -39,7 +39,8 @@ Lapis: a local Markdown notes vault with Lapis Lattice retrieval.
 10. Every result is `structuredContent` = {ok, data, meta}. meta.truncated / meta.next tell you to page (offset).
 11. `search_and_read` returns top hits with HAL meta and a body snippet in one call; `read_note` takes heading / chunk / max_chars.
 12. Notes are also resources: `lapis://note/{path}` (body as text/markdown). `resolve_link` maps a [[wikilink]] or dst_raw to a path.
-13. `neighbors` with hop=2 returns the ego graph (rows carry depth and via). `tree_retrieve` walks hub-first from a seed or a query. `analytics` runs named read-only queries over the index (inventory, priority, tags, health, recent, hubs, density, degree, dangling).";
+13. `neighbors` with hop=2 returns the ego graph (rows carry depth and via). `tree_retrieve` walks hub-first from a seed or a query. `analytics` runs named read-only queries over the index (inventory, priority, tags, health, recent, hubs, density, degree, dangling).
+14. `search.rerank_jev` is a shadow Jev gate over the returned hits (Facet TypeSafe recipe). Empty/uncertain ≠ approve; it does not replace BM25/embed.";
 
 pub const NOTE_URI_PREFIX: &str = "lapis://note/";
 
@@ -132,6 +133,8 @@ pub struct SearchArg {
     pub mode: Option<String>,
     /// Collapse to the best chunk per document. Default `[agent].per_doc` (true).
     pub per_doc: Option<bool>,
+    /// Post-retrieve Jev gate over the returned hits (shadow; Facet TypeSafe recipe).
+    pub rerank_jev: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -289,6 +292,7 @@ fn search_query(a: SearchArg, default_per_doc: bool) -> std::result::Result<Sear
         mmr: false,
         include_archives: false,
         embedder: None,
+        rerank_jev: a.rerank_jev.unwrap_or(false),
     })
 }
 
@@ -753,6 +757,9 @@ mod tests {
         assert!(!q.per_doc);
         assert_eq!((q.limit, q.mode, q.offset), (3, lapis_lattice::Mode::Bm25, 6));
         assert!(search_query(arg(r#"{"query":"x","mode":"sideways"}"#), true).is_err());
+        let q = search_query(arg(r#"{"query":"lattice","rerank_jev":true}"#), true).unwrap();
+        assert!(q.rerank_jev);
+        assert!(!search_query(arg(r#"{"query":"lattice"}"#), true).unwrap().rerank_jev);
     }
 
     /// N2 / N4: arg defaults documented in the schema match the handlers.

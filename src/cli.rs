@@ -427,6 +427,10 @@ pub struct SearchArgs {
     /// (`auto` is resolved at open, not per search).
     #[arg(long, value_name = "PROVIDER", value_parser = ["none", "auto", "ollama", "onnx"])]
     pub embedder: Option<String>,
+
+    /// Post-retrieve Jev gate over the returned hits (shadow; Facet TypeSafe recipe).
+    #[arg(long)]
+    pub rerank_jev: bool,
 }
 
 impl SearchArgs {
@@ -756,6 +760,21 @@ mod tests {
             panic!()
         };
         assert_eq!((t.depth, t.max_nodes), (2, 60));
+    }
+
+    #[test]
+    fn search_rerank_jev_parses() {
+        let Command::Search(s) =
+            Cli::try_parse_from(["lapis", "search", "welcome", "--rerank-jev"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert!(s.rerank_jev);
+        let Command::Search(s) = Cli::try_parse_from(["lapis", "search", "welcome"]).unwrap().command()
+        else {
+            panic!()
+        };
+        assert!(!s.rerank_jev);
     }
 
     #[test]

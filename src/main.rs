@@ -13,6 +13,7 @@ mod envelope;
 mod error;
 mod hal;
 mod http;
+mod jev;
 mod mcp;
 mod notes;
 mod ops;
@@ -217,6 +218,7 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
             mmr: args.mmr,
             include_archives: args.include_archives,
             embedder: args.embedder.clone(),
+            rerank_jev: args.rerank_jev,
         },
     )
     .await?;
@@ -247,9 +249,16 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
             Some(format!("score={:.4}", h.score)),
         ]);
         println!("    {}{meta}", h.title);
+        if let Some(line) = crate::jev::hit_line(h) {
+            println!("    {line}");
+        }
     }
     if let Some(ms) = result.latency_ms {
         eprintln!("{} hits · lattice {:.0} ms · {}", result.count, ms, result.modalities.join("+"));
+    }
+    if let Some(j) = &result.jev {
+        let status = j.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+        eprintln!("jev {status} · shadow · not approved");
     }
     Ok(())
 }
