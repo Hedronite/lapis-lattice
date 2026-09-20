@@ -256,6 +256,10 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
     if let Some(ms) = result.latency_ms {
         eprintln!("{} hits · lattice {:.0} ms · {}", result.count, ms, result.modalities.join("+"));
     }
+    if let Some(j) = &result.jev {
+        let status = j.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+        eprintln!("jev {status} · shadow · not approved");
+    }
     Ok(())
 }
 

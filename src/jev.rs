@@ -504,7 +504,12 @@ mod tests {
     fn collection_is_secret_and_shadow_and_has_no_key() {
         assert!(!FACET_COLLECTION.contains("sk-"));
         assert!(!FACET_COLLECTION.contains("Bearer ts_"));
-        assert!(!FACET_COLLECTION.contains("TYPESAFE_API_KEY"));
+        assert!(
+            FACET_COLLECTION.contains("$TYPESAFE_API_KEY"),
+            "comments may name the env var; the YAML must not bake a value"
+        );
+        let body = FACET_COLLECTION.split("data: |-").nth(1).unwrap_or("");
+        assert!(!body.contains("TYPESAFE_API_KEY"), "recipe JSON must not mention the key");
         assert!(FACET_COLLECTION.contains("secret: true"));
         assert!(FACET_COLLECTION.contains("typesafeApiKey"));
         assert!(FACET_COLLECTION.contains("jevShadow"));
