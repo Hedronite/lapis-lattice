@@ -2,7 +2,6 @@
 //! this module is the judge, not a writer and not an index.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -104,9 +103,17 @@ pub struct JevJudgment {
 
 /// How to reach System One. Never holds a Lattice row.
 pub enum Transport {
-    None { reason: &'static str },
-    Http { endpoint: String, key: String },
-    Facet { bin: PathBuf },
+    None {
+        reason: &'static str,
+    },
+    Http {
+        endpoint: String,
+        key: String,
+    },
+    Facet {
+        bin: PathBuf,
+    },
+    #[cfg(test)]
     Fake(FakeScript),
 }
 
@@ -118,20 +125,23 @@ impl std::fmt::Debug for Transport {
                 f.debug_struct("Http").field("endpoint", endpoint).field("key", &"<redacted>").finish()
             }
             Transport::Facet { bin } => f.debug_struct("Facet").field("bin", bin).finish(),
+            #[cfg(test)]
             Transport::Fake(_) => write!(f, "Fake"),
         }
     }
 }
 
 /// Canned System One bodies, front to back. Offline tests only.
+#[cfg(test)]
 #[derive(Clone)]
 pub struct FakeScript {
-    replies: std::sync::Arc<Mutex<Vec<std::result::Result<Value, String>>>>,
+    replies: std::sync::Arc<std::sync::Mutex<Vec<std::result::Result<Value, String>>>>,
 }
 
+#[cfg(test)]
 impl FakeScript {
     pub fn replies(replies: Vec<Value>) -> Self {
-        Self { replies: std::sync::Arc::new(Mutex::new(replies.into_iter().map(Ok).collect())) }
+        Self { replies: std::sync::Arc::new(std::sync::Mutex::new(replies.into_iter().map(Ok).collect())) }
     }
 }
 
@@ -162,6 +172,7 @@ impl Transport {
             Transport::None { .. } => "none",
             Transport::Http { .. } => "http",
             Transport::Facet { .. } => "facet",
+            #[cfg(test)]
             Transport::Fake(_) => "fake",
         }
     }
@@ -169,6 +180,7 @@ impl Transport {
     async fn decide(&self, state: &str) -> std::result::Result<Value, String> {
         match self {
             Transport::None { reason } => Err((*reason).into()),
+            #[cfg(test)]
             Transport::Fake(script) => {
                 let mut q = script.replies.lock().map_err(|_| "fake lock".to_string())?;
                 match q.first() {
@@ -301,17 +313,10 @@ fn parse_facet_answers(v: &Value) -> std::result::Result<Value, String> {
 
 /// Judge the returned page. Missing transport ≠ approve; hits stay.
 pub async fn apply_rerank(result: &mut SearchResult, transport: Transport) -> Result<()> {
-    match &transport {
-        Transport::None { reason } => {
-            result.jev = Some(serde_json::to_value(JevMeta::new(
-                "none",
-                "unavailable",
-                false,
-                Some((*reason).into()),
-            ))?);
-            return Ok(());
-        }
-        _ => {}
+    if let Transport::None { reason } = &transport {
+        result.jev =
+            Some(serde_json::to_value(JevMeta::new("none", "unavailable", false, Some((*reason).into())))?);
+        return Ok(());
     }
     let query = result.query.clone();
     let mut parsed = Vec::with_capacity(result.hits.len());
@@ -365,7 +370,7 @@ fn apply_shadow_order(result: &mut SearchResult) {
         return;
     }
     let mut next = Vec::with_capacity(result.hits.len());
-    let mut old = std::mem::take(&mut result.hits);
+    let old = std::mem::take(&mut result.hits);
     for (pos, (i, _)) in judged.iter().enumerate() {
         let mut hit = old[*i].clone();
         if let Some(v) = hit.jev.as_mut().and_then(Value::as_object_mut) {
@@ -452,6 +457,7 @@ pub fn hit_line(hit: &Hit) -> Option<String> {
 mod tests {
     use super::*;
     use lapis_lattice::Mode;
+    use std::sync::Mutex;
 
     fn hit(path: &str, rank: u32, snippet: &str) -> Hit {
         Hit {

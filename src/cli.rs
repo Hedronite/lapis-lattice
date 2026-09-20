@@ -777,6 +777,7 @@ mod tests {
         assert!(!s.rerank_jev);
     }
 
+    #[test]
     fn search_embedder_none_parses() {
         let Command::Search(s) =
             Cli::try_parse_from(["lapis", "search", "welcome", "--embedder", "none"]).unwrap().command()
