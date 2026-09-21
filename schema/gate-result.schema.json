@@ -13,7 +13,7 @@
     },
     "path": {
       "type": "string",
-      "description": "Atrium-relative path that was checked"
+      "description": "Vault-relative path that was checked"
     },
     "status": {
       "type": "string",

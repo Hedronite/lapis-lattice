@@ -1,6 +1,6 @@
 //! `rag-fm-wikilink-gate@0.1.0` — deterministic frontmatter and wikilink check.
 //!
-//! In scope: Atrium-relative markdown creates and touches under `foundry/**`
+//! In scope: vault-relative markdown creates and touches under `foundry/**`
 //! and `agents/mail_room/**`. The default mode is shadow: the [`GateResult`]
 //! is logged and the write proceeds. `LAPIS_RAG_GATE=hard` refuses `fail` and
 //! `cannot_tell`. Reads never enter this module.
@@ -671,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_is_atrium_relative_markdown_only() {
+    fn scope_is_vault_relative_markdown_only() {
         assert!(in_scope("foundry/note.md"));
         assert!(in_scope("foundry/a/b.markdown"));
         assert!(in_scope("agents/mail_room/Merci/2026-09-21.md"));
