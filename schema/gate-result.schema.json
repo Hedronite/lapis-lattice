@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hedronite.local/foundry/rag-gate/gate-result.schema.json",
+  "title": "GateResult",
+  "description": "Result of rag-fm-wikilink-gate@0.1.0 deterministic check (pre-Jev).",
+  "type": "object",
+  "required": ["policyId", "status", "reasons"],
+  "additionalProperties": false,
+  "properties": {
+    "policyId": {
+      "type": "string",
+      "const": "rag-fm-wikilink-gate@0.1.0"
+    },
+    "path": {
+      "type": "string",
+      "description": "Atrium-relative path that was checked"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ok", "fail", "cannot_tell"]
+    },
+    "reasons": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/reason" }
+    },
+    "enriched": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "keysAdded": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "linksRetargeted": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["from", "to"],
+            "additionalProperties": false,
+            "properties": {
+              "from": { "type": "string" },
+              "to": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "remainderEligible": {
+      "type": "boolean",
+      "description": "True when Jev Choice may run (cannot_tell / named debt only)"
+    }
+  },
+  "$defs": {
+    "reason": {
+      "type": "object",
+      "required": ["code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "missing_fm_fence",
+            "missing_fm_key",
+            "invalid_fm",
+            "dangling_wikilink",
+            "ambiguous_wikilink",
+            "verified_forbidden",
+            "out_of_scope",
+            "other"
+          ]
+        },
+        "message": { "type": "string" },
+        "path": { "type": "string" },
+        "link": { "type": "string" },
+        "key": { "type": "string" }
+      }
+    }
+  }
+}

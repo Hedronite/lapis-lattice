@@ -19,6 +19,7 @@ mod notes;
 mod ops;
 mod overlay;
 mod pdf_render;
+mod rag_gate;
 mod resolve;
 mod safe_file;
 mod tasks;
@@ -120,6 +121,7 @@ async fn dispatch(ctx: Ctx, cmd: Command) -> Result<()> {
         Command::Vault { command: VaultCommand::Info } => vault_info(&ctx).await,
         Command::Search(args) => search(&ctx, args).await,
         Command::Read(args) => read(&ctx, args),
+        Command::CheckNote(args) => check_note(&ctx, args),
         Command::Neighbors(args) => neighbors(&ctx, args).await,
         Command::Resolve(args) => resolve_link(&ctx, args),
         Command::Analytics(args) => analytics(&ctx, args).await,
@@ -264,6 +266,18 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
 }
 
 // ----------------------------------------------------------------------- read
+
+/// `lapis check-note`: GateResult JSON on stdout. Never writes, never blocks a read.
+fn check_note(ctx: &Ctx, args: cli::CheckNoteArgs) -> Result<()> {
+    let (rel, abs) = notes::resolve(&ctx.vault.root, &args.path)?;
+    let bytes = std::fs::read(&abs)?;
+    let text = String::from_utf8(bytes).map_err(|_| LapisError::Usage(format!("{rel}: not UTF-8 text")))?;
+    let review = rag_gate::review(&ctx.vault.root, &rel, &text);
+    let mut out = std::io::stdout().lock();
+    serde_json::to_writer_pretty(&mut out, &review.result)?;
+    out.write_all(b"\n")?;
+    Ok(())
+}
 
 fn read(ctx: &Ctx, args: ReadArgs) -> Result<()> {
     let mut note = notes::read(&ctx.vault.root, &args.path)?;
