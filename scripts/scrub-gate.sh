@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Fail if a public clone still leaks operator topology.
 # Exception: docs/internal-history.md (not linked from README).
-# "Hedronite" is allowed in CREDITS.md and any LICENSE file.
+# "Hedronite" is allowed in CREDITS.md, any LICENSE file, and the canonical
+# public repo URL (github.com/Hedronite/lapis-lattice). Other mentions stay banned.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -29,6 +30,12 @@ pats = [
 skip_dirs = {".git", "target", "testdata"}
 skip_files = {"docs/internal-history.md", "scripts/scrub-gate.sh"}
 allow_hedronite = {"CREDITS.md"}
+# Longer forms first so a full URL and a markdown label both redact cleanly.
+canonical_slugs = (
+    "https://raw.githubusercontent.com/Hedronite/lapis-lattice",
+    "https://github.com/Hedronite/lapis-lattice",
+    "Hedronite/lapis-lattice",
+)
 hits = []
 for dirpath, dirs, fnames in os.walk("."):
     dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
@@ -50,8 +57,15 @@ for dirpath, dirs, fnames in os.walk("."):
             ):
                 continue
             for i, line in enumerate(text.splitlines(), 1):
-                if re.search(pat, line):
-                    hits.append(f"{rel}:{i}: /{pat}/ {line.strip()[:120]}")
+                if not re.search(pat, line):
+                    continue
+                if pat == r"Hedronite":
+                    redacted = line
+                    for slug in canonical_slugs:
+                        redacted = redacted.replace(slug, "")
+                    if not re.search(pat, redacted):
+                        continue
+                hits.append(f"{rel}:{i}: /{pat}/ {line.strip()[:120]}")
 if hits:
     print(f"scrub-gate: {len(hits)} hit(s)")
     print("\n".join(hits[:80]))

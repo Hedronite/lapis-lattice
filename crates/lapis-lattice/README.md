@@ -2,7 +2,7 @@
 
 Embedded **SQLite + FTS5** index for a folder of Markdown files.
 
-This is the in-process recall engine for [Lapis](https://github.com/VirtualMachinist/lapis-lattice): BM25 search, a `[[wikilink]]` graph, and allowlisted analytics. It writes `<vault>/.lapis/lattice.sqlite` and **never** rewrites user notes.
+This is the in-process recall engine for [Lapis](https://github.com/Hedronite/lapis-lattice): BM25 search, a `[[wikilink]]` graph, and allowlisted analytics. It writes `<vault>/.lapis/lattice.sqlite` and **never** rewrites user notes.
 
 - No HTTP daemon required
 - No Turso / libsql
@@ -12,12 +12,12 @@ This is the in-process recall engine for [Lapis](https://github.com/VirtualMachi
 ## Install
 
 This crate is the engine library only — it does not ship the `lapis` CLI/TUI binary.
-For the app, see the [repo README](https://github.com/VirtualMachinist/lapis-lattice#install).
+For the app, see the [repo README](https://github.com/Hedronite/lapis-lattice#install).
 
-Live on crates.io today: `0.1.0` (`cargo add lapis-lattice`). After `v0.4.1` is tagged and published:
+Live on crates.io today: `0.4.1` (`cargo add lapis-lattice`). After `v0.4.2` is tagged and published:
 
 ```bash
-cargo add lapis-lattice@0.4.1
+cargo add lapis-lattice@0.4.2
 ```
 
 ```rust,no_run

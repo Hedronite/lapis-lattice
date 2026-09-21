@@ -1,20 +1,77 @@
 # Changelog
 
-## 0.4.1 — unreleased (crates.io truth cut)
+## 0.4.2 — 2026-09-21
 
-First Cargo/crates.io version aligned with the product line. The `v0.4.0`
-GitHub Release already shipped with crate `0.1.0` in the binary — that asset is
-not rewritten. After merge: tag `v0.4.1`, publish `lapis-lattice@0.4.1`.
+The cut that ships `--rerank-jev`. Tag `v0.4.1` (2026-09-11) is already
+published and does not include this flag. This section is the version and
+notes for the next tag. The tag, GitHub Release, and `cargo publish` of
+`lapis-lattice@0.4.2` happen after merge. Root `lapis` stays `publish = false`.
 
-- `lapis` and `lapis-lattice` crate versions → `0.4.1` (`lapis --version` matches).
-- Root `lapis` crate: `publish = false` (name squatted on crates.io); only `lapis-lattice` is publishable.
-- Stranger README/install: live vs next table (crates.io `0.1.0` today; `cargo add lapis-lattice@0.4.1` after publish) vs Release/git for the `lapis` binary.
-- Operator-topology scrub: private build-host references removed from the public tree; `scrub-gate.sh` enforces.
-- `pack-release` fails when root `lapis` crate version ≠ git tag.
+Crate `repository` and `homepage` are
+`https://github.com/Hedronite/lapis-lattice`.
+
+### Jev rerank
+
 - `lapis search … --rerank-jev` (MCP `search.rerank_jev`): post-retrieve
   Jev Noul/Score/Choice over top-k hits via the Facet TypeSafe recipe.
   Shadow only; empty/uncertain ≠ approve. Key from Facet env /
   `$TYPESAFE_API_KEY`, never Lattice. See [docs/jev-native.md](docs/jev-native.md).
+
+### Search
+
+- FTS matches path and title as well as body. Dotted names such as
+  `AGENTS.md` stay searchable tokens. Identifier hits are boosted after
+  retrieve.
+- CLI, MCP, and TUI search share one `Hit` / `SearchParams` and the same
+  operations layer. Hop-2 and `tree-retrieve` on the embedded index still
+  refuse with a typed HTTP-only error instead of an empty result.
+
+### TUI
+
+- Pointer selection, clipboard copy, literal bracketed paste, and raw
+  LF/CRLF paste. Undo is one transaction across those edits.
+- YAML saves as the bytes you typed. PDF and HTML open as read-only
+  references (no script, no fetch).
+- An external change during save keeps the buffer; `Space l S` writes a
+  copy beside it. A clean file reloads; a dirty one does not.
+- Back/forward through notes, and search failure is its own state.
+- A vault with no index gets an explicit background build, with files/total
+  on the status line. Stale index drift is reported. Idle frames are not
+  redrawn unless workspace state changed.
+
+### Desktop
+
+Built with `--features desktop` (off in the default CLI asset).
+
+- Notes workspace: sidebar, find, Live Markdown with the caret block left
+  as source, Vim motions, literal paste, resizable panes, and back/forward.
+- Normal exit restores visible tabs, cursor, and pane layout. Split right
+  and split below are independent documents; the same file is not mounted
+  twice.
+- Notes workflows (new note, daily/weekly/monthly, templates, tasks, trash)
+  and a refresh when something else writes the vault.
+- The vault graph opens inside the workspace on request. PDF pages render
+  in a cancellable reader; the PDFium runtime is packaged beside the app
+  and is never downloaded on open.
+- An idle Live note no longer repaints on caret blink.
+
+## 0.4.1 — 2026-09-11
+
+Tagged `v0.4.1`. crates.io truth cut.
+
+Git tag, Cargo (`lapis` and `lapis-lattice`), and `lapis --version` are
+**0.4.1**. `lapis-lattice@0.4.1` is on crates.io; `0.1.0` stays as history.
+The `v0.4.0` GitHub Release binary still carries crate `0.1.0` and is not
+rewritten.
+
+- Root `lapis` crate: `publish = false` (name squatted on crates.io); only `lapis-lattice` is publishable.
+- Stranger README/install distinguished the Release binary from `cargo add lapis-lattice`.
+- Operator-topology scrub: private build-host references removed from the public tree; `scrub-gate.sh` enforces.
+- `pack-release` fails when root `lapis` crate version ≠ git tag.
+
+Not in this tag: `feat/struct` (PR #15), `feat/api-v1`, and `--rerank-jev`.
+Path/title search, identifier boost, the desktop notes workspace, and Jev
+rerank are 0.4.2.
 
 ## 0.4.0 — 2026-09-11
 

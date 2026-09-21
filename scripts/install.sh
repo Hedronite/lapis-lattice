@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Lapis installer. Spec: docs/install.md
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/VirtualMachinist/lapis-lattice/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Hedronite/lapis-lattice/main/scripts/install.sh | bash
 #   bash scripts/install.sh --yes --vault "$HOME/Notes"
 #
 # What this never does: start a daemon, open a port, install Turso, DuckDB,
@@ -9,7 +9,7 @@
 # you name, or phone home. Search runs in-process against a SQLite index.
 set -euo pipefail
 
-REPO="https://github.com/VirtualMachinist/lapis-lattice"
+REPO="https://github.com/Hedronite/lapis-lattice"
 BIN_DIR="${LAPIS_BIN:-$HOME/.local/bin}"
 YES=0
 VAULT="${LAPIS_VAULT:-}"

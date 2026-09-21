@@ -5,11 +5,11 @@ exclude = ["vendor/gpui-base"]
 
 [package]
 name = "lapis"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 description = "Agent-first notes vault: JSON CLI, MCP, and TUI over Markdown files indexed by Lapis Lattice."
 license = "MIT"
-repository = "https://github.com/VirtualMachinist/lapis-lattice"
+repository = "https://github.com/Hedronite/lapis-lattice"
 publish = false
 default-run = "lapis"
 
@@ -26,7 +26,7 @@ desktop = ["lapis-desktop/gpui", "dep:pdfium-render"]
 pdfium-render = { version = "=0.9.4", optional = true, default-features = false, features = ["pdfium_7881"] }
 base64 = "0.22"
 lapis-desktop = { path = "crates/lapis-desktop" }
-lapis-lattice = { path = "crates/lapis-lattice", version = "0.4.1" }
+lapis-lattice = { path = "crates/lapis-lattice", version = "0.4.2" }
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 gray_matter = "0.3"
