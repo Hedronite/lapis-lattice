@@ -19,7 +19,7 @@
 
 ---
 
-> **Status:** In production use as daily-driver / dogfood Markdown vault (TUI/CLI/MCP + embedded FTS5). Hardening: beta; Release binary vs crates.io version axes still converging. Not a toy reference.
+> **Status:** In production use as daily-driver / dogfood Markdown vault (TUI/CLI/MCP + embedded FTS5). Hardening: beta. Latest GitHub Release and crates.io `lapis-lattice` are `0.4.1`. `0.4.2` (this tree, including `--rerank-jev`) is the next tag. Not a toy reference.
 
 
 Lapis is a notes vault for people who work with agents. Notes stay ordinary Markdown files in a folder you own. A TUI, a JSON CLI, and an MCP server share those files. Search and hop-1 neighbors use an **embedded SQLite + FTS5** index at `<vault>/.lapis/lattice.sqlite` (`meta.producer = lapis-lattice`). An HTTP lattice is opt-in (`lattice.mode = http`).
@@ -37,31 +37,31 @@ No hosted notes service. Files are the source of truth.
 
 ## Install
 
-Repo: [VirtualMachinist/lapis-lattice](https://github.com/VirtualMachinist/lapis-lattice).
+Repo: [Hedronite/lapis-lattice](https://github.com/Hedronite/lapis-lattice).
 
 | Artifact | Install | What you get |
 |---|---|---|
 | **CLI / TUI / MCP** (`lapis` binary) | `install.sh` or `cargo install --git … --bin lapis` | The app: vault, TUI, JSON CLI, MCP |
-| **Engine library** (`lapis-lattice`) | `cargo add lapis-lattice` (live: `0.1.0`) | Embedded SQLite+FTS5 index crate — no `lapis` binary |
+| **Engine library** (`lapis-lattice`) | `cargo add lapis-lattice` (live: `0.4.1`) | Embedded SQLite+FTS5 index crate — no `lapis` binary |
 
-**One command** — `install.sh` downloads the latest GitHub Release binary (currently `v0.4.0`, which reports `--version` `0.1.0` — no rewrite) for Apple Silicon, Linux x64, or Linux arm64. Rust is only needed if there is no asset for your machine (Intel Mac today):
+**One command** — `install.sh` downloads the latest GitHub Release binary (currently `v0.4.1`, `lapis --version` → `0.4.1`) for Apple Silicon, Linux x64, or Linux arm64. Rust is only needed if there is no asset for your machine (Intel Mac today):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/VirtualMachinist/lapis-lattice/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Hedronite/lapis-lattice/main/scripts/install.sh | bash
 ```
 
 Or, from source (app binary):
 
 ```bash
-cargo install --git https://github.com/VirtualMachinist/lapis-lattice --locked --bin lapis
+cargo install --git https://github.com/Hedronite/lapis-lattice --locked --bin lapis
 lapis init ~/Notes
 ```
 
-Engine only (library, not the app). Live on crates.io today: `0.1.0`. After
-`v0.4.1` is tagged and published:
+Engine only (library, not the app). Live on crates.io today: `0.4.1`. After
+`v0.4.2` is tagged and published:
 
 ```bash
-cargo add lapis-lattice@0.4.1
+cargo add lapis-lattice@0.4.2
 ```
 
 `init` records the vault in `~/.config/lapis/config.toml`, so a bare `lapis`
@@ -115,13 +115,13 @@ lapis --vault ~/Notes doctor
 
 **Beta**.
 
-| | Live today | Next (after `v0.4.1` tag + `cargo publish`) |
+| | Live today | Next (after `v0.4.2` tag + `cargo publish`) |
 |---|---|---|
-| GitHub Release binary | `v0.4.0` (`lapis --version` → `0.1.0`; shipped as-is) | `v0.4.1` binary asset (`--version` → `0.4.1`) |
-| crates.io `lapis-lattice` | [`0.1.0`](https://crates.io/crates/lapis-lattice/0.1.0) | `0.4.1` (`cargo add lapis-lattice@0.4.1`) |
-| `main` (this repo) | — | Cargo `0.4.1`; `lapis --version` → `0.4.1` |
+| GitHub Release binary | `v0.4.1` (`lapis --version` → `0.4.1`) | `v0.4.2` binary asset (`--version` → `0.4.2`) |
+| crates.io `lapis-lattice` | [`0.4.1`](https://crates.io/crates/lapis-lattice/0.4.1) | `0.4.2` (`cargo add lapis-lattice@0.4.2`) |
+| `main` (this repo) | — | Cargo `0.4.2`; `lapis --version` → `0.4.2` |
 
-The `v0.4.0` Release binary lag is real: that asset still reports crate `0.1.0` and is not rewritten. crates.io is also still `0.1.0` until publish lands.
+The `v0.4.0` Release binary still reports crate `0.1.0` and is not rewritten. `cargo add lapis-lattice` resolves to **0.4.1** until `0.4.2` is published. Neither that library pin nor `cargo install lapis` is the app binary.
 
 Requirements: macOS (Apple Silicon prebuilt) or Linux. Embeddings (Ollama / ONNX) are optional. Do **not** install Turso, DuckDB, Xcode, or Python to use the default binary.
 

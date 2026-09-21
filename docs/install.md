@@ -1,11 +1,11 @@
 # Install spec — one command / one click
 
 Product: **Lapis** (CLI/TUI/MCP binary `lapis`).
-Repo: [VirtualMachinist/lapis-lattice](https://github.com/VirtualMachinist/lapis-lattice).
+Repo: [Hedronite/lapis-lattice](https://github.com/Hedronite/lapis-lattice).
 Library crate: [`lapis-lattice`](https://crates.io/crates/lapis-lattice) on crates.io (embedded SQLite+FTS5 engine).
 
 This is the contract for a stranger’s first minute. The one-command path
-downloads a GitHub Release (`v0.4.0` as of 2026-09-11) on Apple Silicon and
+downloads a GitHub Release (`v0.4.1`, tagged 2026-09-11; `v0.4.2` is the next tag) on Apple Silicon and
 Linux. Homebrew, Developer ID notarization, and Intel Mac prebuilts are still
 open. Names that look convenient and are **wrong** are listed first so we do
 not bake them in.
@@ -24,13 +24,13 @@ not bake them in.
 Host the script **in this repo** so we do not need a custom domain:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/VirtualMachinist/lapis-lattice/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Hedronite/lapis-lattice/main/scripts/install.sh | bash
 ```
 
 Non-interactive:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/VirtualMachinist/lapis-lattice/main/scripts/install.sh | bash -s -- \
+curl -fsSL https://raw.githubusercontent.com/Hedronite/lapis-lattice/main/scripts/install.sh | bash -s -- \
   --yes --vault "$HOME/Notes" --embedder none
 ```
 
@@ -63,7 +63,7 @@ Windows: installer prints “macOS and Linux only” and exits 1 until we have a
 2. Resolve `BIN_DIR="${LAPIS_BIN:-$HOME/.local/bin}"`. `mkdir -p`.
 3. If a GitHub Release matching `v*` has an asset for this arch, download, verify SHA256, install `lapis` into `BIN_DIR`.
 4. Else if `cargo` is on `PATH`, run:
-   `cargo install --git https://github.com/VirtualMachinist/lapis-lattice --locked --bin lapis --root "$BIN_DIR/.."`  
+   `cargo install --git https://github.com/Hedronite/lapis-lattice --locked --bin lapis --root "$BIN_DIR/.."`  
    (or `CARGO_INSTALL_ROOT` so the binary lands in `BIN_DIR`).
 5. Else print: install Rust (`https://rustup.rs`) **or** download a Release asset, and exit 1.
 6. If `BIN_DIR` is not on `PATH`, print the one-liner to add it (`export PATH="$HOME/.local/bin:$PATH"`).
@@ -103,16 +103,16 @@ Exit codes stay: 0 ok, 1 usage, 2 lattice/index down, 3 path.
 
 ## Wiring — live vs next
 
-| | Live today | Next (after `v0.4.1` tag + `cargo publish`) |
+| | Live today | Next (after `v0.4.2` tag + `cargo publish`) |
 |---|---|---|
-| GitHub Release binary | `v0.4.0` (`lapis --version` → `0.1.0`; not rewritten) | `v0.4.1` asset (`--version` → `0.4.1`) |
-| crates.io `lapis-lattice` | `0.1.0` (`cargo add lapis-lattice`) | `0.4.1` (`cargo add lapis-lattice@0.4.1`) |
-| `main` | — | Cargo `0.4.1` |
+| GitHub Release binary | `v0.4.1` (`lapis --version` → `0.4.1`) | `v0.4.2` asset (`--version` → `0.4.2`) |
+| crates.io `lapis-lattice` | `0.4.1` (`cargo add lapis-lattice`) | `0.4.2` (`cargo add lapis-lattice@0.4.2`) |
+| `main` | — | Cargo `0.4.2` |
 
 Shipped today:
 
-- GitHub repo is `lapis-lattice`. Latest binary Release is `v0.4.0` (crate `0.1.0` in that asset — not rewritten). Future tags attach `lapis-darwin-arm64`, `lapis-linux-x64`, `lapis-linux-arm64`, plus `SHA256SUMS`.
-- `cargo add lapis-lattice` resolves to crates.io **`0.1.0` today**. After publish: `cargo add lapis-lattice@0.4.1`. Neither installs the `lapis` app binary.
+- GitHub repo is `lapis-lattice`. Latest binary Release is `v0.4.1` (`lapis --version` → `0.4.1`). The `v0.4.0` asset still reports crate `0.1.0` and is not rewritten. Tags attach `lapis-darwin-arm64`, `lapis-linux-x64`, `lapis-linux-arm64`, plus `SHA256SUMS`.
+- `cargo add lapis-lattice` resolves to crates.io **`0.4.1` today**. After publish: `cargo add lapis-lattice@0.4.2`. Neither installs the `lapis` app binary.
 - CLI binary `lapis` defaults to the **embedded** index. HTTP is opt-in (`lattice.mode = "http"` or `--lattice`).
 - `lapis init` writes `<vault>/.lapis/lattice.sqlite` and records the vault in the config (first time only).
 - `lapis doctor` exists.
@@ -131,18 +131,18 @@ Still open (not a reason to claim search needs `:8080`):
 Primary:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/VirtualMachinist/lapis-lattice/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Hedronite/lapis-lattice/main/scripts/install.sh | bash
 ```
 
 With Rust already:
 
 ```bash
-cargo install --git https://github.com/VirtualMachinist/lapis-lattice --locked --bin lapis
+cargo install --git https://github.com/Hedronite/lapis-lattice --locked --bin lapis
 lapis init ~/Notes
 ```
 
-Engine only (library, not the app). Live today: `cargo add lapis-lattice` → `0.1.0`. After publish:
+Engine only (library, not the app). Live today: `cargo add lapis-lattice` → `0.4.1`. After `v0.4.2` is published:
 
 ```bash
-cargo add lapis-lattice@0.4.1
+cargo add lapis-lattice@0.4.2
 ```
