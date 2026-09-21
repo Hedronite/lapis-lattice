@@ -4,6 +4,9 @@
 //! one file under the vault root and returns its vault-relative path; the
 //! caller kicks `POST /reindex`. Nothing here touches `lattice.db`.
 //!
+//! In-scope markdown (`foundry/**`, `agents/mail_room/**`) passes
+//! `rag-fm-wikilink-gate@0.1.0` before those bytes hit disk.
+//!
 //! HAL rules (SPEC.md § HAL): create stamps the create-set; later edits only
 //! touch allowlisted keys, line-wise, so unknown keys and comments survive.
 
@@ -307,12 +310,23 @@ pub fn create(root: &Path, opts: &CreateOpts) -> Result<Written> {
     }
     let doc_type = hal.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let marker = if is_canon(&doc_type) { format!("{AUTHORITATIVE_MARKER}\n\n") } else { String::new() };
-    let text = format!("---\n{}\n---\n{marker}{}\n", to_yaml(&hal)?, body.trim_end());
+    let drafted = format!("---\n{}\n---\n{marker}{}\n", to_yaml(&hal)?, body.trim_end());
+    let text = crate::rag_gate::apply_on_write(root, &rel, &drafted)?;
+    let (hal, title) = if text == drafted {
+        (hal, opts.title.clone())
+    } else {
+        let parsed = hal::parse(&text);
+        let title = hal::title_from_hal(&parsed.hal)
+            .filter(|_| parsed.hal_valid)
+            .unwrap_or_else(|| opts.title.clone());
+        let hal = if parsed.hal_valid && !parsed.hal.is_empty() { parsed.hal } else { hal };
+        (hal, title)
+    };
     if opts.dry_run {
         let bytes = text.len() as u64;
         return Ok(Written {
             path: rel,
-            title: opts.title.clone(),
+            title,
             hal,
             bytes,
             taxonomy: tax_source,
@@ -321,15 +335,7 @@ pub fn create(root: &Path, opts: &CreateOpts) -> Result<Written> {
         });
     }
     let bytes = write_atomic(&root.join(&rel), &text)?;
-    Ok(Written {
-        path: rel,
-        title: opts.title.clone(),
-        hal,
-        bytes,
-        taxonomy: tax_source,
-        dry_run: false,
-        text: None,
-    })
+    Ok(Written { path: rel, title, hal, bytes, taxonomy: tax_source, dry_run: false, text: None })
 }
 
 /// Append `text` to an existing note and bump `updated:` (allowlisted), with
@@ -352,6 +358,7 @@ pub fn append_with(root: &Path, rel: &str, text: &str, guard: &Guard) -> Result<
     }
     current.push_str(text.trim_end());
     current.push('\n');
+    let current = crate::rag_gate::apply_on_write(root, &rel, &current)?;
     let bytes = if guard.dry_run { current.len() as u64 } else { write_atomic(&abs, &current)? };
     let p = hal::parse(&current);
     let title = hal::title_from_hal(&p.hal).unwrap_or_else(|| notes::stem_of(&rel));
@@ -842,6 +849,44 @@ mod tests {
         assert_eq!(n.title, "Chinese quant trader built a bot");
         assert!(n.body.contains("second line"));
         assert!(matches!(capture(&v, "  ", "inbox", None), Err(LapisError::Usage(_))));
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn in_scope_create_shadow_retargets_from_the_index() {
+        let v = vault();
+        std::fs::create_dir_all(v.join("notes")).unwrap();
+        std::fs::write(
+            v.join("notes/Alpha.md"),
+            "---\ntitle: Alpha\ntype: note\nupdated: 2026-09-21\ntags: []\n---\n# Alpha\n",
+        )
+        .unwrap();
+        {
+            let mut engine = lapis_lattice::Engine::open(&v).unwrap();
+            engine.reindex().unwrap();
+        }
+        let mut o = opts("New");
+        o.path = Some("foundry/new.md".into());
+        o.body = Some("See [[Alpha]].".into());
+        let w = create(&v, &o).unwrap();
+        let text = std::fs::read_to_string(v.join(&w.path)).unwrap();
+        assert!(text.contains("[[notes/Alpha]]"), "{text}");
+        assert!(!text.contains("[[Alpha]]"), "{text}");
+        assert!(v.join(&w.path).is_file(), "shadow logs the missing title and still writes");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn hard_gate_blocks_in_scope_create_without_writing() {
+        let v = vault();
+        let _mode = crate::rag_gate::force_mode(crate::rag_gate::Mode::Hard);
+        let mut o = opts("Blocked");
+        o.path = Some("foundry/blocked.md".into());
+        let err = create(&v, &o).unwrap_err();
+        assert_eq!(err.exit_code(), 1);
+        assert!(err.to_string().contains("rag-fm-wikilink-gate@0.1.0"), "{err}");
+        assert!(err.to_string().contains("title"), "{err}");
+        assert!(!v.join("foundry/blocked.md").exists());
         let _ = std::fs::remove_dir_all(&v);
     }
 }

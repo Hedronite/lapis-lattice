@@ -13,7 +13,8 @@ Exit codes:
 
 Vault: --vault, $LAPIS_VAULT, or config `vault`. No implicit default; `lapis init ~/Notes` creates a vault, indexes it, and records the path.
 Lattice: embedded sqlite at `<vault>/.lapis/lattice.sqlite` by default (no daemon). `--lattice`, `$LAPIS_LATTICE_URL`, or `lattice.mode = \"http\"` opt into HTTP (URL default http://127.0.0.1:8080).
-Config: ~/.config/lapis/config.toml (or $XDG_CONFIG_HOME/lapis/config.toml).";
+Config: ~/.config/lapis/config.toml (or $XDG_CONFIG_HOME/lapis/config.toml).
+RAG gate: `lapis check-note PATH` prints a GateResult for rag-fm-wikilink-gate@0.1.0 and does not write. In-scope creates and touches (`foundry/**`, `agents/mail_room/**`) log that result; `LAPIS_RAG_GATE=hard` blocks fail and cannot_tell. Reads are never blocked.";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -70,6 +71,10 @@ pub enum Command {
 
     /// Read one note: body plus parsed HAL frontmatter.
     Read(ReadArgs),
+
+    /// Frontmatter and wikilink gate (`rag-fm-wikilink-gate@0.1.0`). Prints GateResult JSON and does not write.
+    #[command(name = "check-note")]
+    CheckNote(CheckNoteArgs),
 
     /// Hop-1 wikilink neighbors of a note from the lattice `edges` table.
     Neighbors(NeighborsArgs),
@@ -441,6 +446,13 @@ impl SearchArgs {
     pub fn effective_per_doc(&self, agent_default: bool) -> bool {
         self.per_doc || (self.agent && agent_default)
     }
+}
+
+#[derive(Debug, Args)]
+pub struct CheckNoteArgs {
+    /// Vault-relative path, e.g. `foundry/note.md`.
+    #[arg(value_name = "PATH")]
+    pub path: String,
 }
 
 #[derive(Debug, Args)]

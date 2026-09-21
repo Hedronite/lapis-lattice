@@ -321,6 +321,7 @@ pub fn toggle_with(root: &Path, id: &str, guard: &crate::write::Guard) -> Result
         }
     };
     let next = crate::write::set_frontmatter_key(&next, "updated", &crate::write::today());
+    let next = crate::rag_gate::apply_on_write(root, &rel, &next)?;
     if !guard.dry_run {
         std::fs::write(&abs, &next)?;
     }
@@ -634,6 +635,24 @@ mod tests {
         assert_eq!(std::fs::read_to_string(v.join("notes/plan.md")).unwrap(), before);
         let stale = crate::write::Guard { if_hash: Some("fnv1a64:0".into()), ..Default::default() };
         assert_eq!(toggle_with(&v, "notes/plan.md#0", &stale).unwrap_err().exit_code(), 1);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn in_scope_toggle_scaffolds_frontmatter() {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let v = std::env::temp_dir().join(format!("lapis-task-gate-{}-{n}-{seq}", std::process::id()));
+        std::fs::create_dir_all(v.join("foundry")).unwrap();
+        std::fs::write(v.join("foundry/t.md"), "- [ ] ship\n").unwrap();
+        toggle(&v, "foundry/t.md#0").unwrap();
+        let text = std::fs::read_to_string(v.join("foundry/t.md")).unwrap();
+        assert!(text.contains("title: t\n"), "{text}");
+        assert!(text.contains("type: note\n"), "{text}");
+        assert!(text.contains("tags: []\n"), "{text}");
+        assert!(text.contains("- [x] ship"), "{text}");
+        assert!(!text.contains("verified"), "{text}");
         let _ = std::fs::remove_dir_all(&v);
     }
 }
