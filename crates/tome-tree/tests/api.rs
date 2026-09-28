@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use tome_tree::{
     Budget, BuildOptions, DocId, FakeJudge, Judge, NodeId, NodeSource, OPEN_BYTE_CAP, OPEN_PAGE_CAP,
-    OpenPassages, SummaryModel, TomeError, TomeIndex,
+    OpenPassages, RootPath, SummaryModel, TomeError, TomeIndex,
 };
 
 fn scratch(name: &str) -> PathBuf {
@@ -287,7 +287,7 @@ fn walk_beam_stops_at_short_nodes_and_fails_closed() {
     assert!(walked.passages.iter().all(|p| !p.truncated));
     assert!(walked.passages.len() <= OPEN_PAGE_CAP as usize);
 
-    let tight = Budget { max_judge_calls: 1, max_pages: 12 };
+    let tight = Budget { max_judge_calls: 1, ..Budget::default() };
     let err = index.walk(&meta.doc_id, "q", &judge, tight).unwrap_err();
     assert_eq!(code(&err), "over_budget");
 
@@ -484,6 +484,399 @@ fn dense_leaf_walk_fits_the_byte_cap() {
     assert!(walked.passages.len() <= OPEN_PAGE_CAP as usize);
     assert!(walked.passages.iter().all(|p| !p.truncated));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn malformed_page_is_a_parse_fallback_not_a_panic() {
+    let dir = scratch("panic-page");
+    let pdf_path = dir.join("bad.pdf");
+    pdf::write_panic_page(&pdf_path);
+    let meta = build_at(&dir, &pdf_path, "bad", opts("bad"));
+    assert!(meta.outline);
+    assert_eq!(meta.summary_model, "opencode/test-model");
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let nodes = index.tree(&meta.doc_id, None, None).unwrap();
+    let text: String = nodes.iter().map(|n| n.lead.clone()).collect();
+    assert!(text.contains("gamma marker"), "good page survived the bad page: {text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cyclic_page_tree_is_parse_not_a_stack_overflow() {
+    let dir = scratch("cycle-pages");
+    let pdf_path = dir.join("cycle.pdf");
+    pdf::write_cyclic_page_tree(&pdf_path);
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let err = index.build(&pdf_path, "cycle.pdf", &opts("cycle")).unwrap_err();
+    assert_eq!(code(&err), "parse", "{err}");
+    assert!(err.to_string().contains("cycle"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cyclic_outline_is_parse_not_a_stack_overflow() {
+    let dir = scratch("cycle-outline");
+    let pdf_path = dir.join("cycle.pdf");
+    pdf::write_cyclic_outline(&pdf_path);
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let err = index.build(&pdf_path, "cycle.pdf", &opts("cycle")).unwrap_err();
+    assert_eq!(code(&err), "parse", "{err}");
+    assert!(err.to_string().contains("cycle"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn indirect_kids_and_a_deep_page_tree_still_build() {
+    let dir = scratch("kids");
+    let indirect = dir.join("indirect.pdf");
+    pdf::write_indirect_kids(&indirect);
+    let meta = build_at(&dir, &indirect, "indirect", opts("indirect"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let nodes = index.tree(&meta.doc_id, None, None).unwrap();
+    assert!(nodes.iter().any(|n| n.lead.contains("indirect marker")), "{nodes:?}");
+
+    let deep = dir.join("deep.pdf");
+    pdf::write_deep_page_tree(&deep);
+    let meta = build_at(&dir, &deep, "deep", opts("deep"));
+    let nodes = index.tree(&meta.doc_id, None, None).unwrap();
+    assert!(nodes.iter().any(|n| n.lead.contains("deep marker")), "{nodes:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn image_do_falls_back_per_page_and_keeps_the_text() {
+    let dir = scratch("image-do");
+    let pdf_path = dir.join("image.pdf");
+    pdf::write_image_do(&pdf_path);
+    let meta = build_at(&dir, &pdf_path, "image", opts("image"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let nodes = index.tree(&meta.doc_id, None, None).unwrap();
+    let text: String = nodes.iter().map(|n| n.lead.clone()).collect();
+    assert!(text.contains("gamma marker"), "{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn one_broken_destination_does_not_fail_the_book() {
+    let dir = scratch("baddest");
+    let pdf_path = dir.join("two.pdf");
+    pdf::write_broken_dest(&pdf_path);
+    let meta = build_at(&dir, &pdf_path, "two", opts("two"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let nodes = index.tree(&meta.doc_id, None, None).unwrap();
+    let titles: Vec<_> = nodes.iter().map(|n| n.title.as_str()).collect();
+    assert!(titles.contains(&"Beta"), "{titles:?}");
+    assert!(!titles.contains(&"Alpha"), "{titles:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn wide_descent_stays_inside_the_budget() {
+    let dir = scratch("descend");
+    let pdf_path = dir.join("wide.pdf");
+    let titles: Vec<&'static str> = (0..40)
+        .map(|i| {
+            if i == 39 {
+                "Brass foundry"
+            } else {
+                Box::leak(format!("Section {i:02}").into_boxed_str()) as &'static str
+            }
+        })
+        .collect();
+    let mut marks = vec![pdf::Mark { title: "Book", page: 0, parent: None }];
+    for (i, title) in titles.iter().copied().enumerate() {
+        marks.push(pdf::Mark { title, page: i, parent: Some(0) });
+    }
+    pdf::write(&pdf_path, &pdf::prose(40), &marks);
+    let meta = build_at(&dir, &pdf_path, "wide", opts("wide"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let judge = FakeJudge::new([("0001", 3u8), ("0001.0040", 3u8)]).with_default(0).fail_batch();
+    let walked = index.walk(&meta.doc_id, "brass foundry", &judge, Budget::default()).unwrap();
+    assert!(walked.judge_calls <= 24, "descent spent {}", walked.judge_calls);
+    assert!(walked.judge_calls - walked.root_judge_calls <= 8, "{walked:?}");
+    assert!(walked.nodes.iter().any(|id| id.as_str() == "0001.0040"), "{:?}", walked.nodes);
+    assert!(!walked.passages.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cyclic_form_without_an_outline_is_no_structure() {
+    let dir = scratch("cycle-form");
+    let pdf_path = dir.join("form.pdf");
+    pdf::write_cyclic_form(&pdf_path);
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let err = index.build(&pdf_path, "form.pdf", &opts("form")).unwrap_err();
+    assert_eq!(code(&err), "no_structure", "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn failed_walk_leaves_summary_model_on_the_doc() {
+    let dir = scratch("summary");
+    let pdf_path = dir.join("one.pdf");
+    pdf::write(
+        &pdf_path,
+        &[vec!["CHAPTER 1", "Introduction", "alpha marker."]],
+        &[pdf::Mark { title: "Chapter", page: 0, parent: None }],
+    );
+    let meta = build_at(&dir, &pdf_path, "one", opts("one"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let err = index
+        .walk(&meta.doc_id, "q", &FakeJudge::new(Vec::<(&str, u8)>::new()), Budget::default())
+        .unwrap_err();
+    assert_eq!(code(&err), "judge_unavailable");
+    let again = index.meta(&meta.doc_id).unwrap();
+    assert_eq!(again.summary_model, "opencode/test-model");
+    assert_eq!(again.summary_temperature, 0.0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn low_confidence_ranks_on_score_and_still_walks() {
+    let dir = scratch("conf");
+    let pdf_path = dir.join("two.pdf");
+    pdf::write(
+        &pdf_path,
+        &pdf::prose(20),
+        &[
+            pdf::Mark { title: "Alpha", page: 0, parent: None },
+            pdf::Mark { title: "Beta", page: 10, parent: None },
+        ],
+    );
+    let meta = build_at(&dir, &pdf_path, "two", opts("two"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    // Score 3 at confidence 0.1 outranks score 1 at confidence 0.99. The low
+    // confidence is recorded and does not abort or drop the candidate.
+    let judge =
+        FakeJudge::new([("0001", 3u8), ("0002", 1u8)]).with_confidence([("0001", 0.1), ("0002", 0.99)]);
+    let walked = index.walk(&meta.doc_id, "beta", &judge, Budget::default()).unwrap();
+    assert_eq!(walked.nodes.iter().map(|id| id.as_str()).collect::<Vec<_>>(), vec!["0001"]);
+    assert_eq!(walked.skipped.iter().map(|id| id.as_str()).collect::<Vec<_>>(), vec!["0002"]);
+    assert_eq!(walked.judged.len(), 2);
+    assert_eq!(walked.judged[0].score, 3);
+    assert_eq!(walked.judged[0].confidence, Some(0.1));
+    assert_eq!(walked.judged[0].rank, 3);
+    assert_eq!(walked.judged[1].score, 1);
+    assert_eq!(walked.judged[1].confidence, Some(0.99));
+    assert_eq!(walked.judged[1].rank, 1);
+    assert!(!walked.passages.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const THIRTY_CHAPTERS: [&str; 30] = [
+    "Chapter 01",
+    "Chapter 02",
+    "Chapter 03",
+    "Chapter 04",
+    "Chapter 05",
+    "Chapter 06",
+    "Chapter 07",
+    "Chapter 08",
+    "Chapter 09",
+    "Chapter 10",
+    "Chapter 11",
+    "Chapter 12",
+    "Chapter 13",
+    "Chapter 14",
+    "Chapter 15",
+    "Chapter 16",
+    "Chapter 17",
+    "Chapter 18",
+    "Chapter 19",
+    "Chapter 20",
+    "Chapter 21",
+    "Chapter 22",
+    "Chapter 23",
+    "Chapter 24",
+    "Chapter 25",
+    "Chapter 26",
+    "Chapter 27",
+    "Chapter 28",
+    "Chapter 29",
+    "Brass foundry",
+];
+
+fn thirty_root_book(dir: &Path, name: &str) -> tome_tree::DocMeta {
+    let pdf_path = dir.join(format!("{name}.pdf"));
+    let marks: Vec<pdf::Mark> = THIRTY_CHAPTERS
+        .iter()
+        .enumerate()
+        .map(|(i, title)| pdf::Mark { title, page: i, parent: None })
+        .collect();
+    pdf::write(&pdf_path, &pdf::prose(30), &marks);
+    build_at(dir, &pdf_path, name, opts(name))
+}
+
+#[test]
+fn thirty_roots_finish_inside_the_root_budget() {
+    let dir = scratch("thirty");
+    let meta = thirty_root_book(&dir, "thirty");
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let roots = index.tree(&meta.doc_id, None, Some(0)).unwrap();
+    assert_eq!(roots.len(), 30);
+    let judge = FakeJudge::new([("0010", 3u8)]).with_default(1).batched();
+    let walked = index.walk(&meta.doc_id, "chapter", &judge, Budget::default()).unwrap();
+    assert_eq!(walked.root_path, RootPath::Batch);
+    assert_eq!(walked.root_judge_calls, 2, "30 roots at batch 16 are two calls");
+    assert!(walked.root_judge_calls <= walked.judge_calls);
+    assert!(walked.root_judge_calls <= 4);
+    assert_eq!(walked.judged.len(), 30);
+    assert!(walked.roots_skipped.is_empty(), "every root was scored");
+    assert!(walked.nodes.iter().any(|id| id.as_str() == "0010"));
+    assert!(!walked.passages.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn malformed_batch_falls_back_to_lexical_ranking() {
+    let dir = scratch("fallback");
+    let meta = thirty_root_book(&dir, "fallback");
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    // The matching title is the last root, so an id-order top-k would miss it.
+    let judge = FakeJudge::new([("0030", 3u8)]).with_default(0).fail_batch();
+    let walked = index.walk(&meta.doc_id, "brass foundry", &judge, Budget::default()).unwrap();
+    assert_eq!(walked.root_path, RootPath::LexicalFallback);
+    assert_eq!(walked.root_judge_calls, 7, "the failed batch plus six fallback singles");
+    assert_eq!(walked.judge_calls, 7, "the failed batch is part of the reported total");
+    assert!(walked.root_judge_calls <= 1 + Budget::default().root_top_k);
+    assert_eq!(walked.judged.len(), 6);
+    assert_eq!(walked.roots_skipped.len(), 24, "the lexical cut leaves the other roots visible");
+    assert!(disjoint(&walked.judged, &walked.roots_skipped));
+    assert_eq!(walked.judged[0].node_id.as_str(), "0030");
+    assert!(walked.nodes.iter().any(|id| id.as_str() == "0030"));
+    assert!(!walked.passages.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn candidate_lead_includes_child_titles() {
+    let dir = scratch("children");
+    let pdf_path = dir.join("tree.pdf");
+    pdf::write(
+        &pdf_path,
+        &[vec!["CHAPTER 1", "Intro body."], vec!["Section A", "detail body."]],
+        &[
+            pdf::Mark { title: "Chapter", page: 0, parent: None },
+            pdf::Mark { title: "Section A", page: 1, parent: Some(0) },
+        ],
+    );
+    let meta = build_at(&dir, &pdf_path, "tree", opts("tree"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    struct See(std::sync::Mutex<String>);
+    impl Judge for See {
+        fn score(&self, _: &str, c: &tome_tree::Candidate) -> tome_tree::Result<u8> {
+            if c.id.as_str() == "0001" {
+                let titles: Vec<_> = c.child_titles.iter().map(|child| child.title.clone()).collect();
+                *self.0.lock().unwrap() = titles.join(",");
+            }
+            Ok(if c.id.as_str() == "0001" { 3 } else { 0 })
+        }
+    }
+    let see = See(std::sync::Mutex::new(String::new()));
+    index.walk(&meta.doc_id, "q", &see, Budget::default()).unwrap();
+    let titles = see.0.lock().unwrap().clone();
+    assert!(titles.contains("Section A"), "{titles}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn batch_path_keeps_child_titles_past_the_page_lead() {
+    let dir = scratch("batch-children");
+    let pdf_path = dir.join("tree.pdf");
+    let long = "alpha ".repeat(80);
+    let pages = [vec![long.as_str()], vec!["Section A", "detail body."]];
+    pdf::write(
+        &pdf_path,
+        &pages,
+        &[
+            pdf::Mark { title: "Chapter", page: 0, parent: None },
+            pdf::Mark { title: "Section A", page: 1, parent: Some(0) },
+        ],
+    );
+    let meta = build_at(&dir, &pdf_path, "tree", opts("tree"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    struct See(std::sync::Mutex<(String, String)>);
+    impl Judge for See {
+        fn score(&self, _: &str, _: &tome_tree::Candidate) -> tome_tree::Result<u8> {
+            Ok(3)
+        }
+        fn score_batch(
+            &self,
+            _: &str,
+            candidates: &[tome_tree::Candidate],
+        ) -> tome_tree::Result<Vec<Option<tome_tree::Assessment>>> {
+            if let Some(root) = candidates.iter().find(|c| c.id.as_str() == "0001") {
+                let titles =
+                    root.child_titles.iter().map(|child| child.title.as_str()).collect::<Vec<_>>().join(",");
+                *self.0.lock().unwrap() = (root.lead.clone(), titles);
+            }
+            Ok(candidates
+                .iter()
+                .map(|_| Some(tome_tree::Assessment { score: 3, confidence: None }))
+                .collect())
+        }
+        fn batch_cost(&self, _: &[tome_tree::Candidate]) -> u32 {
+            1
+        }
+    }
+    let see = See(std::sync::Mutex::new((String::new(), String::new())));
+    let walked = index.walk(&meta.doc_id, "q", &see, Budget::default()).unwrap();
+    assert_eq!(walked.root_path, RootPath::Batch);
+    let (lead, titles) = see.0.lock().unwrap().clone();
+    assert_eq!(titles, "Section A", "{titles}");
+    assert!(lead.chars().count() <= 240, "page lead is capped on its own: {lead}");
+    assert!(!lead.contains("Section A"), "{lead}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn partial_batch_fill_ins_count_against_the_root_budget() {
+    let dir = scratch("partial");
+    let meta = thirty_root_book(&dir, "partial");
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    struct Partial(std::sync::atomic::AtomicU32);
+    impl Judge for Partial {
+        fn score(&self, _: &str, _: &tome_tree::Candidate) -> tome_tree::Result<u8> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(1)
+        }
+        fn score_batch(
+            &self,
+            _: &str,
+            candidates: &[tome_tree::Candidate],
+        ) -> tome_tree::Result<Vec<Option<tome_tree::Assessment>>> {
+            Ok(candidates
+                .iter()
+                .enumerate()
+                .map(|(i, _)| (i == 0).then_some(tome_tree::Assessment { score: 3, confidence: Some(0.4) }))
+                .collect())
+        }
+        fn batch_cost(&self, _: &[tome_tree::Candidate]) -> u32 {
+            1
+        }
+    }
+    let judge = Partial(std::sync::atomic::AtomicU32::new(0));
+    let walked = index.walk(&meta.doc_id, "chapter", &judge, Budget::default()).unwrap();
+    let fills = judge.0.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(fills, 3, "fifteen holes do not become fifteen free calls");
+    assert_eq!(walked.root_judge_calls, 4, "one batch request plus the three fill-ins");
+    assert_eq!(walked.judge_calls, 4);
+    assert_eq!(walked.judged.len(), 4);
+    assert_eq!(walked.roots_skipped.len(), 26, "unscored holes and the next batch are recorded");
+    assert!(disjoint(&walked.judged, &walked.roots_skipped));
+    let roots = index.tree(&meta.doc_id, None, Some(0)).unwrap();
+    let skipped: Vec<_> = walked.roots_skipped.iter().map(|id| id.as_str()).collect();
+    let judged: std::collections::BTreeSet<_> = walked.judged.iter().map(|j| j.node_id.as_str()).collect();
+    let expected: Vec<_> =
+        roots.iter().filter(|node| !judged.contains(node.id.as_str())).map(|node| node.id.as_str()).collect();
+    assert_eq!(skipped, expected, "skipped roots stay in tree order");
+    assert_eq!(walked.root_path, RootPath::Batch);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn disjoint(judged: &[tome_tree::Judged], skipped: &[tome_tree::NodeId]) -> bool {
+    let ids: std::collections::BTreeSet<_> = judged.iter().map(|j| j.node_id.as_str()).collect();
+    skipped.iter().all(|id| !ids.contains(id.as_str()))
 }
 
 /// Vault PDFs are not in this repo. Set `TOME_VAULT` to a directory that

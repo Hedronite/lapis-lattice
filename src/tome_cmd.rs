@@ -90,7 +90,14 @@ fn tree(ctx: &Ctx, args: TomeTreeArgs) -> Result<()> {
 fn search(ctx: &Ctx, args: TomeSearchArgs) -> Result<()> {
     let index = index(ctx)?;
     let doc = resolve_doc(&index, &ctx.vault.root, &args.doc)?;
-    let budget = Budget { max_judge_calls: args.max_judge_calls, max_pages: args.max_pages };
+    let tome = &ctx.cfg.tome;
+    let budget = Budget {
+        max_judge_calls: args.max_judge_calls,
+        max_pages: args.max_pages,
+        root_calls: tome.root_calls,
+        root_batch_size: tome.root_batch_size.max(1),
+        root_top_k: tome.root_top_k,
+    };
     let walked = index.walk(&doc, &args.query, &JevJudge::resolve(), budget).map_err(LapisError::from)?;
     if ctx.json {
         crate::emit_json(&walked)?;

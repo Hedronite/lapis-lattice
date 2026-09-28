@@ -169,7 +169,8 @@ impl Harness {
         judge: JevJudge,
     ) -> (Result<Retrieved, ErrorInfo>, Option<JevJudge>) {
         let t = &self.cfg.tome;
-        let budget = Budget { max_judge_calls: t.max_judge_calls, max_pages: t.max_open_pages };
+        let budget =
+            Budget { max_judge_calls: t.max_judge_calls, max_pages: t.max_open_pages, ..Budget::default() };
         let tome = Arc::clone(&self.tome);
         // The library keys docs by PDF sha256; the path is only on DocMeta.
         let doc = match DocId::parse(&q.doc_sha256) {

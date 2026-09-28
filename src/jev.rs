@@ -11,6 +11,10 @@ use crate::error::Result;
 use crate::http::SearchResult;
 use lapis_lattice::Hit;
 
+#[cfg(feature = "tome")]
+mod batch;
+mod facet;
+
 /// Bundled Facet OpenCollection (Hit rerank recipe).
 pub const FACET_COLLECTION: &str = include_str!("../docs/examples/typesafe/opencollection.yml");
 pub const FACET_SELECTOR: &str = "items/0/items/0";
@@ -136,12 +140,17 @@ impl std::fmt::Debug for Transport {
 #[derive(Clone)]
 pub struct FakeScript {
     replies: std::sync::Arc<std::sync::Mutex<Vec<std::result::Result<Value, String>>>>,
+    /// `(state, questions)` of each decide, in order. Tests check the batch prompt.
+    seen: std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>,
 }
 
 #[cfg(test)]
 impl FakeScript {
     pub fn replies(replies: Vec<Value>) -> Self {
-        Self { replies: std::sync::Arc::new(std::sync::Mutex::new(replies.into_iter().map(Ok).collect())) }
+        Self {
+            replies: std::sync::Arc::new(std::sync::Mutex::new(replies.into_iter().map(Ok).collect())),
+            seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
     }
 }
 
@@ -187,18 +196,34 @@ impl Transport {
     }
 
     async fn decide(&self, state: &str) -> std::result::Result<Value, String> {
+        // Hit rerank keeps the bundled recipe and `--var state`.
+        self.decide_with(state, &questions(), false).await
+    }
+
+    /// `questions` selects the answer schema. Hit rerank sends [`questions`]
+    /// with `inline` false. Every tome judge call passes `inline` so the
+    /// request body is the escaped JSON, including a one-node call.
+    async fn decide_with(
+        &self,
+        state: &str,
+        questions: &Value,
+        inline: bool,
+    ) -> std::result::Result<Value, String> {
         match self {
             Transport::None { reason } => Err((*reason).into()),
             #[cfg(test)]
             Transport::Fake(script) => {
+                if let Ok(mut seen) = script.seen.lock() {
+                    seen.push((state.to_string(), questions.clone()));
+                }
                 let mut q = script.replies.lock().map_err(|_| "fake lock".to_string())?;
                 match q.first() {
                     None => Err("fake exhausted".into()),
                     Some(_) => q.remove(0),
                 }
             }
-            Transport::Http { endpoint, key } => http_decide(endpoint, key, state).await,
-            Transport::Facet { bin } => facet_decide(bin, state).await,
+            Transport::Http { endpoint, key } => http_decide(endpoint, key, state, questions).await,
+            Transport::Facet { bin } => facet_decide(bin, state, questions, inline).await,
         }
     }
 }
@@ -248,21 +273,26 @@ fn clip(s: &str, max: usize) -> String {
     format!("{}…", &s[..end])
 }
 
-fn systemone_body(state: &str) -> Value {
+fn systemone_body(state: &str, questions: &Value) -> Value {
     json!({
         "model": "jev-latest",
         "state": state,
-        "questions": questions(),
+        "questions": questions,
     })
 }
 
-async fn http_decide(endpoint: &str, key: &str, state: &str) -> std::result::Result<Value, String> {
+async fn http_decide(
+    endpoint: &str,
+    key: &str,
+    state: &str,
+    questions: &Value,
+) -> std::result::Result<Value, String> {
     let client = reqwest::Client::builder().timeout(HTTP_TIMEOUT).build().map_err(|e| e.to_string())?;
     let resp = client
         .post(endpoint)
         .header("Authorization", format!("Bearer {key}"))
         .header("Accept", "application/json")
-        .json(&systemone_body(state))
+        .json(&systemone_body(state, questions))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -274,24 +304,45 @@ async fn http_decide(endpoint: &str, key: &str, state: &str) -> std::result::Res
     serde_json::from_str(&text).map_err(|e| format!("systemone json: {e}"))
 }
 
-async fn facet_decide(bin: &Path, state: &str) -> std::result::Result<Value, String> {
+/// Facet YAML for one tome judge call. The body is escaped JSON, so a
+/// `{{typesafeApiKey}}` in the query or the page text is not a placeholder.
+/// `asked` is the shipped relevance schema for one candidate, or one score
+/// question per id for a batch.
+fn tome_facet_yaml(state: &str, asked: &Value) -> String {
+    facet::collection(&facet::json(&systemone_body(state, asked)))
+}
+
+/// `(yaml, escaped)`. `escaped` means the body is inlined and `--var state`
+/// must not be passed. Tome calls pass `inline`; hit rerank does not.
+fn facet_collection_text(state: &str, asked: &Value, inline: bool) -> (String, bool) {
+    let escaped = inline || asked != &questions();
+    let text = if escaped { tome_facet_yaml(state, asked) } else { FACET_COLLECTION.to_string() };
+    (text, escaped)
+}
+
+async fn facet_decide(
+    bin: &Path,
+    state: &str,
+    asked: &Value,
+    inline: bool,
+) -> std::result::Result<Value, String> {
     let dir = tempfile_dir()?;
     let yaml = dir.join("opencollection.yml");
-    std::fs::write(&yaml, FACET_COLLECTION).map_err(|e| e.to_string())?;
-    let out = tokio::process::Command::new(bin)
-        .arg("--json")
+    let (text, escaped) = facet_collection_text(state, asked, inline);
+    std::fs::write(&yaml, text).map_err(|e| e.to_string())?;
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.arg("--json")
         .arg("request")
         .arg("run")
         .arg(&yaml)
         .arg(FACET_SELECTOR)
         .arg("--environment")
         .arg(FACET_ENVIRONMENT)
-        .arg("--no-record")
-        .arg("--var")
-        .arg(format!("state={state}"))
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
+        .arg("--no-record");
+    if !escaped {
+        cmd.arg("--var").arg(format!("state={state}"));
+    }
+    let out = cmd.output().await.map_err(|e| e.to_string())?;
     let _ = std::fs::remove_dir_all(&dir);
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
@@ -464,8 +515,16 @@ pub fn hit_line(hit: &Hit) -> Option<String> {
 
 /// Scores tome-tree candidates with the existing System One transport.
 ///
-/// Relevance is the shipped 0–3 score. Unavailable or uncertain answers are
-/// errors: the walk must not guess a path.
+/// Relevance is the shipped 0–3 score. A missing transport, a transport error,
+/// a missing score, or a score outside 0..=3 is `judge_unavailable`. Confidence
+/// is returned on the assessment and is not a gate: the walk ranks on the score.
+///
+/// Several candidates are one `decide` call. The state asks for a JSON array
+/// of `{id, score, confidence}`, and the questions are one score rubric per
+/// candidate id. Ids the array (or the per-id answers) actually scored are
+/// `Some`. Missing ids are `None`: the walk judges those one at a time and
+/// counts each call. A body with no array and no per-id score is `parse`, and
+/// the walk then pre-ranks. A dead transport stays `judge_unavailable`.
 ///
 /// `score` blocks on a multi-thread tokio runtime (`block_in_place` + `block_on`).
 /// The `lapis` binary is multi-thread. A current-thread runtime panics.
@@ -484,32 +543,91 @@ impl JevJudge {
 #[cfg(feature = "tome")]
 impl tome_tree::Judge for JevJudge {
     fn score(&self, query: &str, candidate: &tome_tree::Candidate) -> tome_tree::Result<u8> {
+        Ok(self.assess(query, candidate)?.score)
+    }
+
+    fn assess(
+        &self,
+        query: &str,
+        candidate: &tome_tree::Candidate,
+    ) -> tome_tree::Result<tome_tree::Assessment> {
+        let body = self.decide_state(&candidate_state(query, candidate))?;
+        relevance_assessment(&body)
+    }
+
+    fn score_batch(
+        &self,
+        query: &str,
+        candidates: &[tome_tree::Candidate],
+    ) -> tome_tree::Result<Vec<Option<tome_tree::Assessment>>> {
+        if candidates.len() <= 1 {
+            return candidates.iter().map(|candidate| self.assess(query, candidate).map(Some)).collect();
+        }
+        let questions = batch::questions(candidates);
+        let body = self.decide_questions(&batch::state(query, candidates), &questions)?;
+        // Missing ids stay `None`. The walk judges them and counts each call.
+        batch::assessments(&body, candidates)
+    }
+
+    fn batch_cost(&self, _candidates: &[tome_tree::Candidate]) -> u32 {
+        // The batch request only. Fill-ins are separate `assess` calls.
+        1
+    }
+}
+
+#[cfg(feature = "tome")]
+impl JevJudge {
+    fn decide_state(&self, state: &str) -> tome_tree::Result<Value> {
+        self.decide_questions(state, &questions())
+    }
+
+    fn decide_questions(&self, state: &str, questions: &Value) -> tome_tree::Result<Value> {
         if let Some(reason) = self.transport.missing_reason() {
             return Err(tome_tree::TomeError::JudgeUnavailable { reason: reason.to_string() });
         }
-        let state = format!(
-            "Search query: {query}\n\nSection: {}\nPages: {}-{}\n\nLead:\n{}",
-            candidate.title, candidate.page_start, candidate.page_end, candidate.lead
-        );
         let handle = tokio::runtime::Handle::try_current()
             .map_err(|_| tome_tree::TomeError::JudgeUnavailable { reason: "no tokio runtime".into() })?;
-        let body = tokio::task::block_in_place(|| handle.block_on(self.transport.decide(&state)));
-        match body {
+        match tokio::task::block_in_place(|| {
+            handle.block_on(self.transport.decide_with(state, questions, true))
+        }) {
             Err(reason) => Err(tome_tree::TomeError::JudgeUnavailable { reason }),
-            Ok(body) => relevance_score(&body),
+            Ok(body) => Ok(body),
         }
     }
 }
 
 #[cfg(feature = "tome")]
-fn relevance_score(body: &Value) -> tome_tree::Result<u8> {
-    let judged = judgment_from_answers(0, body);
-    if judged.status != "judged" {
-        return Err(tome_tree::TomeError::JudgeUnavailable {
-            reason: format!("systemone {}", judged.status),
-        });
+fn candidate_state(query: &str, candidate: &tome_tree::Candidate) -> String {
+    // The shipped questions ask about a retrieved chunk. A TOC node is not
+    // one: say so, and pass the page lead and the child titles as separate
+    // fields so a long lead cannot hide the titles.
+    let mut out = format!(
+        "Search query: {query}\n\n\
+         This is a table-of-contents node, not a retrieved passage.\n\n\
+         Section: {}\nPages: {}-{}\n",
+        candidate.title, candidate.page_start, candidate.page_end
+    );
+    if !candidate.child_titles.is_empty() {
+        out.push_str("\nChild titles:\n");
+        for child in &candidate.child_titles {
+            out.push_str(&format!("- {} (pp. {}–{})\n", child.title, child.page_start, child.page_end));
+        }
     }
-    let Some(score) = judged.relevance else {
+    out.push_str(&format!("\nLead:\n{}", candidate.lead));
+    out
+}
+
+/// Relevance score and the minimum reported confidence. Low confidence is not
+/// an error here; a missing or out-of-range score is.
+#[cfg(feature = "tome")]
+fn relevance_assessment(body: &Value) -> tome_tree::Result<tome_tree::Assessment> {
+    let answers = body.get("answers").unwrap_or(body);
+    let score = answers.pointer("/relevance/score").and_then(Value::as_f64);
+    let noul_conf = answers.pointer("/answers/confidence").and_then(Value::as_f64);
+    let score_conf = answers.pointer("/relevance/confidence").and_then(Value::as_f64);
+    let cite_conf = answers.pointer("/cite/confidence").and_then(Value::as_f64);
+    let confidence = [noul_conf, score_conf, cite_conf].into_iter().flatten().reduce(f64::min);
+    let Some(score) = score else {
         return Err(tome_tree::TomeError::JudgeUnavailable { reason: "relevance score missing".into() });
     };
     if !(0.0..=3.0).contains(&score) {
@@ -517,7 +635,7 @@ fn relevance_score(body: &Value) -> tome_tree::Result<u8> {
             reason: format!("relevance {score} outside 0..=3"),
         });
     }
-    Ok(score.round() as u8)
+    Ok(tome_tree::Assessment { score: score.round() as u8, confidence })
 }
 
 #[cfg(test)]
@@ -719,6 +837,7 @@ mod tests {
             id: tome_tree::NodeId::from("0001"),
             title: "Chapter".into(),
             lead: "lead text".into(),
+            child_titles: vec![],
             page_start: 1,
             page_end: 2,
             level: 1,
@@ -735,5 +854,142 @@ mod tests {
         let judge = JevJudge { transport: Transport::None { reason: "typesafe_key_absent" } };
         let err = tome_tree::Judge::score(&judge, "where", &candidate).unwrap_err();
         assert!(err.to_string().contains("typesafe_key_absent"));
+
+        let low = JevJudge {
+            transport: Transport::Fake(FakeScript::replies(vec![judged_body(0.4, 1.4, "unrelated", 0.35)])),
+        };
+        let assessment = tome_tree::Judge::assess(&low, "where", &candidate).unwrap();
+        assert_eq!(assessment.score, 1);
+        assert_eq!(assessment.confidence, Some(0.35));
+    }
+
+    #[cfg(feature = "tome")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tome_batch_parses_a_json_array_and_keeps_partial_ids() {
+        let mut with_child = candidate_of("0001");
+        with_child.lead = "alpha ".repeat(80);
+        with_child.child_titles =
+            vec![tome_tree::ChildTitle { title: "Section A".into(), page_start: 2, page_end: 2 }];
+        let candidates = [with_child, candidate_of("0002")];
+
+        let realistic = json!({
+            "model": "jev-1.13.0",
+            "answers": [
+                { "id": "0001", "score": 3, "confidence": 0.82 },
+                { "id": "0002", "score": 1, "confidence": 0.44 }
+            ],
+            "usage": { "input_tokens": 512, "output_tokens": 40 }
+        });
+        let parsed = batch::assessments(&realistic, &candidates).unwrap();
+        assert_eq!(parsed[0].unwrap().score, 3);
+        assert_eq!(parsed[0].unwrap().confidence, Some(0.82));
+        assert_eq!(parsed[1].unwrap().score, 1);
+        let loose = json!([{ "id": "0001", "score": 2 }]);
+        assert!(batch::assessments(&loose, &candidates).is_err(), "a row needs id, score, and confidence");
+        let wide = json!([{ "id": "0001", "score": 9, "confidence": 0.5 }]);
+        assert!(batch::assessments(&wide, &candidates).is_err(), "a score outside 0..=3 is not a batch row");
+
+        let script = FakeScript::replies(vec![realistic]);
+        let batched = JevJudge { transport: Transport::Fake(script.clone()) };
+        assert_eq!(tome_tree::Judge::batch_cost(&batched, &candidates), 1);
+        let got = tome_tree::Judge::score_batch(&batched, "where", &candidates).unwrap();
+        assert_eq!(got[0].unwrap().score, 3);
+        assert_eq!(got[0].unwrap().confidence, Some(0.82));
+        assert_eq!(got[1].unwrap().score, 1);
+        let (state, asked) = script.seen.lock().unwrap()[0].clone();
+        assert!(state.contains("JSON array"), "{state}");
+        assert!(state.contains("\"id\""), "{state}");
+        assert!(state.contains("child titles:\n- Section A"), "child titles are their own field: {state}");
+        let page = state.split("lead:\n").nth(1).unwrap().split("\n\n").next().unwrap();
+        assert_eq!(page.chars().count(), 240, "the page lead is capped on its own: {page}");
+        assert!(!page.contains("Section A"), "{page}");
+        assert_eq!(asked["0001"]["type"].as_str(), Some("score"));
+        assert_eq!(asked["0002"]["type"].as_str(), Some("score"));
+        assert!(asked.get("relevance").is_none(), "a batch must not send the single relevance question");
+
+        let partial_script =
+            FakeScript::replies(vec![json!([{ "id": "0001", "score": 2, "confidence": 0.7 }])]);
+        let partial = JevJudge { transport: Transport::Fake(partial_script.clone()) };
+        let got = tome_tree::Judge::score_batch(&partial, "where", &candidates).unwrap();
+        assert_eq!(got[0].unwrap().score, 2, "the id that came back is kept");
+        assert_eq!(got[0].unwrap().confidence, Some(0.7));
+        assert!(got[1].is_none(), "the missing id is not filled in inside the batch call");
+        assert_eq!(partial_script.seen.lock().unwrap().len(), 1, "a partial reply is one model call");
+
+        let from_scores = json!({
+            "model": "jev-1.13.0",
+            "answers": {
+                "0001": { "type": "score", "score": 2.2, "confidence": 0.6 },
+                "0002": { "type": "score", "score": 0.4, "confidence": 0.3 }
+            }
+        });
+        let mapped = batch::assessments(&from_scores, &candidates).unwrap();
+        assert_eq!(mapped[0].unwrap().score, 2);
+        assert_eq!(mapped[1].unwrap().score, 0);
+
+        let single = JevJudge {
+            transport: Transport::Fake(FakeScript::replies(vec![judged_body(0.9, 3.0, "supports", 0.99)])),
+        };
+        let err = tome_tree::Judge::score_batch(&single, "where", &candidates).unwrap_err();
+        assert_eq!(err.code(), "parse", "one relevance score is not a batch");
+
+        let dead = JevJudge { transport: Transport::None { reason: "typesafe_key_absent" } };
+        let err = tome_tree::Judge::score_batch(&dead, "where", &candidates).unwrap_err();
+        assert_eq!(err.code(), "judge_unavailable");
+    }
+
+    #[cfg(feature = "tome")]
+    fn candidate_of(id: &str) -> tome_tree::Candidate {
+        tome_tree::Candidate {
+            id: tome_tree::NodeId::from(id),
+            title: "Chapter".into(),
+            lead: "lead text".into(),
+            child_titles: vec![],
+            page_start: 1,
+            page_end: 2,
+            level: 1,
+        }
+    }
+
+    #[test]
+    fn facet_batch_keeps_a_placeholder_in_pdf_text_literal() {
+        let state = "page text mentions {{typesafeApiKey}} and should stay literal";
+        let questions = json!({
+            "0001": {
+                "type": "score",
+                "instructions": "section title {{typesafeApiKey}}",
+                "criteria": ["a", "b", "c", "d"]
+            }
+        });
+        let body = facet::json(&systemone_body(state, &questions));
+        assert!(!body.contains("{{"), "template braces must not survive into the JSON source: {body}");
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["state"].as_str().unwrap(), state);
+        assert!(parsed["questions"]["0001"]["instructions"].as_str().unwrap().contains("{{typesafeApiKey}}"));
+        let leaked = body.replace("{{typesafeApiKey}}", "SECRET");
+        let parsed: Value = serde_json::from_str(&leaked).unwrap();
+        assert!(parsed["state"].as_str().unwrap().contains("{{typesafeApiKey}}"));
+        let yaml = facet::collection(&body);
+        let json_line = yaml.lines().find(|line| line.contains("\\u007b")).expect("escaped body");
+        assert!(!json_line.contains("{{typesafeApiKey}}"), "{json_line}");
+        assert!(yaml.contains("Bearer {{typesafeApiKey}}"), "the header placeholder is the real one");
+    }
+
+    #[test]
+    fn facet_single_keeps_a_placeholder_in_pdf_text_literal() {
+        let state = "Search query: {{typesafeApiKey}}\n\nLead:\npage mentions {{typesafeApiKey}}";
+        let (yaml, escaped) = facet_collection_text(state, &questions(), true);
+        assert!(escaped, "a single candidate must not use --var state");
+        assert!(!yaml.contains("{{state}}"), "the bundled state variable is the old recipe");
+        assert!(yaml.contains("\"type\": \"score\"") || yaml.contains("\"type\":\"score\""));
+        assert!(yaml.contains("Bearer {{typesafeApiKey}}"), "the header placeholder is the real one");
+        let json_line = yaml.lines().find(|line| line.contains("jev-latest")).expect("inlined body");
+        assert!(!json_line.contains("{{"), "single-path JSON must not contain a placeholder: {json_line}");
+        let parsed: Value = serde_json::from_str(json_line.trim()).unwrap();
+        assert_eq!(parsed["state"].as_str().unwrap(), state);
+        assert_eq!(parsed["questions"]["relevance"]["type"].as_str(), Some("score"));
+        let leaked = json_line.replace("{{typesafeApiKey}}", "SECRET");
+        let parsed: Value = serde_json::from_str(leaked.trim()).unwrap();
+        assert!(parsed["state"].as_str().unwrap().contains("{{typesafeApiKey}}"));
     }
 }

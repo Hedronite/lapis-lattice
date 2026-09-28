@@ -221,24 +221,71 @@ pub const SPLIT_PAGES: u32 = 10;
 /// [`OPEN_BYTE_CAP`], so one node can still be opened.
 pub const SPLIT_TOKENS: usize = 20_000;
 
+/// Descent budget. The root pass does not spend these calls.
 pub const DEFAULT_JUDGE_CALLS: u32 = 24;
 
-/// Judge calls held back at a wide frontier so descent still has room.
+/// Root-pass call budget. Separate from [`DEFAULT_JUDGE_CALLS`].
+pub const DEFAULT_ROOT_CALLS: u32 = 4;
+
+/// Candidates in one batched judge call.
+pub const DEFAULT_ROOT_BATCH: u32 = 16;
+
+/// One-at-a-time judgments after a malformed batch, chosen by lexical overlap.
+pub const DEFAULT_ROOT_TOP_K: u32 = 6;
+
+/// Kept so older imports still compile. Frontiers are batched instead of truncated.
 pub const DESCENT_RESERVE: u32 = 8;
 
 /// Builder stamp stored on every tree. A mismatch is `stale`.
-pub const BUILDER_VERSION: &str = "0.3.0";
+pub const BUILDER_VERSION: &str = "0.4.0";
+
+/// One judge result. `score` is the model's 0..=3. `confidence` is recorded
+/// and is not a gate: a low value does not drop the candidate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Assessment {
+    pub score: u8,
+    pub confidence: Option<f64>,
+}
+
+/// Which root-pass path produced the ranking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RootPath {
+    /// Batches of [`Budget::root_batch_size`] returned a score for every candidate.
+    #[default]
+    Batch,
+    /// A batch was malformed. Roots were pre-ranked on title and lead, then the
+    /// top [`Budget::root_top_k`] were judged one at a time. The failed batch
+    /// counts in [`Walk::root_judge_calls`]. The singles are a separate
+    /// allowance, so this path's cap is `1 + root_top_k`, not [`Budget::root_calls`].
+    LexicalFallback,
+}
 
 /// Judge-call and open-page budget for one walk. The 48 KB cap always applies.
+///
+/// `max_judge_calls` is the descent budget. `root_calls` caps successful root
+/// batches and the one-at-a-time fill-ins for ids a batch left out. A malformed
+/// root batch is not taken out of that cap: it is reported as one call, then
+/// the lexical fallback may spend up to `root_top_k` more (`1 + root_top_k`
+/// on [`Walk::root_judge_calls`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
     pub max_judge_calls: u32,
     pub max_pages: u32,
+    pub root_calls: u32,
+    pub root_batch_size: u32,
+    pub root_top_k: u32,
 }
 
 impl Default for Budget {
     fn default() -> Self {
-        Self { max_judge_calls: DEFAULT_JUDGE_CALLS, max_pages: OPEN_PAGE_CAP }
+        Self {
+            max_judge_calls: DEFAULT_JUDGE_CALLS,
+            max_pages: OPEN_PAGE_CAP,
+            root_calls: DEFAULT_ROOT_CALLS,
+            root_batch_size: DEFAULT_ROOT_BATCH,
+            root_top_k: DEFAULT_ROOT_TOP_K,
+        }
     }
 }
 
@@ -254,14 +301,61 @@ pub struct Walk {
     /// have been exceeded. Whole nodes only; nothing here was clipped.
     #[serde(default)]
     pub skipped: Vec<NodeId>,
+    /// Every candidate the walk scored, in call order. Confidence is recorded
+    /// and is not used to drop or reorder a candidate.
+    #[serde(default)]
+    pub judged: Vec<Judged>,
+    /// Judge calls spent on the root pass, counted in [`Self::judge_calls`].
+    ///
+    /// On [`RootPath::Batch`] this is at most [`Budget::root_calls`]: every
+    /// batch request, plus one call for each id that batch did not score.
+    /// On [`RootPath::LexicalFallback`] it is the failed batch plus at most
+    /// [`Budget::root_top_k`] singles. That cap is `1 + root_top_k`, separate
+    /// from `root_calls`, and this field does not go past it.
+    #[serde(default)]
+    pub root_judge_calls: u32,
+    /// `batch` or `lexical_fallback`.
+    #[serde(default)]
+    pub root_path: RootPath,
+    /// Root ids the root pass did not score, in tree order. Empty when every
+    /// root was judged. A stop partway through `root_calls`, and a lexical cut
+    /// that judges only `root_top_k`, both list the roots that got no score.
+    #[serde(default)]
+    pub roots_skipped: Vec<NodeId>,
 }
 
-/// What the judge sees for one child. Scores are 0–3.
+/// One scored candidate. `rank` equals `score`: confidence is not applied.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Judged {
+    pub node_id: NodeId,
+    pub title: String,
+    pub page_start: u32,
+    pub page_end: u32,
+    /// Model score, 0..=3. This is what the beam sorts on.
+    pub score: u8,
+    pub confidence: Option<f64>,
+    /// Same as `score`. Kept so a caller can show the value the beam used.
+    pub rank: u8,
+}
+
+/// A child heading shown to the judge next to the page lead, not inside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildTitle {
+    pub title: String,
+    pub page_start: u32,
+    pub page_end: u32,
+}
+
+/// What the judge sees for one node. Scores are 0–3.
+///
+/// `lead` is the node's own page text, already capped. `child_titles` is a
+/// separate list. Callers must not reconstruct one by parsing the other.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub id: NodeId,
     pub title: String,
     pub lead: String,
+    pub child_titles: Vec<ChildTitle>,
     pub page_start: u32,
     pub page_end: u32,
     pub level: u8,

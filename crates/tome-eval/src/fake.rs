@@ -206,6 +206,7 @@ impl TomeApi for FakeTome {
                         id: c.id.clone(),
                         title: c.title.clone(),
                         lead: c.lead.clone(),
+                        child_titles: vec![],
                         page_start: c.page_start,
                         page_end: c.page_end,
                         level: c.level,
@@ -236,6 +237,10 @@ impl TomeApi for FakeTome {
             passages,
             judge_calls: calls,
             skipped: vec![],
+            judged: vec![],
+            root_judge_calls: 0,
+            root_path: tome_tree::RootPath::Batch,
+            roots_skipped: vec![],
         })
     }
 
