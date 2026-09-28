@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: &str = "0.2.0";
+use crate::contract::{Judged, RootPath, Walk};
+
+pub const SCHEMA_VERSION: &str = "0.3.0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -164,19 +166,42 @@ pub struct TomeSettings {
     /// `DocMeta.summary_temperature` of the walked doc.
     #[serde(default)]
     pub summary_temperature: Option<f64>,
+    /// `[tome] root_calls` passed as `Budget::root_calls` (0.3.0).
+    #[serde(default)]
+    pub root_calls: Option<u32>,
+    /// `[tome] root_batch_size` passed as `Budget::root_batch_size` (0.3.0).
+    #[serde(default)]
+    pub root_batch_size: Option<u32>,
+    /// `[tome] root_top_k` passed as `Budget::root_top_k` (0.3.0).
+    #[serde(default)]
+    pub root_top_k: Option<u32>,
 }
 
-/// One judged tree child: what the walk ranked on (score) and what it no longer
-/// gates on (confidence).
+/// One judged tree node, from `Walk::judged`: what the walk ranked on (score) and
+/// what it no longer gates on (confidence).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CandidateScore {
     pub node_id: String,
     pub title: String,
     pub page_start: u32,
     pub page_end: u32,
-    /// Rounded 0..=3 score passed to the walk; `None` when Jev returned none.
+    /// 0..=3 score the walk ranked on. Always set from 0.3.0 (`Walk::judged`);
+    /// `None` only in 0.2.0 records.
     pub score: Option<u8>,
     pub confidence: Option<f64>,
+}
+
+impl From<&Judged> for CandidateScore {
+    fn from(j: &Judged) -> Self {
+        Self {
+            node_id: j.node_id.0.clone(),
+            title: j.title.clone(),
+            page_start: j.page_start,
+            page_end: j.page_end,
+            score: Some(j.score),
+            confidence: j.confidence,
+        }
+    }
 }
 
 impl CandidateScore {
@@ -186,7 +211,9 @@ impl CandidateScore {
     }
 }
 
-/// Tome-arm walk judging (schema 0.2.0). `null` on baseline records.
+/// Tome-arm walk judging (schema 0.2.0; root provenance 0.3.0). `null` on baseline
+/// records and on walks that returned an error (no `Walk`, so nothing was judged
+/// on record).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WalkScores {
     /// `score_only`: rank on score, no confidence gate (spike policy).
@@ -197,6 +224,12 @@ pub struct WalkScores {
     /// would have failed this walk closed (`judge_unavailable`).
     pub would_fail_closed: bool,
     pub candidates: Vec<CandidateScore>,
+    /// `batch` | `lexical_fallback`: which root-pass path ranked the roots (0.3.0).
+    #[serde(default)]
+    pub root_path: Option<String>,
+    /// Calls the root pass spent (`Walk::root_judge_calls`, 0.3.0).
+    #[serde(default)]
+    pub root_judge_calls: Option<u32>,
 }
 
 impl WalkScores {
@@ -206,6 +239,22 @@ impl WalkScores {
             confidence_floor: floor,
             would_fail_closed: candidates.iter().any(|c| c.below(floor)),
             candidates,
+            root_path: None,
+            root_judge_calls: None,
+        }
+    }
+
+    /// Everything from the walk itself: `judged` (every scored node, in walk
+    /// order), `root_path` and `root_judge_calls`.
+    pub fn from_walk(walk: &Walk, floor: f64) -> Self {
+        let root_path = match walk.root_path {
+            RootPath::Batch => "batch",
+            RootPath::LexicalFallback => "lexical_fallback",
+        };
+        Self {
+            root_path: Some(root_path.into()),
+            root_judge_calls: Some(walk.root_judge_calls),
+            ..Self::score_only(walk.judged.iter().map(CandidateScore::from).collect(), floor)
         }
     }
 }
@@ -233,7 +282,8 @@ pub struct ResultRecord {
     pub model: ModelInfo,
     pub baseline: BaselineSettings,
     pub tome: TomeSettings,
-    /// Per-candidate walk scores (0.2.0); `null` for baseline.
+    /// Per-candidate walk scores (0.2.0) and root provenance (0.3.0); `null` for
+    /// baseline and for failed walks.
     #[serde(default)]
     pub walk_scores: Option<WalkScores>,
     pub git_sha: String,

@@ -343,13 +343,28 @@
           ],
           "minimum": 0,
           "description": "DocMeta.summary_temperature of the walked doc."
+        },
+        "root_calls": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "[tome] root_calls passed as Budget::root_calls (0.3.0)."
+        },
+        "root_batch_size": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "[tome] root_batch_size passed as Budget::root_batch_size (0.3.0)."
+        },
+        "root_top_k": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "[tome] root_top_k passed as Budget::root_top_k (0.3.0)."
         }
       }
     },
     "candidateScore": {
       "type": "object",
       "additionalProperties": false,
-      "description": "One judged tree child (0.2.0): the score the walk ranked on and the confidence it no longer gates on.",
+      "description": "One judged tree node, from Walk.judged (0.2.0): the score the walk ranked on and the confidence it no longer gates on.",
       "required": [
         "node_id",
         "title",
@@ -377,7 +392,8 @@
             "null"
           ],
           "minimum": 0,
-          "maximum": 3
+          "maximum": 3,
+          "description": "0..=3 score the walk ranked on. Always an integer from 0.3.0; null only in 0.2.0 records."
         },
         "confidence": {
           "type": [
@@ -395,7 +411,7 @@
         "null"
       ],
       "additionalProperties": false,
-      "description": "Tome-arm walk judging (0.2.0). Spike policy: rank on score only, no confidence gate; null on baseline records.",
+      "description": "Tome-arm walk judging (0.2.0; root provenance 0.3.0), from the walk's own Walk.judged / root_path / root_judge_calls. Spike policy: rank on score only, no confidence gate; null on baseline records and on walks that returned an error.",
       "required": [
         "policy",
         "confidence_floor",
@@ -422,6 +438,18 @@
           "items": {
             "$ref": "#/$defs/candidateScore"
           }
+        },
+        "root_path": {
+          "enum": [
+            "batch",
+            "lexical_fallback"
+          ],
+          "description": "Root-pass path (0.3.0): batch = batched calls scored every root; lexical_fallback = a malformed batch, then the top root_top_k roots by title/lead overlap judged one at a time."
+        },
+        "root_judge_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Walk.root_judge_calls (0.3.0): calls the root pass spent. A Jev batch is one call."
         }
       }
     },
@@ -458,7 +486,7 @@
           "const": "result"
         },
         "schema_version": {
-          "const": "0.2.0"
+          "const": "0.3.0"
         },
         "run_id": {
           "type": "string"
@@ -927,7 +955,7 @@
           "const": "summary"
         },
         "schema_version": {
-          "const": "0.2.0"
+          "const": "0.3.0"
         },
         "run_id": {
           "type": "string"

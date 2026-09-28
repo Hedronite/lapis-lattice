@@ -53,6 +53,10 @@ beam = 2                                       # must equal tome_tree::BEAM (fix
 max_judge_calls = 24
 max_open_pages = 12
 max_open_bytes = 49152
+# Root pass (tome_tree::Budget). A Jev batch is one call, so 4 calls cover 64 roots.
+root_calls = 4                                 # = tome_tree::DEFAULT_ROOT_CALLS
+root_batch_size = 16                           # = tome_tree::DEFAULT_ROOT_BATCH
+root_top_k = 6                                 # = tome_tree::DEFAULT_ROOT_TOP_K; lexical fallback after a malformed batch
 
 [jev]
 # Jev = scorer (correctness grade), walk judge, and the baseline shadow rerank. Never the answerer.

@@ -7,8 +7,9 @@
 //! Clean-room: concepts from VectifyAI/PageIndex@619cbd8 (MIT); no code copied.
 
 pub use tome_tree::{
-    BEAM, BUILDER_VERSION, Budget, Candidate, DocId, DocMeta, Judge, Node, NodeId, NodeSource, OPEN_BYTE_CAP,
-    OPEN_PAGE_CAP, OpenPassages, Passage, Result, TomeError, TomeIndex, Walk,
+    Assessment, BEAM, BUILDER_VERSION, Budget, Candidate, DEFAULT_ROOT_BATCH, DEFAULT_ROOT_CALLS,
+    DEFAULT_ROOT_TOP_K, DocId, DocMeta, Judge, Judged, Node, NodeId, NodeSource, OPEN_BYTE_CAP,
+    OPEN_PAGE_CAP, OpenPassages, Passage, Result, RootPath, TomeError, TomeIndex, Walk,
 };
 
 /// The frozen §3 surface, object-safe. Every call returns `Result`; empty is never an error
