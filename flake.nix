@@ -40,8 +40,17 @@
             cargoBuildFlags = [ "--bins" ];
             doCheck = false;
           };
+          # The A/B harness alone (`tome-eval run|check|validate`). No cargo feature needed.
+          tomeEval = rustPlatform.buildRustPackage {
+            pname = "tome-eval";
+            version = "0.0.1";
+            src = ./.;
+            inherit cargoLock;
+            cargoBuildFlags = [ "-p" "tome-eval" ];
+            doCheck = false;
+          };
         in
-        f { inherit pkgs rust rustPlatform bins cargoLock; }
+        f { inherit pkgs rust rustPlatform bins cargoLock tomeEval; }
       );
     in
     {
@@ -51,14 +60,17 @@
             rust
             pkgs.pkg-config
             pkgs.poppler-utils
+            # tome-eval: regenerate evals/tome/data/chunk-pages.jsonl (read-only sqlite + jq).
+            pkgs.sqlite
+            pkgs.jq
           ];
         };
       });
 
-      packages = each ({ bins, ... }: {
+      packages = each ({ bins, tomeEval, ... }: {
         default = bins;
         lapis = bins;
-        tome-eval = bins;
+        tome-eval = tomeEval;
       });
 
       checks = each ({ rustPlatform, cargoLock, ... }: {
