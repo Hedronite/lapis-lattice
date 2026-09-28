@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 
 use crate::contract::{
-    BEAM, Budget, Candidate, DocId, DocMeta, Judge, Judged, Node, NodeId, NodeSource, OPEN_BYTE_CAP,
-    OPEN_PAGE_CAP, Passage, Result, TomeApi, TomeError, Walk,
+    BEAM, Budget, Candidate, ChildTitle, DocId, DocMeta, Judge, Judged, Node, NodeId, NodeSource,
+    OPEN_BYTE_CAP, OPEN_PAGE_CAP, Passage, Result, TomeApi, TomeError, Walk,
 };
 
 /// Doc id of the sample book (a fake sha256).
@@ -210,6 +210,15 @@ impl TomeApi for FakeTome {
                         id: c.id.clone(),
                         title: c.title.clone(),
                         lead: c.lead.clone(),
+                        child_titles: c
+                            .children
+                            .iter()
+                            .map(|k| ChildTitle {
+                                title: k.title.clone(),
+                                page_start: k.page_start,
+                                page_end: k.page_end,
+                            })
+                            .collect(),
                         page_start: c.page_start,
                         page_end: c.page_end,
                         level: c.level,

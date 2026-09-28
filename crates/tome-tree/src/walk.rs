@@ -9,14 +9,15 @@
 //! candidate. `judge_unavailable` is a transport or model failure: a missing
 //! score, a score outside 0..=3 on a one-at-a-time call, or a dead transport.
 //! A malformed batch is not that failure. On the root pass it switches to a
-//! lexical pre-rank. That fallback has its own `root_top_k` allowance: the
-//! failed batch and those one-at-a-time calls are not charged against
-//! `root_calls`.
+//! lexical pre-rank. The failed batch counts in `judge_calls`. The fallback
+//! singles are a separate `root_top_k` allowance, so that path reports at most
+//! `1 + root_top_k` and does not borrow from `root_calls`. Ids a batch left
+//! out are judged one at a time and each of those calls counts too.
 
 use crate::error::{Result, TomeError};
 use crate::types::{
-    Assessment, BEAM, Budget, Candidate, Judged, Node, NodeId, OPEN_BYTE_CAP, OPEN_PAGE_CAP, RootPath,
-    STOP_PAGES,
+    Assessment, BEAM, Budget, Candidate, ChildTitle, Judged, Node, NodeId, OPEN_BYTE_CAP, OPEN_PAGE_CAP,
+    RootPath, STOP_PAGES,
 };
 
 /// Score one candidate from 0 to 3, or a batch of them.
@@ -25,12 +26,12 @@ use crate::types::{
 /// [`assess`](Judge::assess) is `judge_unavailable`. Low confidence is not:
 /// it is stored on the assessment and the walk ignores it when ranking.
 ///
-/// [`score_batch`](Judge::score_batch) should return one assessment per
-/// candidate, in order. `Err(judge_unavailable)` aborts the walk. Any other
-/// error, or an `Ok` that does not cover every candidate with a score in
-/// 0..=3, is a malformed batch. The root pass then pre-ranks on title and lead
-/// and judges `root_top_k` roots without spending `root_calls`. A judge that
-/// scored only some ids should fill the rest itself and return `Ok`.
+/// [`score_batch`](Judge::score_batch) returns one slot per candidate, in
+/// order. `Some` is a score in 0..=3. `None` is an id this call did not score:
+/// the walk judges that id with [`assess`](Judge::assess) and counts the call.
+/// `Err(judge_unavailable)` aborts the walk. Any other error is a malformed
+/// batch. The root pass counts that failed call, then pre-ranks and judges
+/// `root_top_k` roots on the separate fallback allowance.
 ///
 /// The Jev adapter blocks on a tokio runtime. That runtime must be multi-thread:
 /// `block_in_place` panics on a current-thread runtime, and calling `walk` from
@@ -44,14 +45,17 @@ pub trait Judge {
         Ok(Assessment { score: self.score(query, candidate)?, confidence: None })
     }
 
-    /// One model call scores every candidate. The default fans out through
-    /// [`assess`](Judge::assess), which costs one call per candidate.
-    fn score_batch(&self, query: &str, candidates: &[Candidate]) -> Result<Vec<Assessment>> {
-        candidates.iter().map(|c| self.assess(query, c)).collect()
+    /// One model call scores every candidate. `None` means that id was not
+    /// scored. The default fans out through [`assess`](Judge::assess) and
+    /// wraps each result in `Some`, which costs one call per candidate.
+    fn score_batch(&self, query: &str, candidates: &[Candidate]) -> Result<Vec<Option<Assessment>>> {
+        candidates.iter().map(|c| self.assess(query, c).map(Some)).collect()
     }
 
-    /// Calls charged for one [`score_batch`](Judge::score_batch) of this slice.
-    /// A fan-out judge costs one per candidate. A batching judge costs 1.
+    /// Calls charged for a [`score_batch`](Judge::score_batch) that scores
+    /// every id. A fan-out judge costs one per candidate. A batching judge
+    /// costs 1 for the batch request. Ids left as `None` cost one more each,
+    /// charged by the walk when it fills them in.
     fn batch_cost(&self, candidates: &[Candidate]) -> u32 {
         candidates.len().max(1) as u32
     }
@@ -119,19 +123,19 @@ impl Judge for FakeJudge {
         })
     }
 
-    fn score_batch(&self, query: &str, candidates: &[Candidate]) -> Result<Vec<Assessment>> {
+    fn score_batch(&self, query: &str, candidates: &[Candidate]) -> Result<Vec<Option<Assessment>>> {
         if self.fail_batch {
             return Err(TomeError::Parse("scripted malformed batch".into()));
         }
         if !self.batch {
-            return candidates.iter().map(|c| self.assess(query, c)).collect();
+            return candidates.iter().map(|c| self.assess(query, c).map(Some)).collect();
         }
         let mut out = Vec::with_capacity(candidates.len());
         for candidate in candidates {
-            out.push(Assessment {
+            out.push(Some(Assessment {
                 score: self.lookup(candidate.id.as_str())?,
                 confidence: self.confidence.get(candidate.id.as_str()).copied(),
-            });
+            }));
         }
         Ok(out)
     }
@@ -239,30 +243,23 @@ fn score_roots(
         if count == 0 {
             break;
         }
-        let nodes = &roots[offset..offset + count];
-        let candidates = candidates_of(nodes, BATCH_LEAD);
-        let cost = judge.batch_cost(&candidates);
-        match judge.score_batch(query, &candidates) {
-            Err(TomeError::JudgeUnavailable { reason }) => {
-                return Err(TomeError::JudgeUnavailable { reason });
+        let consumed =
+            consume_batch(&roots[offset..offset + count], query, judge, remaining, &mut picks, &mut judged)?;
+        if consumed.broken {
+            // The failed batch is a real call. The lexical singles use
+            // `root_top_k`, not whatever `root_calls` has left, so the reported
+            // total stays within `1 + root_top_k`.
+            calls += consumed.calls;
+            if picks.is_empty() {
+                let (fallback, extra, used) =
+                    lexical_fallback(roots, query, judge, budget.root_top_k, budget.root_top_k)?;
+                judged.extend(extra);
+                return Ok((fallback, judged, calls + used, RootPath::LexicalFallback));
             }
-            Ok(answers) if usable(&answers, count) => {
-                push_scored(nodes, &answers, &mut picks, &mut judged);
-                calls += cost;
-                offset += count;
-            }
-            _ => {
-                // The failed call did not score a root. Do not charge it, or the
-                // one-at-a-time fallback, against `root_calls`.
-                if picks.is_empty() {
-                    let (fallback, extra, used) =
-                        lexical_fallback(roots, query, judge, budget.root_top_k, budget.root_top_k)?;
-                    judged.extend(extra);
-                    return Ok((fallback, judged, used, RootPath::LexicalFallback));
-                }
-                break;
-            }
+            break;
         }
+        calls += consumed.calls;
+        offset += consumed.advance;
     }
     if picks.is_empty() {
         return Err(TomeError::OverBudget {
@@ -350,35 +347,24 @@ fn score_set(
                 detail: format!("judge call budget {} exhausted", limits.budget_label),
             });
         }
-        let slice = &nodes[offset..offset + count];
-        let candidates = candidates_of(slice, BATCH_LEAD);
-        let cost = judge.batch_cost(&candidates);
-        match judge.score_batch(query, &candidates) {
-            Err(TomeError::JudgeUnavailable { reason }) => {
-                return Err(TomeError::JudgeUnavailable { reason });
-            }
-            Ok(answers) if usable(&answers, count) => {
-                push_scored(slice, &answers, &mut picks, &mut judged);
-                used += cost;
-                offset += count;
-            }
-            _ => {
-                *batch_broken = true;
-                if count > 1 && cost == 1 {
-                    used += 1;
-                }
-                let (fallback, extra, fallback_used) = lexical_fallback(
-                    &nodes[offset..],
-                    query,
-                    judge,
-                    limits.remaining.saturating_sub(used),
-                    limits.top_k,
-                )?;
-                picks.extend(fallback);
-                judged.extend(extra);
-                return Ok((picks, judged, used + fallback_used));
-            }
+        let consumed =
+            consume_batch(&nodes[offset..offset + count], query, judge, left, &mut picks, &mut judged)?;
+        if consumed.broken {
+            *batch_broken = true;
+            used += consumed.calls;
+            let (fallback, extra, fallback_used) = lexical_fallback(
+                &nodes[offset..],
+                query,
+                judge,
+                limits.remaining.saturating_sub(used),
+                limits.top_k,
+            )?;
+            picks.extend(fallback);
+            judged.extend(extra);
+            return Ok((picks, judged, used + fallback_used));
         }
+        used += consumed.calls;
+        offset += consumed.advance;
     }
     Ok((picks, judged, used))
 }
@@ -396,8 +382,65 @@ fn affordable_count(nodes: &[Node], batch_size: usize, remaining: u32, judge: &d
     n
 }
 
-fn usable(answers: &[Assessment], n: usize) -> bool {
-    answers.len() == n && answers.iter().all(|answer| answer.score <= 3)
+struct Consumed {
+    calls: u32,
+    advance: usize,
+    /// The batch scored nothing. The caller lexical-falls-back this slice.
+    broken: bool,
+}
+
+/// Score one slice. A complete batch costs [`Judge::batch_cost`]. A partial
+/// batch costs that plus one [`Judge::assess`] per missing id that still fits
+/// in `remaining`. A malformed batching call costs 1.
+fn consume_batch(
+    nodes: &[Node],
+    query: &str,
+    judge: &dyn Judge,
+    remaining: u32,
+    picks: &mut Vec<Pick>,
+    judged: &mut Vec<Judged>,
+) -> Result<Consumed> {
+    let candidates = candidates_of(nodes, BATCH_LEAD);
+    let cost = judge.batch_cost(&candidates);
+    let count = nodes.len();
+    let slots = match judge.score_batch(query, &candidates) {
+        Err(TomeError::JudgeUnavailable { reason }) => return Err(TomeError::JudgeUnavailable { reason }),
+        Ok(slots) => slots,
+        Err(_) => {
+            let calls = if cost == 1 { 1 } else { 0 };
+            return Ok(Consumed { calls, advance: 0, broken: true });
+        }
+    };
+    let kept = |slot: &Option<Assessment>| slot.as_ref().is_some_and(|answer| answer.score <= 3);
+    if slots.len() == count && slots.iter().all(&kept) {
+        let answers: Vec<Assessment> = slots.into_iter().flatten().collect();
+        push_scored(nodes, &answers, picks, judged);
+        return Ok(Consumed { calls: cost, advance: count, broken: false });
+    }
+    if slots.len() != count || !slots.iter().any(&kept) {
+        let calls = if cost == 1 { 1 } else { 0 };
+        return Ok(Consumed { calls, advance: 0, broken: true });
+    }
+    let filled = slots.iter().filter(|slot| kept(slot)).count() as u32;
+    let mut spent = if cost == 1 { 1 } else { filled };
+    for (node, slot) in nodes.iter().zip(slots) {
+        if let Some(assessment) = slot.filter(|answer| answer.score <= 3) {
+            push_scored(std::slice::from_ref(node), std::slice::from_ref(&assessment), picks, judged);
+            continue;
+        }
+        if remaining.saturating_sub(spent) == 0 {
+            continue;
+        }
+        let assessment = judge.assess(query, &candidate_of(node, SINGLE_LEAD))?;
+        if assessment.score > 3 {
+            return Err(TomeError::JudgeUnavailable {
+                reason: format!("score {} outside 0..=3", assessment.score),
+            });
+        }
+        spent += 1;
+        push_scored(std::slice::from_ref(node), std::slice::from_ref(&assessment), picks, judged);
+    }
+    Ok(Consumed { calls: spent, advance: count, broken: false })
 }
 
 fn push_scored(nodes: &[Node], answers: &[Assessment], picks: &mut Vec<Pick>, judged: &mut Vec<Judged>) {
@@ -433,37 +476,24 @@ fn candidates_of(nodes: &[Node], lead_chars: usize) -> Vec<Candidate> {
     nodes.iter().map(|node| candidate_of(node, lead_chars)).collect()
 }
 
-fn child_titles(node: &Node) -> String {
-    if node.children.is_empty() {
-        return String::new();
-    }
-    let mut titles = String::from("Child sections:\n");
-    for child in node.children.iter().take(16) {
-        let title: String = child.title.chars().take(80).collect();
-        titles.push_str(&format!("- {title} (pp. {}–{})\n", child.page_start, child.page_end));
-    }
-    let extra = node.children.len().saturating_sub(16);
-    if extra > 0 {
-        titles.push_str(&format!("- … {extra} more\n"));
-    }
-    titles
-}
-
 fn candidate_of(node: &Node, lead_chars: usize) -> Candidate {
-    // Child titles are their own block, in front of the page lead. A later
-    // 240-char clip of the page text must not drop them.
-    let titles = child_titles(node);
     let page_cap = if lead_chars <= BATCH_LEAD { lead_chars } else { lead_chars.min(400) };
-    let page_lead: String = node.lead.chars().take(page_cap).collect();
-    let lead = match (titles.is_empty(), page_lead.is_empty()) {
-        (true, _) => page_lead,
-        (false, true) => titles,
-        (false, false) => format!("{titles}\n{page_lead}"),
-    };
+    let lead: String = node.lead.chars().take(page_cap).collect();
+    let child_titles = node
+        .children
+        .iter()
+        .take(16)
+        .map(|child| ChildTitle {
+            title: child.title.chars().take(80).collect(),
+            page_start: child.page_start,
+            page_end: child.page_end,
+        })
+        .collect();
     Candidate {
         id: node.id.clone(),
         title: node.title.clone(),
         lead,
+        child_titles,
         page_start: node.page_start,
         page_end: node.page_end,
         level: node.level,

@@ -248,10 +248,11 @@ pub const FAIL_CLOSED_FLOOR: f64 = 0.6;
 /// - `assess`: one candidate, the shipped rerank questions, score 0..=3 plus the
 ///   minimum reported confidence.
 /// - `score_batch`: one System One call per batch (`batch::state` +
-///   `batch::questions`). Ids the reply did not score are judged again one at a
-///   time. A reply with no array and no per-id score is `parse`, and the walk
-///   pre-ranks.
-/// - `batch_cost` is 1, so a 16-root batch spends one of `root_calls`.
+///   `batch::questions`). Ids the reply did not score come back `None`; the
+///   walk judges those one at a time and charges each call. A reply with no
+///   array and no per-id score is `parse`, and the walk pre-ranks.
+/// - `batch_cost` is 1 (the batch request only), so a 16-root batch spends one
+///   of `root_calls`.
 ///
 /// Spike policy (Eli ruling 2026-09-28): the walk ranks on score ONLY, with no
 /// confidence gate. Per-candidate score and confidence come from `Walk::judged`.
@@ -259,7 +260,7 @@ pub const FAIL_CLOSED_FLOOR: f64 = 0.6;
 pub struct JevJudge {
     pub so: SystemOne,
     pub handle: tokio::runtime::Handle,
-    /// System One calls actually sent. A batch is one; each fill-in `assess` is one more.
+    /// System One calls actually sent (a batch is one). Should equal `Walk::judge_calls`.
     pub calls: AtomicU32,
     pub prompt_chars: AtomicU32,
 }
@@ -293,23 +294,21 @@ impl Judge for JevJudge {
         relevance_assessment(&body)
     }
 
-    fn score_batch(&self, query: &str, candidates: &[Candidate]) -> crate::contract::Result<Vec<Assessment>> {
+    fn score_batch(
+        &self,
+        query: &str,
+        candidates: &[Candidate],
+    ) -> crate::contract::Result<Vec<Option<Assessment>>> {
         if candidates.len() <= 1 {
-            return candidates.iter().map(|c| self.assess(query, c)).collect();
+            return candidates.iter().map(|c| self.assess(query, c).map(Some)).collect();
         }
         let body = self.decide(&batch::state(query, candidates), batch::questions(candidates))?;
-        let parsed = batch::assessments(&body, candidates)?;
-        let mut out = Vec::with_capacity(candidates.len());
-        for (c, slot) in candidates.iter().zip(parsed) {
-            out.push(match slot {
-                Some(a) => a,
-                None => self.assess(query, c)?,
-            });
-        }
-        Ok(out)
+        // Missing ids stay `None`. The walk judges them and counts each call.
+        batch::assessments(&body, candidates)
     }
 
     fn batch_cost(&self, _candidates: &[Candidate]) -> u32 {
+        // The batch request only. Fill-ins are separate `assess` calls.
         1
     }
 }
@@ -317,14 +316,22 @@ impl Judge for JevJudge {
 /// Mirror of lapis `src/jev.rs` `candidate_state` (a private fn there; keep the two
 /// in step). A TOC node is not a retrieved chunk, so the prompt says so.
 pub fn candidate_state(query: &str, c: &Candidate) -> String {
-    format!(
+    // Page lead and child titles are separate fields, so a long lead cannot
+    // hide the titles.
+    let mut out = format!(
         "Search query: {query}\n\n\
-         This is a table-of-contents node, not a retrieved passage. \
-         The lead is the opening of the section. Child section titles are \
-         listed under the lead when this node has children.\n\n\
-         Section: {}\nPages: {}-{}\n\nLead:\n{}",
-        c.title, c.page_start, c.page_end, c.lead
-    )
+         This is a table-of-contents node, not a retrieved passage.\n\n\
+         Section: {}\nPages: {}-{}\n",
+        c.title, c.page_start, c.page_end
+    );
+    if !c.child_titles.is_empty() {
+        out.push_str("\nChild titles:\n");
+        for child in &c.child_titles {
+            out.push_str(&format!("- {} (pp. {}–{})\n", child.title, child.page_start, child.page_end));
+        }
+    }
+    out.push_str(&format!("\nLead:\n{}", c.lead));
+    out
 }
 
 /// Mirror of lapis `src/jev.rs` `relevance_assessment`: the 0..=3 relevance score
@@ -412,6 +419,7 @@ mod tests {
             id: crate::contract::NodeId(id.into()),
             title: format!("t{id}"),
             lead: "l".into(),
+            child_titles: vec![],
             page_start: 1,
             page_end: 2,
             level: 1,
@@ -446,19 +454,20 @@ mod tests {
     }
 
     #[test]
-    fn score_batch_is_one_call_and_fills_missing_ids() {
+    fn score_batch_is_one_call_and_leaves_missing_ids_to_the_walk() {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let cs = [cand("0001"), cand("0002"), cand("0003")];
         let reply = json!({"answers":[
             {"id":"0001","score":1,"confidence":0.8},
             {"id":"0003","score":3,"confidence":0.5}
         ]});
-        let j = judge(&rt, vec![reply, rr(0.9, 2.0, 0.7)]);
+        let j = judge(&rt, vec![reply]);
         assert_eq!(j.batch_cost(&cs), 1);
         let got = j.score_batch("q", &cs).unwrap();
-        let got: Vec<(u8, Option<f64>)> = got.iter().map(|a| (a.score, a.confidence)).collect();
-        assert_eq!(got, vec![(1, Some(0.8)), (2, Some(0.7)), (3, Some(0.5))]);
-        assert_eq!(j.calls.load(Ordering::Relaxed), 2, "one batch call plus one fill-in for 0002");
+        let got: Vec<Option<(u8, Option<f64>)>> =
+            got.iter().map(|a| a.map(|a| (a.score, a.confidence))).collect();
+        assert_eq!(got, vec![Some((1, Some(0.8))), None, Some((3, Some(0.5)))]);
+        assert_eq!(j.calls.load(Ordering::Relaxed), 1, "a partial reply is one call; the walk fills 0002");
 
         let full = json!([
             {"id":"0001","score":0,"confidence":0.9},
@@ -466,7 +475,7 @@ mod tests {
             {"id":"0003","score":2,"confidence":0.9}
         ]);
         let j = judge(&rt, vec![full]);
-        assert_eq!(j.score_batch("q", &cs).unwrap()[2].score, 2);
+        assert_eq!(j.score_batch("q", &cs).unwrap()[2].map(|a| a.score), Some(2));
         assert_eq!(j.calls.load(Ordering::Relaxed), 1);
 
         let j = judge(&rt, vec![json!({"relevance":{"score":3,"confidence":0.9}})]);
@@ -475,10 +484,16 @@ mod tests {
 
     #[test]
     fn batch_request_matches_lapis() {
-        let cs = [cand("0001"), cand("0002")];
+        let mut parent = cand("0001");
+        parent.child_titles =
+            vec![tome_tree::ChildTitle { title: "Section A".into(), page_start: 2, page_end: 2 }];
+        let cs = [parent.clone(), cand("0002")];
         let s = batch::state("where is it", &cs);
         assert!(s.starts_with("Search query: where is it\n\n"));
         assert!(s.contains("id: 0002\ntitle: t0002\npages: 1-2\n"));
+        assert!(s.contains("child titles:\n- Section A (pp. 2–2)\nlead:\nl\n"), "{s}");
+        let one = candidate_state("q", &parent);
+        assert!(one.contains("\nChild titles:\n- Section A (pp. 2–2)\n\nLead:\nl"), "{one}");
         let q = batch::questions(&cs);
         assert_eq!(q.as_object().unwrap().keys().collect::<Vec<_>>(), vec!["0001", "0002"]);
         assert_eq!(q["0001"]["type"], "score");

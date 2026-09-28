@@ -255,16 +255,19 @@ pub enum RootPath {
     #[default]
     Batch,
     /// A batch was malformed. Roots were pre-ranked on title and lead, then the
-    /// top [`Budget::root_top_k`] were judged one at a time. Those calls are not
-    /// taken out of [`Budget::root_calls`].
+    /// top [`Budget::root_top_k`] were judged one at a time. The failed batch
+    /// counts in [`Walk::root_judge_calls`]. The singles are a separate
+    /// allowance, so this path's cap is `1 + root_top_k`, not [`Budget::root_calls`].
     LexicalFallback,
 }
 
 /// Judge-call and open-page budget for one walk. The 48 KB cap always applies.
 ///
-/// `max_judge_calls` is the descent budget. `root_calls` is a separate line for
-/// the root pass, so a book with dozens of chapters does not spend the descent
-/// budget before it opens a page.
+/// `max_judge_calls` is the descent budget. `root_calls` caps successful root
+/// batches and the one-at-a-time fill-ins for ids a batch left out. A malformed
+/// root batch is not taken out of that cap: it is reported as one call, then
+/// the lexical fallback may spend up to `root_top_k` more (`1 + root_top_k`
+/// on [`Walk::root_judge_calls`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
     pub max_judge_calls: u32,
@@ -302,8 +305,13 @@ pub struct Walk {
     /// and is not used to drop or reorder a candidate.
     #[serde(default)]
     pub judged: Vec<Judged>,
-    /// Judge calls spent on the root pass. Not part of [`Self::judge_calls`]'s
-    /// descent portion; [`Self::judge_calls`] is the total.
+    /// Judge calls spent on the root pass, counted in [`Self::judge_calls`].
+    ///
+    /// On [`RootPath::Batch`] this is at most [`Budget::root_calls`]: every
+    /// batch request, plus one call for each id that batch did not score.
+    /// On [`RootPath::LexicalFallback`] it is the failed batch plus at most
+    /// [`Budget::root_top_k`] singles. That cap is `1 + root_top_k`, separate
+    /// from `root_calls`, and this field does not go past it.
     #[serde(default)]
     pub root_judge_calls: u32,
     /// `batch` or `lexical_fallback`.
@@ -325,12 +333,24 @@ pub struct Judged {
     pub rank: u8,
 }
 
-/// What the judge sees for one child. Scores are 0–3.
+/// A child heading shown to the judge next to the page lead, not inside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildTitle {
+    pub title: String,
+    pub page_start: u32,
+    pub page_end: u32,
+}
+
+/// What the judge sees for one node. Scores are 0–3.
+///
+/// `lead` is the node's own page text, already capped. `child_titles` is a
+/// separate list. Callers must not reconstruct one by parsing the other.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub id: NodeId,
     pub title: String,
     pub lead: String,
+    pub child_titles: Vec<ChildTitle>,
     pub page_start: u32,
     pub page_end: u32,
     pub level: u8,

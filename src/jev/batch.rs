@@ -24,14 +24,19 @@ pub(super) fn state(query: &str, candidates: &[Candidate]) -> String {
          Include every id you can score.\n\n"
     );
     for candidate in candidates {
+        let lead: String = candidate.lead.chars().take(PAGE_LEAD).collect();
         out.push_str(&format!(
-            "id: {}\ntitle: {}\npages: {}-{}\nlead:\n{}\n\n",
-            candidate.id,
-            candidate.title,
-            candidate.page_start,
-            candidate.page_end,
-            excerpt(&candidate.lead)
+            "id: {}\ntitle: {}\npages: {}-{}\n",
+            candidate.id, candidate.title, candidate.page_start, candidate.page_end
         ));
+        if !candidate.child_titles.is_empty() {
+            out.push_str("child titles:\n");
+            for child in &candidate.child_titles {
+                let title: String = child.title.chars().take(80).collect();
+                out.push_str(&format!("- {title} (pp. {}–{})\n", child.page_start, child.page_end));
+            }
+        }
+        out.push_str(&format!("lead:\n{lead}\n\n"));
     }
     out
 }
@@ -76,17 +81,6 @@ pub(super) fn assessments(body: &Value, candidates: &[Candidate]) -> Result<Vec<
         return Ok(slots);
     }
     Err(TomeError::Parse("batch response has no score array".into()))
-}
-
-/// Keep a `Child sections:` block whole. Cap only the page lead at 240 chars.
-fn excerpt(lead: &str) -> String {
-    const MARKER: &str = "Child sections:\n";
-    let Some(rest) = lead.strip_prefix(MARKER) else {
-        return lead.chars().take(PAGE_LEAD).collect();
-    };
-    let (titles, page) = rest.split_once("\n\n").unwrap_or((rest, ""));
-    let page: String = page.chars().take(PAGE_LEAD).collect();
-    if page.is_empty() { format!("{MARKER}{titles}") } else { format!("{MARKER}{titles}\n\n{page}") }
 }
 
 fn batch_array(body: &Value) -> Option<&Vec<Value>> {

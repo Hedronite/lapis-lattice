@@ -221,7 +221,6 @@ impl Harness {
         let mut pages: Vec<u32> = walk.passages.iter().map(|p| p.page).collect();
         pages.sort_unstable();
         pages.dedup();
-        let calls = judge.calls.load(std::sync::atomic::Ordering::Relaxed);
         let chars = judge.prompt_chars.load(std::sync::atomic::Ordering::Relaxed) as u64;
         let r = Retrieved {
             opened: Opened {
@@ -233,7 +232,8 @@ impl Harness {
             },
             passages,
             latency_ms: ms,
-            judge_calls: Some(walk.judge_calls.max(calls)),
+            // The library counts every call (batches, fill-ins, failed batches) since #34 af55f4d.
+            judge_calls: Some(walk.judge_calls),
             judge_prompt_tokens: Some(chars / 4),
             rerank_status: None,
             summary: Some((meta.summary_model, f64::from(meta.summary_temperature))),

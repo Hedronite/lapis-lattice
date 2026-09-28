@@ -75,7 +75,8 @@ offline tests can swap in `FakeTome`.
   `tome`). `score_batch` is **one call per batch** and `batch_cost` is 1, so the default
   `root_calls = 4` at `root_batch_size = 16` covers 64 roots. The batch request is lapis'
   `src/jev/batch.rs` itself, compiled into tome-eval with `#[path]`, so it cannot drift. Ids a
-  batch reply leaves out are judged again one at a time. `assess` (one candidate: the shipped
+  batch reply leaves out come back `None` and the walk judges them one at a time, charging each
+  call (#34 af55f4d). `tokens.judge_calls` is the library's `Walk::judge_calls`. `assess` (one candidate: the shipped
   rerank questions, score plus minimum confidence) and its prompt are mirrored from private
   functions in `src/jev.rs`; keep them in step.
 - **Spike scoring policy:** the walk ranks on score only, with no confidence gate. Each record's
