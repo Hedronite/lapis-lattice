@@ -6,6 +6,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CallToolResult, ContentBlock, ErrorData, Implementation, ListResourceTemplatesResult,
@@ -44,11 +45,15 @@ Lapis: a local Markdown notes vault with Lapis Lattice retrieval.
 
 pub const NOTE_URI_PREFIX: &str = "lapis://note/";
 
-/// `#[tool_handler]` in rmcp 3.x routes through `Self::tool_router()`, so the
-/// server holds only its context.
+/// The server holds its context and its tool router. The router is the base
+/// `tool_router()` plus, only with the `tome` cargo feature AND `LAPIS_TOME=1`,
+/// the spike's `tome_tree` / `tome_open` tools (see `mcp_tome`).
 #[derive(Clone)]
 pub struct LapisServer {
     ctx: Arc<Ctx>,
+    router: ToolRouter<LapisServer>,
+    #[cfg(feature = "tome")]
+    pub(crate) tome: Option<Arc<dyn tome_eval::contract::TomeApi>>,
 }
 
 fn fail(e: LapisError) -> ErrorData {
@@ -367,10 +372,18 @@ fn hit_meta(h: &Hit) -> Value {
     })
 }
 
-#[tool_router]
+#[tool_router(vis = "pub(crate)")]
 impl LapisServer {
     pub fn new(ctx: Ctx) -> Self {
-        Self { ctx: Arc::new(ctx) }
+        let router = Self::tool_router();
+        #[cfg(feature = "tome")]
+        let (router, tome) = crate::mcp_tome::extend(router, &ctx.vault.root);
+        Self {
+            ctx: Arc::new(ctx),
+            router,
+            #[cfg(feature = "tome")]
+            tome,
+        }
     }
 
     #[tool(description = "Vault root, overlay buckets, and lattice health. Call once per session.")]
@@ -676,7 +689,7 @@ impl LapisServer {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.router)]
 impl ServerHandler for LapisServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().enable_resources().build())
@@ -776,6 +789,14 @@ mod tests {
         assert!(!tasks::wants_summary(t.path.as_deref(), t.full.unwrap_or(false)));
         let g = guard(Some(true), Some(5), None);
         assert!(g.dry_run && g.if_mtime == Some(5) && g.if_hash.is_none());
+    }
+
+    /// tome-tree spike: the base router never carries the tome tools.
+    #[test]
+    fn base_router_has_no_tome_tools() {
+        let r = LapisServer::tool_router();
+        assert!(!r.has_route("tome_tree") && !r.has_route("tome_open"));
+        assert!(r.has_route("search"));
     }
 
     /// N17: hop arg validation.

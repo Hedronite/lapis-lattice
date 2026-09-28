@@ -15,6 +15,8 @@ mod hal;
 mod http;
 mod jev;
 mod mcp;
+#[cfg(feature = "tome")]
+mod mcp_tome;
 mod notes;
 mod ops;
 mod overlay;
