@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use tome_eval::answer::Answerer;
 use tome_eval::baseline::ChunkMap;
 use tome_eval::config::EvalConfig;
-use tome_eval::fake::FakeTome;
+use tome_eval::fake::{FakeTome, no_structure_doc, sample_doc};
 use tome_eval::jev::SystemOne;
 use tome_eval::questions::Question;
 use tome_eval::record::Arm;
@@ -21,12 +21,14 @@ fn cfg() -> EvalConfig {
     let mut c = EvalConfig::load(&p).unwrap();
     c.answer.provider = "fake".into();
     c.baseline.lapis_bin = "/nonexistent/lapis".into();
+    // Nothing listens on port 9: the http baseline must fail as lattice_down, not empty.
+    c.baseline.lattice_url = "http://127.0.0.1:9".into();
     c
 }
 
-fn q(id: &str, doc: &str, scored: bool) -> Question {
+fn q(id: &str, doc: &str, sha: &str, scored: bool) -> Question {
     serde_json::from_value(json!({
-        "id": id, "doc": doc, "doc_sha256": "a".repeat(64),
+        "id": id, "doc": doc, "doc_sha256": sha,
         "question": "gamma details of beta?", "expected_answer": if scored { json!("gamma") } else { Value::Null },
         "gold_pages": if scored { json!([[15, 16]]) } else { json!([]) },
         "answer_type": if scored { "fact" } else { "error" }, "difficulty": "deep_subsection",
@@ -41,12 +43,15 @@ fn grade(choice: &str) -> Value {
 }
 
 fn walk_scores() -> Vec<Value> {
-    // Fake tome walk: 2 root children, then 2 section children. Then one grade.
+    // Fake tome walk: both roots expand, so their 4 sections are scored in one round
+    // (0001.0001, 0001.0002, 0002.0001, 0002.0002); the top 2 are leaves. Then one grade.
     vec![
         json!({"section": {"score": 0, "confidence": 0.9}}),
-        json!({"section": {"score": 3, "confidence": 0.9}}),
+        json!({"section": {"score": 0, "confidence": 0.9}}),
         json!({"section": {"score": 1, "confidence": 0.9}}),
-        json!({"section": {"score": 3, "confidence": 0.9}}),
+        // Low confidence on the winning child: score-only still ranks it first,
+        // and the record says a 0.6 gate would have failed this walk closed.
+        json!({"section": {"score": 3, "confidence": 0.41}}),
         grade("exact"),
     ]
 }
@@ -65,8 +70,13 @@ async fn harness_writes_schema_valid_records_for_both_arms_and_the_probe() {
         cfg: cfg(),
     };
     let doc = "Archmagus-Stack/09-Tomes/fake/Fake Book.pdf";
-    let qs = vec![q("fake-01", doc, true)];
-    let probes = vec![q("fake-fc-01", "Archmagus-Stack/09-Tomes/fake/No Outline.pdf", false)];
+    let qs = vec![q("fake-01", doc, sample_doc().as_str(), true)];
+    let probes = vec![q(
+        "fake-fc-01",
+        "Archmagus-Stack/09-Tomes/fake/No Outline.pdf",
+        no_structure_doc().as_str(),
+        false,
+    )];
     let opts = RunOpts {
         questions_file: qfile,
         out_dir: dir.clone(),
@@ -87,20 +97,34 @@ async fn harness_writes_schema_valid_records_for_both_arms_and_the_probe() {
     let s: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("summary.json")).unwrap()).unwrap();
     assert_eq!(c.validate(&s), Vec::<String>::new());
 
-    // Baseline could not spawn lapis: explicit error, never an empty success.
+    // Baseline could not reach the lattice: explicit error, never an empty success.
     assert_eq!(recs[0]["arm"], "baseline");
     assert_eq!(recs[0]["correctness"], "error");
-    assert_eq!(recs[0]["error"]["kind"], "internal");
+    assert_eq!(recs[0]["error"]["kind"], "lattice_down");
+    assert_eq!(recs[0]["baseline"]["search"]["transport"], "http");
     // Tome walked to the gamma leaf, answered, and was graded exact.
     assert_eq!(recs[1]["arm"], "tome");
     assert_eq!(recs[1]["correctness"], "exact", "{}", recs[1]);
     assert_eq!(recs[1]["page_metrics"]["hit"], true);
     assert_eq!(recs[1]["opened"]["kind"], "nodes");
     assert!(recs[1]["opened"]["ids"].as_array().unwrap().contains(&json!("0002.0002")));
+    assert_eq!(recs[1]["tome"]["summary_model"], "fake/lead");
+    assert_eq!(recs[1]["tome"]["summary_temperature"], 0.0);
+    assert_eq!(recs[1]["tome"]["backend"], "fake");
+    assert_eq!(recs[1]["schema_version"], "0.2.0");
+    let ws = &recs[1]["walk_scores"];
+    assert_eq!((ws["policy"].as_str(), ws["confidence_floor"].as_f64()), (Some("score_only"), Some(0.6)));
+    assert_eq!(ws["would_fail_closed"], true);
+    let cands = ws["candidates"].as_array().unwrap();
+    assert_eq!(cands.len(), 4);
+    assert!(cands.iter().any(|c| c["node_id"] == "0002.0002" && c["score"] == 3 && c["confidence"] == 0.41));
+    assert!(recs[0]["walk_scores"].is_null(), "baseline records carry no walk scores");
     // Probe fails closed with no_structure and is not scored.
     assert_eq!(recs[2]["scored"], false);
     assert_eq!(recs[2]["error"]["kind"], "no_structure");
     assert_eq!(summary.verdict.decision, "incomplete");
     assert_eq!(summary.arms.tome.silent_empties, 0);
+    assert_eq!((summary.walks_judged, summary.would_fail_closed_at_0_6), (1, 1));
+    assert_eq!(s["would_fail_closed_at_0_6"], 1);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1,5 +1,5 @@
 //! Runs both arms per question with the same answerer and budget and writes
-//! `results.jsonl` + `summary.json` (schema `tome-eval-result` 0.1.0).
+//! `results.jsonl` + `summary.json` (schema `tome-eval-result` 0.2.0).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use crate::answer::{Answerer, PassageIn, build_prompt, fit_budget};
 use crate::baseline::{self, ChunkMap};
 use crate::config::EvalConfig;
 use crate::contract::{Budget, DocId, TomeApi};
-use crate::jev::{JevJudge, SystemOne};
+use crate::jev::{FAIL_CLOSED_FLOOR, JevJudge, SystemOne};
 use crate::metrics;
 use crate::questions::Question;
 use crate::record::*;
@@ -41,6 +41,8 @@ struct Retrieved {
     judge_calls: Option<u32>,
     judge_prompt_tokens: Option<u64>,
     rerank_status: Option<String>,
+    /// `(summary_model, summary_temperature)` from the walked doc's `DocMeta`.
+    summary: Option<(String, f64)>,
 }
 
 fn now() -> String {
@@ -84,6 +86,9 @@ impl Harness {
                 retrieve_limit: b.retrieve_limit,
                 per_doc: false,
                 doc_filter: "same_pdf_post_filter".into(),
+                transport: Some(b.transport.clone()),
+                retrieve_k: (b.transport == "http").then_some(b.retrieve_k),
+                domain: None,
             },
             rerank_jev: RerankSettings {
                 enabled: b.rerank_jev,
@@ -98,20 +103,28 @@ impl Harness {
         let t = &self.cfg.tome;
         TomeSettings {
             backend: self.tome.backend_name().into(),
-            builder_version: self.tome.builder_version(),
+            builder_version: Some(self.tome.builder_version()),
             beam: t.beam,
             max_judge_calls: t.max_judge_calls,
             max_open_pages: t.max_open_pages,
             max_open_bytes: t.max_open_bytes,
             judge_transport: Some(self.jev.name().into()),
             walk_cache: false,
+            index_dir: Some(t.index_dir.display().to_string()),
+            summary_model: None,
+            summary_temperature: None,
         }
     }
 
     async fn retrieve_baseline(&self, q: &Question) -> Result<Retrieved, ErrorInfo> {
         let b = &self.cfg.baseline;
         let err = |e: baseline::BaselineError| ErrorInfo { kind: e.kind().into(), message: e.to_string() };
-        let (hits, search_ms) = baseline::lapis_search(b, &q.question).await.map_err(err)?;
+        let domain = b.domain.get(&q.doc).map(String::as_str);
+        let (hits, search_ms) = match b.transport.as_str() {
+            "lapis" => baseline::lapis_search(b, &q.question).await,
+            _ => baseline::http_search(b, &q.question, domain).await,
+        }
+        .map_err(err)?;
         let mut page = baseline::same_pdf(hits, &q.doc, b.top_k);
         if page.is_empty() {
             return Err(err(baseline::BaselineError::NoHitsForDoc(b.retrieve_limit)));
@@ -137,31 +150,60 @@ impl Harness {
             judge_calls: Some(calls),
             judge_prompt_tokens: None,
             rerank_status: Some(status.into()),
+            summary: None,
         })
     }
 
-    async fn retrieve_tome(&self, q: &Question) -> Result<Retrieved, ErrorInfo> {
-        let t = &self.cfg.tome;
-        let budget =
-            Budget { beam: t.beam, max_judge_calls: t.max_judge_calls, max_open_pages: t.max_open_pages };
-        let tome = Arc::clone(&self.tome);
+    /// Walk scores are returned even when the walk errors, so a fail-closed walk
+    /// still records what Jev said about each judged candidate.
+    async fn retrieve_tome(&self, q: &Question) -> (Result<Retrieved, ErrorInfo>, Option<WalkScores>) {
         let judge = JevJudge::new(self.jev.clone(), tokio::runtime::Handle::current());
-        let doc = DocId(q.doc.clone());
+        let (res, judge) = self.walk_tome(q, judge).await;
+        let scores = judge.map(|j| WalkScores::score_only(j.take_candidates(), FAIL_CLOSED_FLOOR));
+        (res, scores)
+    }
+
+    async fn walk_tome(
+        &self,
+        q: &Question,
+        judge: JevJudge,
+    ) -> (Result<Retrieved, ErrorInfo>, Option<JevJudge>) {
+        let t = &self.cfg.tome;
+        let budget = Budget { max_judge_calls: t.max_judge_calls, max_pages: t.max_open_pages };
+        let tome = Arc::clone(&self.tome);
+        // The library keys docs by PDF sha256; the path is only on DocMeta.
+        let doc = match DocId::parse(&q.doc_sha256) {
+            Ok(d) => d,
+            Err(e) => {
+                let e = ErrorInfo { kind: "bad_input".into(), message: format!("doc_sha256: {e}") };
+                return (Err(e), Some(judge));
+            }
+        };
         let query = q.question.clone();
         let t0 = Instant::now();
-        let (walk, judge) = tokio::task::spawn_blocking(move || {
-            let w = tome.walk(&doc, &query, &judge, budget);
-            (w, judge)
+        // `Judge` is sync: walk on a blocking thread so the judge can block on the
+        // (multi-thread) runtime handle without stalling a worker.
+        let joined = tokio::task::spawn_blocking(move || {
+            let walked = tome.meta(&doc).and_then(|m| Ok((m, tome.walk(&doc, &query, &judge, budget)?)));
+            (walked, judge)
         })
-        .await
-        .map_err(|e| ErrorInfo { kind: "internal".into(), message: format!("walk task: {e}") })?;
+        .await;
+        let (walked, judge) = match joined {
+            Ok(x) => x,
+            Err(e) => {
+                let e = ErrorInfo { kind: "internal".into(), message: format!("walk task: {e}") };
+                return (Err(e), None);
+            }
+        };
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
-        let walk = walk.map_err(|e| ErrorInfo { kind: e.code().into(), message: e.to_string() })?;
+        let (meta, walk) = match walked {
+            Ok(x) => x,
+            Err(e) => return (Err(ErrorInfo { kind: e.code().into(), message: e.to_string() }), Some(judge)),
+        };
         if walk.passages.is_empty() {
-            return Err(ErrorInfo {
-                kind: "empty".into(),
-                message: "walk returned no passages and no error".into(),
-            });
+            let e =
+                ErrorInfo { kind: "empty".into(), message: "walk returned no passages and no error".into() };
+            return (Err(e), Some(judge));
         }
         let passages: Vec<PassageIn> = walk
             .passages
@@ -178,26 +220,28 @@ impl Harness {
         pages.dedup();
         let calls = judge.calls.load(std::sync::atomic::Ordering::Relaxed);
         let chars = judge.prompt_chars.load(std::sync::atomic::Ordering::Relaxed) as u64;
-        Ok(Retrieved {
+        let r = Retrieved {
             opened: Opened {
                 kind: "nodes".into(),
-                count: walk.chosen.len() as u32,
-                ids: walk.chosen.iter().map(|n| n.0.clone()).collect(),
+                count: walk.nodes.len() as u32,
+                ids: walk.nodes.iter().map(|n| n.0.clone()).collect(),
                 pages,
                 bytes: Some(passages.iter().map(|p| p.text.len() as u64).sum()),
             },
             passages,
             latency_ms: ms,
             judge_calls: Some(walk.judge_calls.max(calls)),
-            judge_prompt_tokens: walk.judge_prompt_tokens.or(Some(chars / 4)),
+            judge_prompt_tokens: Some(chars / 4),
             rerank_status: None,
-        })
+            summary: Some((meta.summary_model, f64::from(meta.summary_temperature))),
+        };
+        (Ok(r), Some(judge))
     }
 
     pub async fn run_one(&self, run_id: &str, q: &Question, arm: Arm, git_sha: &str) -> ResultRecord {
         let gold = q.gold_page_list();
-        let retrieved = match arm {
-            Arm::Baseline => self.retrieve_baseline(q).await,
+        let (retrieved, walk_scores) = match arm {
+            Arm::Baseline => (self.retrieve_baseline(q).await, None),
             Arm::Tome => self.retrieve_tome(q).await,
         };
         let mut rec = ResultRecord {
@@ -234,6 +278,7 @@ impl Harness {
             model: self.model_info(),
             baseline: self.baseline_settings(None),
             tome: self.tome_settings(),
+            walk_scores,
             git_sha: git_sha.into(),
             timestamp: now(),
         };
@@ -247,6 +292,13 @@ impl Harness {
             }
         };
         rec.baseline = self.baseline_settings(r.rerank_status.clone());
+        if arm == Arm::Baseline {
+            rec.baseline.search.domain = self.cfg.baseline.domain.get(&q.doc).cloned();
+        }
+        if let Some((model, temp)) = &r.summary {
+            rec.tome.summary_model = Some(model.clone());
+            rec.tome.summary_temperature = Some(*temp);
+        }
         rec.opened = r.opened;
         rec.latency_ms.retrieve = r.latency_ms;
         rec.tokens.judge_calls = r.judge_calls;
@@ -339,6 +391,7 @@ impl Harness {
         let base = metrics::summarize_arm(&by(Arm::Baseline));
         let tome = metrics::summarize_arm(&by(Arm::Tome));
         let pq = metrics::per_question(&all);
+        let (walks_judged, would_fail_closed_at_0_6) = metrics::fail_closed_counts(&all);
         let verdict = metrics::verdict(&base, &tome, &pq, opts.smoke || opts.arms.len() < 2);
         let qbytes = std::fs::read(&opts.questions_file).map_err(|e| e.to_string())?;
         let summary = SummaryRecord {
@@ -355,6 +408,8 @@ impl Harness {
             model: self.model_info(),
             baseline: self.baseline_settings(None),
             tome: self.tome_settings(),
+            walks_judged,
+            would_fail_closed_at_0_6,
             git_sha: opts.git_sha.clone(),
             started_at: started,
             finished_at: now(),

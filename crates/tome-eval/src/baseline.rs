@@ -93,6 +93,85 @@ impl BaselineError {
     }
 }
 
+/// GET `<lattice_url>/search` on the lattice service (the Python `tome_indexer.py` index).
+/// `top_k = retrieve_limit` (≤ 50), `retrieve_k` per modality, optional `domain`.
+pub async fn http_search(
+    cfg: &BaselineCfg,
+    query: &str,
+    domain: Option<&str>,
+) -> Result<(Vec<Hit>, f64), BaselineError> {
+    let mode = match cfg.mode.as_str() {
+        "bm25" => "bm25_only",
+        "vector" => "vector_only",
+        _ => "hybrid",
+    };
+    let mut params: Vec<(&str, String)> = vec![
+        ("q", query.to_string()),
+        ("top_k", cfg.retrieve_limit.to_string()),
+        ("retrieve_k", cfg.retrieve_k.to_string()),
+        ("mode", mode.to_string()),
+    ];
+    if let Some(d) = domain {
+        params.push(("domain", d.to_string()));
+    }
+    let url = format!("{}/search", cfg.lattice_url.trim_end_matches('/'));
+    let t0 = Instant::now();
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .query(&params)
+        .timeout(Duration::from_secs(120))
+        .send()
+        .await
+        .map_err(|e| BaselineError::LatticeDown(format!("{url}: {e}")))?;
+    let status = resp.status();
+    let body: Value = resp.json().await.map_err(|e| BaselineError::Internal(format!("search json: {e}")))?;
+    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    if status.as_u16() == 503 {
+        return Err(BaselineError::LatticeDown(body.to_string().chars().take(200).collect()));
+    }
+    if !status.is_success() {
+        return Err(BaselineError::Internal(format!(
+            "search {status}: {}",
+            body.to_string().chars().take(200).collect::<String>()
+        )));
+    }
+    Ok((parse_http_results(&body)?, ms))
+}
+
+/// Lattice `/search` `results[]` → `lapis_lattice::Hit` (text → snippet, rrf_score → score).
+pub fn parse_http_results(body: &Value) -> Result<Vec<Hit>, BaselineError> {
+    let rows = body
+        .get("results")
+        .and_then(Value::as_array)
+        .ok_or_else(|| BaselineError::Internal("search: no results array".into()))?;
+    let num = |v: &Value, k: &str| {
+        v.get(k).and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
+    };
+    let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+    rows.iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let path =
+                text(r, "path").ok_or_else(|| BaselineError::Internal(format!("result {i} has no path")))?;
+            Ok(Hit {
+                kind: if path.ends_with(".pdf") { "pdf".into() } else { "markdown".into() },
+                title: text(r, "title").unwrap_or_default(),
+                heading: text(r, "heading"),
+                snippet: text(r, "text"),
+                rank: num(r, "rank").map_or(i as u32 + 1, |x| x as u32),
+                score: num(r, "rrf_score").or_else(|| num(r, "score")).unwrap_or(0.0),
+                domain: text(r, "domain"),
+                doc_type: text(r, "doc_type"),
+                tags: vec![],
+                chunk_id: num(r, "chunk_id").map(|x| x as i64),
+                chunk_index: num(r, "chunk_index").map(|x| x as i64),
+                jev: None,
+                path,
+            })
+        })
+        .collect()
+}
+
 /// `lapis --json --lattice <url> search <q> -n <retrieve_limit> --mode <mode>`.
 pub async fn lapis_search(cfg: &BaselineCfg, query: &str) -> Result<(Vec<Hit>, f64), BaselineError> {
     let t0 = Instant::now();
@@ -210,6 +289,22 @@ mod tests {
         let hs = vec![hit("x.md", 1), hit("d.pdf", 2), hit("d.pdf", 3), hit("d.pdf", 4)];
         let f = same_pdf(hs, "d.pdf", 2);
         assert_eq!(f.iter().map(|h| h.chunk_id.unwrap()).collect::<Vec<_>>(), vec![2, 3]);
+    }
+
+    #[test]
+    fn http_results_map_to_hits() {
+        let body = serde_json::json!({"results": [
+            {"chunk_id": 90981, "chunk_index": 117, "heading": "The Four Golden Signals", "text": "The four golden signals",
+             "path": "d.pdf", "title": "SRE", "domain": "01-Earth-DevOps", "doc_type": "tome", "rrf_score": 0.032, "rank": 1},
+            {"chunk_id": "7", "path": "x.md", "title": "x", "rank": "2", "rrf_score": "0.01"}
+        ]});
+        let hs = parse_http_results(&body).unwrap();
+        assert_eq!(
+            (hs[0].chunk_id, hs[0].kind.as_str(), hs[0].snippet.as_deref()),
+            (Some(90981), "pdf", Some("The four golden signals"))
+        );
+        assert_eq!((hs[1].chunk_id, hs[1].rank), (Some(7), 2));
+        assert!(parse_http_results(&serde_json::json!({"detail": "x"})).is_err());
     }
 
     #[test]

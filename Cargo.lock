@@ -8229,6 +8229,7 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.20",
  "tokio",
+ "tome-tree",
  "toml 1.1.5+spec-1.1.0",
 ]
 

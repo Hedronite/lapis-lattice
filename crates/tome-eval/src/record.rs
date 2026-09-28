@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: &str = "0.1.0";
+pub const SCHEMA_VERSION: &str = "0.2.0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -110,6 +110,15 @@ pub struct SearchSettings {
     pub retrieve_limit: u32,
     pub per_doc: bool,
     pub doc_filter: String,
+    /// `http` (lattice `/search`) | `lapis` (`lapis --json search`).
+    #[serde(default)]
+    pub transport: Option<String>,
+    /// Lattice per-modality candidate pool (http only).
+    #[serde(default)]
+    pub retrieve_k: Option<u32>,
+    /// Lattice `domain` filter applied for this question's PDF.
+    #[serde(default)]
+    pub domain: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +155,59 @@ pub struct TomeSettings {
     pub max_open_bytes: u32,
     pub judge_transport: Option<String>,
     pub walk_cache: bool,
+    /// `<vault>/.lapis/tomes` as configured (vault-relative when relative).
+    #[serde(default)]
+    pub index_dir: Option<String>,
+    /// `DocMeta.summary_model` of the walked doc (`{provider}/{model}`); null when unread.
+    #[serde(default)]
+    pub summary_model: Option<String>,
+    /// `DocMeta.summary_temperature` of the walked doc.
+    #[serde(default)]
+    pub summary_temperature: Option<f64>,
+}
+
+/// One judged tree child: what the walk ranked on (score) and what it no longer
+/// gates on (confidence).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CandidateScore {
+    pub node_id: String,
+    pub title: String,
+    pub page_start: u32,
+    pub page_end: u32,
+    /// Rounded 0..=3 score passed to the walk; `None` when Jev returned none.
+    pub score: Option<u8>,
+    pub confidence: Option<f64>,
+}
+
+impl CandidateScore {
+    /// The pre-ruling judge failed closed on a confidence below the floor.
+    pub fn below(&self, floor: f64) -> bool {
+        self.confidence.is_some_and(|c| c < floor)
+    }
+}
+
+/// Tome-arm walk judging (schema 0.2.0). `null` on baseline records.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WalkScores {
+    /// `score_only`: rank on score, no confidence gate (spike policy).
+    pub policy: String,
+    /// Reporting floor (0.6); never tuned to eval data.
+    pub confidence_floor: f64,
+    /// Some judged candidate had confidence < floor, so the pre-ruling judge
+    /// would have failed this walk closed (`judge_unavailable`).
+    pub would_fail_closed: bool,
+    pub candidates: Vec<CandidateScore>,
+}
+
+impl WalkScores {
+    pub fn score_only(candidates: Vec<CandidateScore>, floor: f64) -> Self {
+        Self {
+            policy: "score_only".into(),
+            confidence_floor: floor,
+            would_fail_closed: candidates.iter().any(|c| c.below(floor)),
+            candidates,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,6 +233,9 @@ pub struct ResultRecord {
     pub model: ModelInfo,
     pub baseline: BaselineSettings,
     pub tome: TomeSettings,
+    /// Per-candidate walk scores (0.2.0); `null` for baseline.
+    #[serde(default)]
+    pub walk_scores: Option<WalkScores>,
     pub git_sha: String,
     pub timestamp: String,
 }
@@ -257,6 +322,12 @@ pub struct SummaryRecord {
     pub model: ModelInfo,
     pub baseline: BaselineSettings,
     pub tome: TomeSettings,
+    /// Tome walks (scored questions) that judged at least one candidate (0.2.0).
+    #[serde(default)]
+    pub walks_judged: u32,
+    /// Of those, walks that would have failed closed at a 0.6 confidence floor.
+    #[serde(default)]
+    pub would_fail_closed_at_0_6: u32,
     pub git_sha: String,
     pub started_at: String,
     pub finished_at: String,
