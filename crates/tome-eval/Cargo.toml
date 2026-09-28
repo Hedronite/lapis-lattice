@@ -1,0 +1,27 @@
+[package]
+name = "tome-eval"
+version = "0.0.1"
+edition = "2024"
+description = "tome-tree spike A/B harness: lapis search --rerank-jev vs tome walk(), one shared answerer, Jev as scorer."
+license = "MIT"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tome-eval"
+path = "src/main.rs"
+
+[dependencies]
+lapis-lattice = { path = "../lapis-lattice" }
+clap = { version = "4", features = ["derive"] }
+jiff = "0.2"
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time"] }
+toml = "1"

@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/lapis-desktop", "crates/lapis-lattice"]
+members = [".", "crates/lapis-desktop", "crates/lapis-lattice", "crates/tome-eval"]
 # Vendored patched dependency, not a workspace member (see [patch.crates-io]).
 exclude = ["vendor/gpui-base"]
 
@@ -21,12 +21,15 @@ path = "src/main.rs"
 default = []
 # GPUI desktop shell. Off by default: `lapis desktop` then reports it is not built in.
 desktop = ["lapis-desktop/gpui", "dep:pdfium-render"]
+# tome-tree spike MCP tools (tome_tree / tome_open). Off by default; also needs LAPIS_TOME=1 at runtime.
+tome = ["dep:tome-eval"]
 
 [dependencies]
 pdfium-render = { version = "=0.9.4", optional = true, default-features = false, features = ["pdfium_7881"] }
 base64 = "0.22"
 lapis-desktop = { path = "crates/lapis-desktop" }
 lapis-lattice = { path = "crates/lapis-lattice", version = "0.4.2" }
+tome-eval = { path = "crates/tome-eval", optional = true }
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 gray_matter = "0.3"
