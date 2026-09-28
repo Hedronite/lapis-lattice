@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use tome_eval::answer::Answerer;
 use tome_eval::baseline::ChunkMap;
 use tome_eval::config::EvalConfig;
-use tome_eval::contract::{StubTome, TomeApi};
+use tome_eval::contract::{TomeApi, TomeIndex};
 use tome_eval::jev::SystemOne;
 use tome_eval::record::Arm;
 use tome_eval::runner::{Harness, RunOpts};
@@ -57,6 +57,9 @@ enum Cmd {
         /// Override the build-time git sha.
         #[arg(long)]
         git_sha: Option<String>,
+        /// Vault root, used when `tome.index_dir` is relative (else `$LAPIS_VAULT`).
+        #[arg(long)]
+        vault: Option<PathBuf>,
     },
     /// Validate results.jsonl / summary.json against the committed schema.
     Validate { files: Vec<PathBuf> },
@@ -119,7 +122,7 @@ fn real_main() -> Result<ExitCode, String> {
             println!("{n} record(s), {bad} invalid");
             Ok(if bad == 0 { ExitCode::SUCCESS } else { ExitCode::from(1) })
         }
-        Cmd::Run { config, questions: qp, failclosed, out, limit, only, arms, git_sha } => {
+        Cmd::Run { config, questions: qp, failclosed, out, limit, only, arms, git_sha, vault } => {
             let cfg = EvalConfig::load(&config)?;
             let mut qs = questions::load(&qp)?;
             if !only.is_empty() {
@@ -140,8 +143,21 @@ fn real_main() -> Result<ExitCode, String> {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let chunks = ChunkMap::load(&cfg.baseline.chunk_map)?;
-            // Until crates/tome-tree lands (R2 freeze) the tome arm is the fail-closed stub.
-            let tome: Arc<dyn TomeApi> = Arc::new(StubTome);
+            let index_dir = resolve_index_dir(&cfg.tome.index_dir, vault)?;
+            if arms.contains(&Arm::Tome) && !index_dir.is_dir() {
+                return Err(format!(
+                    "tome index {} does not exist; build trees with `lapis tome build` first, or pass --arms baseline",
+                    index_dir.display()
+                ));
+            }
+            // `TomeIndex::open` creates the dir; it is only reached when the dir exists or
+            // the tome arm is off (then nothing is walked and the empty index is unused).
+            let tome: Arc<dyn TomeApi> = Arc::new(if index_dir.is_dir() {
+                TomeIndex::open(&index_dir).map_err(|e| format!("{}: {e}", e.code()))?
+            } else {
+                TomeIndex::open(&std::env::temp_dir().join("tome-eval-empty-index"))
+                    .map_err(|e| format!("{}: {e}", e.code()))?
+            });
             let harness = Harness {
                 answerer: Answerer::from_config(&cfg.answer)?,
                 jev: SystemOne::from_config(&cfg.jev),
@@ -156,10 +172,26 @@ fn real_main() -> Result<ExitCode, String> {
                 smoke,
                 git_sha: git_sha.unwrap_or_else(|| env!("TOME_EVAL_GIT_SHA").to_string()),
             };
-            let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+            // Multi-thread on purpose: the sync `Judge` blocks on this runtime's handle from a
+            // blocking thread during `walk`, which a current-thread runtime cannot serve.
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
             let summary = rt.block_on(harness.run(&qs, &probes, &opts))?;
             println!("{}", serde_json::to_string_pretty(&summary.verdict).map_err(|e| e.to_string())?);
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// Absolute `index_dir` as-is; relative is joined to `--vault`, else `$LAPIS_VAULT`.
+fn resolve_index_dir(index_dir: &std::path::Path, vault: Option<PathBuf>) -> Result<PathBuf, String> {
+    if index_dir.is_absolute() {
+        return Ok(index_dir.to_path_buf());
+    }
+    let vault = vault.or_else(|| std::env::var_os("LAPIS_VAULT").map(PathBuf::from)).ok_or_else(|| {
+        format!("tome.index_dir {} is vault-relative; pass --vault or set LAPIS_VAULT", index_dir.display())
+    })?;
+    Ok(vault.join(index_dir))
 }

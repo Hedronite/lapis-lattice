@@ -38,8 +38,8 @@ embedding_dim = 768
 lattice_db_fingerprint = "atrium-lattice/data/lattice.db; 4 docs indexed 2026-07-23T00:55:55Z..01:13:13Z; 1658 chunks"
 
 [tome]
-index_dir = ".lapis/tomes"                   # vault-relative; unused while the backend is StubTome
-beam = 2
+index_dir = ".lapis/tomes"                   # vault-relative (joined to --vault / $LAPIS_VAULT); trees from `lapis tome build`
+beam = 2                                       # must equal tome_tree::BEAM (fixed in the library)
 max_judge_calls = 24
 max_open_pages = 12
 max_open_bytes = 49152

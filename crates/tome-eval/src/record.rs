@@ -146,6 +146,15 @@ pub struct TomeSettings {
     pub max_open_bytes: u32,
     pub judge_transport: Option<String>,
     pub walk_cache: bool,
+    /// `<vault>/.lapis/tomes` as configured (vault-relative when relative).
+    #[serde(default)]
+    pub index_dir: Option<String>,
+    /// `DocMeta.summary_model` of the walked doc (`{provider}/{model}`); null when unread.
+    #[serde(default)]
+    pub summary_model: Option<String>,
+    /// `DocMeta.summary_temperature` of the walked doc.
+    #[serde(default)]
+    pub summary_temperature: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

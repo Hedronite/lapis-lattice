@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 lapis-lattice = { path = "../lapis-lattice" }
+tome-tree = { path = "../tome-tree" }
 clap = { version = "4", features = ["derive"] }
 jiff = "0.2"
 regex = "1"

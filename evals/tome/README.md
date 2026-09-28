@@ -18,7 +18,7 @@ model and token budget in both arms. Jev only grades; it never answers.
 
 ```sh
 cargo run -p tome-eval -- check                                  # load + validate questions/config
-cargo run -p tome-eval -- run --config evals/tome/config.toml \
+cargo run -p tome-eval -- run --config evals/tome/config.toml --vault "$VAULT" \
   --questions evals/tome/questions.jsonl --failclosed evals/tome/failclosed.jsonl \
   --out /tmp/tome-eval --only sre-01                              # smoke (verdict is always "incomplete")
 cargo run -p tome-eval -- validate /tmp/tome-eval/results.jsonl /tmp/tome-eval/summary.json
@@ -62,8 +62,23 @@ comes from `opencode session export`. OpenCode has no CLI flag for output tokens
 
 ## Tome arm
 
-Until the R2 interface is frozen (Marci), the harness codes against the provisional
-`TomeApi` shim in `crates/tome-eval/src/contract.rs`. The live backend is `StubTome`, so
-every tome record currently has `error.kind = "stub"`. `FakeTome` backs the offline tests.
+Wired to the frozen `tome_tree` read surface (PR #32): `TomeIndex::open(<vault>/.lapis/tomes)`,
+then `meta` + `walk(&sha256, query, &JevJudge, Budget { max_judge_calls, max_pages })`.
+Docs are keyed by PDF sha256 (`doc_sha256` in `questions.jsonl`). `crates/tome-eval/src/contract.rs`
+re-exports the library types. Its only addition is an object-safe `TomeApi` trait, so the
+offline tests can swap in `FakeTome`.
+
+- Build the trees first (`lapis tome build <pdf>` with `--features tome`). A missing index dir
+  stops the run before any question. An unbuilt doc is recorded as `unknown_doc`.
+- `JevJudge` scores one candidate at a time (0–3). Uncertain, out-of-range or unavailable
+  answers are `judge_unavailable`: the walk stops and never guesses.
+- `walk` runs on a blocking thread and the judge blocks on the runtime handle, so the binary
+  uses a **multi-thread** tokio runtime on purpose.
+- Every tome record carries `tome.summary_model` / `tome.summary_temperature` from the doc's
+  `DocMeta`, plus `builder_version`, beam, budgets and `index_dir`.
+
 The MCP tools `tome_tree` / `tome_open` exist only with `--features tome` **and**
-`LAPIS_TOME=1`, and are off by default.
+`LAPIS_TOME=1` (off by default). `doc` must be exactly 64 lowercase hex characters. Anything
+else is rejected with `invalid_params` / `code: bad_input` before the library is called.
+Errors carry `data.code`: `bad_input`, `unknown_doc`, `unknown_node` and `over_budget` are
+invalid_params, and `parse`, `io`, `stale`, `no_structure` and `judge_unavailable` are internal errors.

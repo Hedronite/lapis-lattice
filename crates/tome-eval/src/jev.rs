@@ -237,7 +237,7 @@ pub fn child_questions() -> Value {
     })
 }
 
-pub fn child_state(query: &str, c: &Candidate<'_>) -> String {
+pub fn child_state(query: &str, c: &Candidate) -> String {
     format!(
         "Question: {query}\n\nSection: {}\nPages: {}-{}\nLead:\n{}",
         c.title,
@@ -247,8 +247,9 @@ pub fn child_state(query: &str, c: &Candidate<'_>) -> String {
     )
 }
 
-/// `tome_tree::Judge` over System One. Sync by contract, so `walk` runs on a
-/// blocking thread and this blocks on the runtime handle.
+/// `tome_tree::Judge` over System One. The trait is sync, so the harness runs `walk`
+/// on a blocking thread of a multi-thread runtime and this blocks on the handle.
+/// Jev only scores; it never answers.
 pub struct JevJudge {
     pub so: SystemOne,
     pub handle: tokio::runtime::Handle,
@@ -262,35 +263,31 @@ impl JevJudge {
     }
 }
 
-impl Judge for JevJudge {
-    fn name(&self) -> &str {
-        "jev-systemone"
-    }
+fn unavailable(reason: impl Into<String>) -> TomeError {
+    TomeError::JudgeUnavailable { reason: reason.into() }
+}
 
-    fn score(&self, query: &str, candidates: &[Candidate<'_>]) -> crate::contract::Result<Vec<u8>> {
+impl Judge for JevJudge {
+    fn score(&self, query: &str, c: &Candidate) -> crate::contract::Result<u8> {
         if let Transport::None { reason } = &self.so.transport {
-            return Err(TomeError::JudgeUnavailable(reason.clone()));
+            return Err(unavailable(reason.clone()));
         }
-        let mut out = Vec::with_capacity(candidates.len());
-        for c in candidates {
-            let state = child_state(query, c);
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            self.prompt_chars.fetch_add(state.len() as u32, Ordering::Relaxed);
-            let body = self
-                .handle
-                .block_on(self.so.decide(&state, child_questions()))
-                .map_err(TomeError::JudgeUnavailable)?;
-            let a = answers(&body);
-            let score = a.pointer("/section/score").and_then(Value::as_f64);
-            let conf = a.pointer("/section/confidence").and_then(Value::as_f64);
-            match score {
-                Some(s) if conf.is_none_or(|c| c >= self.so.floor) => {
-                    out.push(s.clamp(0.0, 3.0).round() as u8)
-                }
-                _ => return Err(TomeError::JudgeUnavailable(format!("uncertain score for {}", c.id.0))),
+        let state = child_state(query, c);
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.prompt_chars.fetch_add(state.len() as u32, Ordering::Relaxed);
+        let body = self.handle.block_on(self.so.decide(&state, child_questions())).map_err(unavailable)?;
+        let a = answers(&body);
+        let score = a.pointer("/section/score").and_then(Value::as_f64);
+        let conf = a.pointer("/section/confidence").and_then(Value::as_f64);
+        match score {
+            Some(s) if (0.0..=3.0).contains(&s) && conf.is_none_or(|c| c >= self.so.floor) => {
+                Ok(s.round() as u8)
             }
+            Some(s) if !(0.0..=3.0).contains(&s) => {
+                Err(unavailable(format!("score {s} outside 0..=3 for {}", c.id)))
+            }
+            _ => Err(unavailable(format!("uncertain score for {}", c.id))),
         }
-        Ok(out)
     }
 }
 
@@ -360,24 +357,35 @@ mod tests {
     #[test]
     fn walk_judge_fails_closed_on_uncertain() {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        let id = crate::contract::NodeId("0001".into());
-        let c = Candidate { id: &id, title: "t", lead: "l", page_start: 1, page_end: 2 };
+        let c = Candidate {
+            id: crate::contract::NodeId("0001".into()),
+            title: "t".into(),
+            lead: "l".into(),
+            page_start: 1,
+            page_end: 2,
+            level: 1,
+        };
         let j = JevJudge::new(
             SystemOne::fake(vec![json!({"section":{"score":2,"confidence":0.9}})]),
             rt.handle().clone(),
         );
-        assert_eq!(j.score("q", std::slice::from_ref(&c)).unwrap(), vec![2]);
+        assert_eq!(j.score("q", &c).unwrap(), 2);
         let j = JevJudge::new(
             SystemOne::fake(vec![json!({"section":{"score":3,"confidence":0.2}})]),
             rt.handle().clone(),
         );
-        assert_eq!(j.score("q", std::slice::from_ref(&c)).unwrap_err().code(), "judge_unavailable");
+        assert_eq!(j.score("q", &c).unwrap_err().code(), "judge_unavailable");
+        let j = JevJudge::new(
+            SystemOne::fake(vec![json!({"section":{"score":4,"confidence":0.9}})]),
+            rt.handle().clone(),
+        );
+        assert_eq!(j.score("q", &c).unwrap_err().code(), "judge_unavailable", "1..=4 scale fails closed");
         let none = SystemOne {
             transport: Transport::None { reason: "k".into() },
             floor: 0.6,
             timeout: Duration::from_secs(1),
         };
         let j = JevJudge::new(none, rt.handle().clone());
-        assert_eq!(j.score("q", &[c]).unwrap_err().code(), "judge_unavailable");
+        assert_eq!(j.score("q", &c).unwrap_err().code(), "judge_unavailable");
     }
 }

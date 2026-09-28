@@ -59,11 +59,26 @@ pub struct LapisServer {
 fn fail(e: LapisError) -> ErrorData {
     let msg = e.to_string();
     match e {
-        LapisError::Usage(_)
-        | LapisError::Path(_)
-        | LapisError::HttpOnly { .. }
-        | LapisError::Tome { .. } => ErrorData::invalid_params(msg, None),
+        LapisError::Usage(_) | LapisError::Path(_) | LapisError::HttpOnly { .. } => {
+            ErrorData::invalid_params(msg, None)
+        }
+        LapisError::Tome { code, .. } => tome_error(code, msg),
         LapisError::LatticeDown(_) | LapisError::Internal(_) => ErrorData::internal_error(msg, None),
+    }
+}
+
+/// Tome codes that mean the caller sent something wrong. Every other tome code
+/// (`parse`, `io`, `judge_unavailable`, `stale`, `no_structure`, …) is a backend
+/// failure and maps to an internal error.
+pub(crate) const TOME_CALLER_CODES: &[&str] = &["unknown_doc", "unknown_node", "over_budget", "bad_input"];
+
+/// Tome failure → MCP error, always with an explicit `data.code`.
+pub(crate) fn tome_error(code: &str, msg: String) -> ErrorData {
+    let data = Some(serde_json::json!({ "code": code }));
+    if TOME_CALLER_CODES.contains(&code) {
+        ErrorData::invalid_params(msg, data)
+    } else {
+        ErrorData::internal_error(msg, data)
     }
 }
 
@@ -749,6 +764,7 @@ pub async fn serve(ctx: Ctx) -> crate::error::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmcp::model::ErrorCode;
 
     fn arg(json: &str) -> SearchArg {
         serde_json::from_str(json).unwrap()
@@ -792,6 +808,26 @@ mod tests {
     }
 
     /// tome-tree spike: the base router never carries the tome tools.
+    #[test]
+    fn tome_errors_split_caller_from_backend_with_a_code() {
+        for (code, caller) in [
+            ("unknown_doc", true),
+            ("unknown_node", true),
+            ("over_budget", true),
+            ("bad_input", true),
+            ("parse", false),
+            ("io", false),
+            ("judge_unavailable", false),
+            ("stale", false),
+            ("no_structure", false),
+        ] {
+            let e = fail(LapisError::Tome { code, message: format!("{code} happened") });
+            let want = if caller { ErrorCode::INVALID_PARAMS } else { ErrorCode::INTERNAL_ERROR };
+            assert_eq!(e.code, want, "{code}");
+            assert_eq!(e.data.as_ref().and_then(|d| d["code"].as_str()), Some(code), "{code}");
+        }
+    }
+
     #[test]
     fn base_router_has_no_tome_tools() {
         let r = LapisServer::tool_router();

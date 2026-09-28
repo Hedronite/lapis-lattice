@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use tome_eval::answer::Answerer;
 use tome_eval::baseline::ChunkMap;
 use tome_eval::config::EvalConfig;
-use tome_eval::fake::FakeTome;
+use tome_eval::fake::{FakeTome, no_structure_doc, sample_doc};
 use tome_eval::jev::SystemOne;
 use tome_eval::questions::Question;
 use tome_eval::record::Arm;
@@ -24,9 +24,9 @@ fn cfg() -> EvalConfig {
     c
 }
 
-fn q(id: &str, doc: &str, scored: bool) -> Question {
+fn q(id: &str, doc: &str, sha: &str, scored: bool) -> Question {
     serde_json::from_value(json!({
-        "id": id, "doc": doc, "doc_sha256": "a".repeat(64),
+        "id": id, "doc": doc, "doc_sha256": sha,
         "question": "gamma details of beta?", "expected_answer": if scored { json!("gamma") } else { Value::Null },
         "gold_pages": if scored { json!([[15, 16]]) } else { json!([]) },
         "answer_type": if scored { "fact" } else { "error" }, "difficulty": "deep_subsection",
@@ -41,10 +41,11 @@ fn grade(choice: &str) -> Value {
 }
 
 fn walk_scores() -> Vec<Value> {
-    // Fake tome walk: 2 root children, then 2 section children. Then one grade.
+    // Fake tome walk: both roots expand, so their 4 sections are scored in one round
+    // (0001.0001, 0001.0002, 0002.0001, 0002.0002); the top 2 are leaves. Then one grade.
     vec![
         json!({"section": {"score": 0, "confidence": 0.9}}),
-        json!({"section": {"score": 3, "confidence": 0.9}}),
+        json!({"section": {"score": 0, "confidence": 0.9}}),
         json!({"section": {"score": 1, "confidence": 0.9}}),
         json!({"section": {"score": 3, "confidence": 0.9}}),
         grade("exact"),
@@ -65,8 +66,9 @@ async fn harness_writes_schema_valid_records_for_both_arms_and_the_probe() {
         cfg: cfg(),
     };
     let doc = "Archmagus-Stack/09-Tomes/fake/Fake Book.pdf";
-    let qs = vec![q("fake-01", doc, true)];
-    let probes = vec![q("fake-fc-01", "Archmagus-Stack/09-Tomes/fake/No Outline.pdf", false)];
+    let qs = vec![q("fake-01", doc, &sample_doc().0, true)];
+    let probes =
+        vec![q("fake-fc-01", "Archmagus-Stack/09-Tomes/fake/No Outline.pdf", &no_structure_doc().0, false)];
     let opts = RunOpts {
         questions_file: qfile,
         out_dir: dir.clone(),
@@ -97,6 +99,9 @@ async fn harness_writes_schema_valid_records_for_both_arms_and_the_probe() {
     assert_eq!(recs[1]["page_metrics"]["hit"], true);
     assert_eq!(recs[1]["opened"]["kind"], "nodes");
     assert!(recs[1]["opened"]["ids"].as_array().unwrap().contains(&json!("0002.0002")));
+    assert_eq!(recs[1]["tome"]["summary_model"], "fake/lead");
+    assert_eq!(recs[1]["tome"]["summary_temperature"], 0.0);
+    assert_eq!(recs[1]["tome"]["backend"], "fake");
     // Probe fails closed with no_structure and is not scored.
     assert_eq!(recs[2]["scored"], false);
     assert_eq!(recs[2]["error"]["kind"], "no_structure");

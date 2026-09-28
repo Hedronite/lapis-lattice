@@ -41,6 +41,8 @@ struct Retrieved {
     judge_calls: Option<u32>,
     judge_prompt_tokens: Option<u64>,
     rerank_status: Option<String>,
+    /// `(summary_model, summary_temperature)` from the walked doc's `DocMeta`.
+    summary: Option<(String, f64)>,
 }
 
 fn now() -> String {
@@ -98,13 +100,16 @@ impl Harness {
         let t = &self.cfg.tome;
         TomeSettings {
             backend: self.tome.backend_name().into(),
-            builder_version: self.tome.builder_version(),
+            builder_version: Some(self.tome.builder_version()),
             beam: t.beam,
             max_judge_calls: t.max_judge_calls,
             max_open_pages: t.max_open_pages,
             max_open_bytes: t.max_open_bytes,
             judge_transport: Some(self.jev.name().into()),
             walk_cache: false,
+            index_dir: Some(t.index_dir.display().to_string()),
+            summary_model: None,
+            summary_temperature: None,
         }
     }
 
@@ -137,26 +142,29 @@ impl Harness {
             judge_calls: Some(calls),
             judge_prompt_tokens: None,
             rerank_status: Some(status.into()),
+            summary: None,
         })
     }
 
     async fn retrieve_tome(&self, q: &Question) -> Result<Retrieved, ErrorInfo> {
         let t = &self.cfg.tome;
-        let budget =
-            Budget { beam: t.beam, max_judge_calls: t.max_judge_calls, max_open_pages: t.max_open_pages };
+        let budget = Budget { max_judge_calls: t.max_judge_calls, max_pages: t.max_open_pages };
         let tome = Arc::clone(&self.tome);
         let judge = JevJudge::new(self.jev.clone(), tokio::runtime::Handle::current());
-        let doc = DocId(q.doc.clone());
+        // The library keys docs by PDF sha256; the path is only on DocMeta.
+        let doc = DocId(q.doc_sha256.clone());
         let query = q.question.clone();
         let t0 = Instant::now();
-        let (walk, judge) = tokio::task::spawn_blocking(move || {
-            let w = tome.walk(&doc, &query, &judge, budget);
-            (w, judge)
+        // `Judge` is sync: walk on a blocking thread so the judge can block on the
+        // (multi-thread) runtime handle without stalling a worker.
+        let (walked, judge) = tokio::task::spawn_blocking(move || {
+            let walked = tome.meta(&doc).and_then(|m| Ok((m, tome.walk(&doc, &query, &judge, budget)?)));
+            (walked, judge)
         })
         .await
         .map_err(|e| ErrorInfo { kind: "internal".into(), message: format!("walk task: {e}") })?;
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
-        let walk = walk.map_err(|e| ErrorInfo { kind: e.code().into(), message: e.to_string() })?;
+        let (meta, walk) = walked.map_err(|e| ErrorInfo { kind: e.code().into(), message: e.to_string() })?;
         if walk.passages.is_empty() {
             return Err(ErrorInfo {
                 kind: "empty".into(),
@@ -181,16 +189,17 @@ impl Harness {
         Ok(Retrieved {
             opened: Opened {
                 kind: "nodes".into(),
-                count: walk.chosen.len() as u32,
-                ids: walk.chosen.iter().map(|n| n.0.clone()).collect(),
+                count: walk.nodes.len() as u32,
+                ids: walk.nodes.iter().map(|n| n.0.clone()).collect(),
                 pages,
                 bytes: Some(passages.iter().map(|p| p.text.len() as u64).sum()),
             },
             passages,
             latency_ms: ms,
             judge_calls: Some(walk.judge_calls.max(calls)),
-            judge_prompt_tokens: walk.judge_prompt_tokens.or(Some(chars / 4)),
+            judge_prompt_tokens: Some(chars / 4),
             rerank_status: None,
+            summary: Some((meta.summary_model, f64::from(meta.summary_temperature))),
         })
     }
 
@@ -247,6 +256,10 @@ impl Harness {
             }
         };
         rec.baseline = self.baseline_settings(r.rerank_status.clone());
+        if let Some((model, temp)) = &r.summary {
+            rec.tome.summary_model = Some(model.clone());
+            rec.tome.summary_temperature = Some(*temp);
+        }
         rec.opened = r.opened;
         rec.latency_ms.retrieve = r.latency_ms;
         rec.tokens.judge_calls = r.judge_calls;

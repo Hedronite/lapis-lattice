@@ -133,10 +133,17 @@ impl EvalConfig {
         if self.baseline.top_k == 0 || self.baseline.top_k > self.baseline.retrieve_limit {
             return Err("baseline.top_k must be 1..=retrieve_limit".into());
         }
-        if self.tome.max_open_pages as usize > crate::contract::OPEN_MAX_PAGES
-            || self.tome.max_open_bytes as usize > crate::contract::OPEN_MAX_BYTES
+        if self.tome.max_open_pages > crate::contract::OPEN_PAGE_CAP
+            || self.tome.max_open_bytes as usize > crate::contract::OPEN_BYTE_CAP
         {
-            return Err("tome open budget exceeds the R5 cap (12 pages / 48 KB)".into());
+            return Err("tome open budget exceeds the library cap (12 pages / 48 KB)".into());
+        }
+        if self.tome.beam as usize != crate::contract::BEAM {
+            return Err(format!(
+                "tome.beam = {} but tome_tree walks with the fixed beam {}",
+                self.tome.beam,
+                crate::contract::BEAM
+            ));
         }
         if !matches!(self.jev.transport.as_str(), "http" | "none") {
             return Err(format!("jev.transport must be http|none, got {}", self.jev.transport));

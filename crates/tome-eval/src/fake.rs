@@ -1,12 +1,22 @@
-//! In-memory `TomeApi` for offline tests of the MCP wiring and the harness.
-//! Fixtures are generated in code; no tome text is ever stored in the repo.
+//! In-memory `TomeApi` over the real `tome_tree` types, for offline tests of the MCP
+//! wiring and the harness. Fixtures are generated in code; no tome text is stored.
 
 use std::collections::BTreeMap;
 
 use crate::contract::{
-    Budget, Candidate, DocId, DocMeta, Judge, Node, NodeId, NodeSource, Passage, Result, TomeApi, TomeError,
-    Walk, check_open_budget,
+    BEAM, Budget, Candidate, DocId, DocMeta, Judge, Node, NodeId, NodeSource, OPEN_BYTE_CAP, OPEN_PAGE_CAP,
+    Passage, Result, TomeApi, TomeError, Walk,
 };
+
+/// Doc id of the sample book (a fake sha256).
+pub fn sample_doc() -> DocId {
+    DocId("a".repeat(64))
+}
+
+/// Doc id that fails closed with `no_structure` (stands in for the Red Team Guide probe).
+pub fn no_structure_doc() -> DocId {
+    DocId("b".repeat(64))
+}
 
 #[derive(Debug, Clone)]
 pub struct FakeDoc {
@@ -19,8 +29,7 @@ pub struct FakeDoc {
 #[derive(Debug, Clone, Default)]
 pub struct FakeTome {
     pub docs: Vec<FakeDoc>,
-    /// Docs that fail closed with `NoStructure` (the Red Team Guide probe).
-    pub no_structure: Vec<String>,
+    pub no_structure: Vec<DocId>,
 }
 
 fn node(id: &str, title: &str, level: u8, a: u32, b: u32, children: Vec<Node>) -> Node {
@@ -30,11 +39,10 @@ fn node(id: &str, title: &str, level: u8, a: u32, b: u32, children: Vec<Node>) -
         level,
         page_start: a,
         page_end: b,
-        page_label: None,
-        summary: None,
         lead: format!("{title} lead"),
+        summary: format!("{title} lead"),
         source: NodeSource::Outline,
-        child_count: children.len() as u32,
+        child_count: children.len(),
         children,
     }
 }
@@ -42,19 +50,31 @@ fn node(id: &str, title: &str, level: u8, a: u32, b: u32, children: Vec<Node>) -
 impl FakeTome {
     /// Two chapters, the second with two sections; 20 pages of generated text.
     pub fn sample() -> Self {
-        let sha = "a".repeat(64);
+        let sha = sample_doc();
         let meta = DocMeta {
             doc_id: sha.clone(),
             path: "Archmagus-Stack/09-Tomes/fake/Fake Book.pdf".into(),
-            sha256: sha,
+            sha256: sha.0,
             pages: 20,
             outline: true,
             source: NodeSource::Outline,
             built_at: "2026-09-28T00:00:00Z".into(),
             builder_version: "fake-0".into(),
+            summary_model: "fake/lead".into(),
+            summary_temperature: 0.0,
         };
         let roots = vec![
-            node("0001", "Chapter 1. Alpha", 1, 1, 8, vec![]),
+            node(
+                "0001",
+                "Chapter 1. Alpha",
+                1,
+                1,
+                8,
+                vec![
+                    node("0001.0001", "Alpha origins", 2, 1, 4, vec![]),
+                    node("0001.0002", "Alpha practice", 2, 5, 8, vec![]),
+                ],
+            ),
             node(
                 "0002",
                 "Chapter 2. Beta",
@@ -70,20 +90,20 @@ impl FakeTome {
         let pages = (1..=20)
             .map(|p| (p, format!("page {p} text about {}", if p >= 15 { "gamma" } else { "alpha" })))
             .collect();
-        Self {
-            docs: vec![FakeDoc { meta, roots, pages }],
-            no_structure: vec!["Archmagus-Stack/09-Tomes/fake/No Outline.pdf".into()],
-        }
+        Self { docs: vec![FakeDoc { meta, roots, pages }], no_structure: vec![no_structure_doc()] }
     }
 
     fn doc(&self, doc: &DocId) -> Result<&FakeDoc> {
-        if self.no_structure.iter().any(|d| d == &doc.0) {
-            return Err(TomeError::NoStructure { doc: doc.0.clone() });
+        if self.no_structure.contains(doc) {
+            return Err(TomeError::NoStructure {
+                doc: doc.0.clone(),
+                detail: "no outline, no headings".into(),
+            });
         }
         self.docs
             .iter()
-            .find(|d| d.meta.path == doc.0 || d.meta.sha256 == doc.0)
-            .ok_or_else(|| TomeError::UnknownDoc(doc.0.clone()))
+            .find(|d| &d.meta.doc_id == doc)
+            .ok_or_else(|| TomeError::UnknownDoc { doc: doc.0.clone() })
     }
 }
 
@@ -101,7 +121,7 @@ fn find<'a>(nodes: &'a [Node], id: &NodeId) -> Option<&'a Node> {
 
 fn cut(n: &Node, depth: u8) -> Node {
     let mut c = n.clone();
-    c.child_count = n.children.len() as u32;
+    c.child_count = n.children.len();
     c.children = if depth <= 1 { vec![] } else { n.children.iter().map(|k| cut(k, depth - 1)).collect() };
     c
 }
@@ -111,7 +131,7 @@ impl TomeApi for FakeTome {
         Ok(self.docs.iter().map(|d| d.meta.clone()).collect())
     }
 
-    fn doc_meta(&self, doc: &DocId) -> Result<DocMeta> {
+    fn meta(&self, doc: &DocId) -> Result<DocMeta> {
         Ok(self.doc(doc)?.meta.clone())
     }
 
@@ -130,6 +150,9 @@ impl TomeApi for FakeTome {
 
     fn open(&self, doc: &DocId, nodes: &[NodeId]) -> Result<Vec<Passage>> {
         let d = self.doc(doc)?;
+        if nodes.is_empty() {
+            return Err(TomeError::UnknownNode { doc: doc.0.clone(), node: "(none)".into() });
+        }
         let mut want = Vec::new();
         for id in nodes {
             let n = find(&d.roots, id)
@@ -139,7 +162,11 @@ impl TomeApi for FakeTome {
             }
         }
         let bytes: usize = want.iter().map(|(_, p)| d.pages.get(p).map_or(0, String::len)).sum();
-        check_open_budget(want.len(), bytes)?;
+        if want.len() as u32 > OPEN_PAGE_CAP || bytes > OPEN_BYTE_CAP {
+            return Err(TomeError::OverBudget {
+                detail: format!("{} pages / {bytes} bytes > {OPEN_PAGE_CAP} / {OPEN_BYTE_CAP}", want.len()),
+            });
+        }
         Ok(want
             .into_iter()
             .map(|(node_id, page)| Passage {
@@ -151,72 +178,54 @@ impl TomeApi for FakeTome {
             .collect())
     }
 
+    /// Same contract as the library walk: beam `BEAM`, stop at a leaf or ≤ 3 pages,
+    /// judge errors stop the walk, over the page budget is `over_budget`.
     fn walk(&self, doc: &DocId, query: &str, judge: &dyn Judge, budget: Budget) -> Result<Walk> {
         let d = self.doc(doc)?;
         let mut frontier: Vec<&Node> = d.roots.iter().collect();
+        let mut chosen: Vec<&Node> = Vec::new();
         let mut calls = 0u32;
-        let mut visited = Vec::new();
-        let mut chosen: Vec<NodeId> = Vec::new();
-        while !frontier.is_empty() {
-            if calls >= budget.max_judge_calls {
-                return Err(TomeError::JudgeUnavailable("judge call budget exhausted".into()));
-            }
-            let cands: Vec<Candidate<'_>> = frontier
-                .iter()
-                .map(|n| Candidate {
-                    id: &n.id,
-                    title: &n.title,
-                    lead: &n.lead,
-                    page_start: n.page_start,
-                    page_end: n.page_end,
-                })
-                .collect();
-            let scores = judge.score(query, &cands)?;
-            calls += 1;
-            if scores.len() != frontier.len() {
-                return Err(TomeError::JudgeUnavailable("judge returned a score count mismatch".into()));
-            }
-            let mut ranked: Vec<(u8, &Node)> = scores.into_iter().zip(frontier.iter().copied()).collect();
-            ranked.sort_by_key(|r| std::cmp::Reverse(r.0));
-            let mut next = Vec::new();
-            for (s, n) in ranked.into_iter().take(budget.beam as usize) {
-                if s == 0 {
+        loop {
+            let mut pool: Vec<(u8, &Node)> = Vec::new();
+            let mut expandable = false;
+            for n in frontier {
+                if n.children.is_empty() || n.page_end - n.page_start < 3 {
+                    chosen.push(n);
                     continue;
                 }
-                visited.push(n.id.clone());
-                if n.children.is_empty() || n.page_end - n.page_start < 3 {
-                    chosen.push(n.id.clone());
-                } else {
-                    next.extend(n.children.iter());
+                expandable = true;
+                for c in &n.children {
+                    if calls >= budget.max_judge_calls {
+                        return Err(TomeError::OverBudget { detail: "judge call budget exhausted".into() });
+                    }
+                    let cand = Candidate {
+                        id: c.id.clone(),
+                        title: c.title.clone(),
+                        lead: c.lead.clone(),
+                        page_start: c.page_start,
+                        page_end: c.page_end,
+                        level: c.level,
+                    };
+                    let s = judge.score(query, &cand)?;
+                    calls += 1;
+                    pool.push((s, c));
                 }
             }
-            frontier = next;
-        }
-        if chosen.is_empty() {
-            return Err(TomeError::JudgeUnavailable("judge scored every candidate 0".into()));
-        }
-        // Keep the best leaves that fit the open budget.
-        let mut keep = Vec::new();
-        let mut pages = 0u32;
-        for id in chosen {
-            let n = find(&d.roots, &id).expect("chosen node exists");
-            let span = n.page_end - n.page_start + 1;
-            if pages + span > budget.max_open_pages {
-                continue;
+            if !expandable || pool.is_empty() {
+                break;
             }
-            pages += span;
-            keep.push(id);
+            pool.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
+            frontier = pool.into_iter().take(BEAM).map(|(_, n)| n).collect();
         }
-        if keep.is_empty() {
+        let pages: u32 = chosen.iter().map(|n| n.page_end - n.page_start + 1).sum();
+        if pages > budget.max_pages {
             return Err(TomeError::OverBudget {
-                requested_pages: budget.max_open_pages as usize + 1,
-                requested_bytes: 0,
-                max_pages: budget.max_open_pages as usize,
-                max_bytes: crate::contract::OPEN_MAX_BYTES,
+                detail: format!("walk chose {pages} pages > {}", budget.max_pages),
             });
         }
-        let passages = self.open(doc, &keep)?;
-        Ok(Walk { chosen: keep, passages, judge_calls: calls, judge_prompt_tokens: None, visited })
+        let ids: Vec<NodeId> = chosen.iter().map(|n| n.id.clone()).collect();
+        let passages = self.open(doc, &ids)?;
+        Ok(Walk { doc_id: doc.clone(), query: query.into(), nodes: ids, passages, judge_calls: calls })
     }
 
     fn backend_name(&self) -> &'static str {
@@ -228,19 +237,10 @@ impl TomeApi for FakeTome {
 pub struct KeywordJudge;
 
 impl Judge for KeywordJudge {
-    fn name(&self) -> &str {
-        "keyword"
-    }
-    fn score(&self, query: &str, candidates: &[Candidate<'_>]) -> Result<Vec<u8>> {
+    fn score(&self, query: &str, c: &Candidate) -> Result<u8> {
         let q = query.to_lowercase();
-        Ok(candidates
-            .iter()
-            .map(|c| {
-                let t = format!("{} {}", c.title, c.lead).to_lowercase();
-                let hits = t.split_whitespace().filter(|w| w.len() > 3 && q.contains(*w)).count();
-                hits.min(3) as u8
-            })
-            .collect())
+        let t = format!("{} {}", c.title, c.lead).to_lowercase();
+        Ok(t.split_whitespace().filter(|w| w.len() > 3 && q.contains(*w)).count().min(3) as u8)
     }
 }
 
@@ -248,40 +248,44 @@ impl Judge for KeywordJudge {
 mod tests {
     use super::*;
 
-    fn doc() -> DocId {
-        DocId("Archmagus-Stack/09-Tomes/fake/Fake Book.pdf".into())
-    }
-
     #[test]
     fn tree_cuts_at_depth_and_reports_child_count() {
         let t = FakeTome::sample();
-        let roots = t.tree(&doc(), None, Some(1)).unwrap();
+        let roots = t.tree(&sample_doc(), None, Some(1)).unwrap();
         assert_eq!(roots.len(), 2);
         assert!(roots[1].children.is_empty());
         assert_eq!(roots[1].child_count, 2);
-        let sub = t.tree(&doc(), Some(&NodeId("0002".into())), Some(1)).unwrap();
+        let sub = t.tree(&sample_doc(), Some(&NodeId("0002".into())), Some(1)).unwrap();
         assert_eq!(sub[1].id.0, "0002.0002");
     }
 
     #[test]
     fn errors_are_distinguishable_from_empty() {
         let t = FakeTome::sample();
-        assert_eq!(t.tree(&DocId("nope.pdf".into()), None, None).unwrap_err().code(), "unknown_doc");
-        assert_eq!(t.tree(&doc(), Some(&NodeId("0009".into())), None).unwrap_err().code(), "unknown_node");
-        let ns = DocId("Archmagus-Stack/09-Tomes/fake/No Outline.pdf".into());
-        assert_eq!(t.tree(&ns, None, None).unwrap_err().code(), "no_structure");
+        assert_eq!(t.tree(&DocId("c".repeat(64)), None, None).unwrap_err().code(), "unknown_doc");
         assert_eq!(
-            t.open(&doc(), &[NodeId("0001".into()), NodeId("0002".into())]).unwrap_err().code(),
-            "over_budget"
+            t.tree(&sample_doc(), Some(&NodeId("0009".into())), None).unwrap_err().code(),
+            "unknown_node"
         );
+        assert_eq!(t.tree(&no_structure_doc(), None, None).unwrap_err().code(), "no_structure");
+        let both = [NodeId("0001".into()), NodeId("0002".into())];
+        assert_eq!(t.open(&sample_doc(), &both).unwrap_err().code(), "over_budget");
     }
 
     #[test]
     fn walk_descends_to_the_matching_leaf() {
         let t = FakeTome::sample();
-        let w = t.walk(&doc(), "gamma details of beta", &KeywordJudge, Budget::default()).unwrap();
-        assert!(w.chosen.iter().any(|n| n.0 == "0002.0002"), "{:?}", w.chosen);
+        let w = t.walk(&sample_doc(), "gamma details of beta", &KeywordJudge, Budget::default()).unwrap();
+        assert!(w.nodes.iter().any(|n| n.0 == "0002.0002"), "{:?}", w.nodes);
         assert!(w.passages.iter().all(|p| (9..=20).contains(&p.page)));
         assert!(w.judge_calls >= 2);
+    }
+
+    #[test]
+    fn walk_fails_closed_when_the_judge_is_unavailable() {
+        let t = FakeTome::sample();
+        let judge = tome_tree::FakeJudge::new(Vec::<(String, u8)>::new());
+        let e = t.walk(&sample_doc(), "q", &judge, Budget::default()).unwrap_err();
+        assert_eq!(e.code(), "judge_unavailable");
     }
 }
