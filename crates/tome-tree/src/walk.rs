@@ -179,10 +179,24 @@ pub(crate) fn choose(
     let mut terminals = Vec::new();
     let mut frontier = beam_next(root_picks, &mut terminals);
     let mut descent_calls = 0u32;
+    // Once a batched response is unusable, later sibling sets skip the batch
+    // call and pre-rank. Real System One returns one score, so retrying the
+    // batch at every level spends the descent budget before a page is opened.
+    let mut batch_broken = false;
     while !frontier.is_empty() {
         let remaining = budget.max_judge_calls.saturating_sub(descent_calls);
-        let (picks, extra, used) =
-            score_set(&frontier, query, judge, batch_size, remaining, budget.max_judge_calls)?;
+        let (picks, extra, used) = score_set(
+            &frontier,
+            query,
+            judge,
+            ScoreLimits {
+                batch_size,
+                remaining,
+                budget_label: budget.max_judge_calls,
+                top_k: budget.root_top_k,
+            },
+            &mut batch_broken,
+        )?;
         descent_calls += used;
         judged.extend(extra);
         frontier = beam_next(picks, &mut terminals);
@@ -304,26 +318,37 @@ fn lexical_order(roots: &[Node], query: &str) -> Vec<Node> {
     ranked.into_iter().map(|(_, node)| node).collect()
 }
 
-/// Score a sibling set. A malformed batch is judged one at a time against the
-/// same descent budget. There is no lexical fallback here.
+/// Score a sibling set. A usable batch is charged `batch_cost`. A malformed
+/// batch pre-ranks the set on title and lead and judges the top `top_k` one
+/// at a time, same as the root pass, so a wide chapter does not exhaust the
+/// descent budget.
+struct ScoreLimits {
+    batch_size: usize,
+    remaining: u32,
+    budget_label: u32,
+    top_k: u32,
+}
+
 fn score_set(
     nodes: &[Node],
     query: &str,
     judge: &dyn Judge,
-    batch_size: usize,
-    remaining: u32,
-    budget_label: u32,
+    limits: ScoreLimits,
+    batch_broken: &mut bool,
 ) -> Result<(Vec<Pick>, Vec<Judged>, u32)> {
+    if *batch_broken {
+        return lexical_fallback(nodes, query, judge, limits.remaining, limits.top_k);
+    }
     let mut offset = 0usize;
     let mut used = 0u32;
     let mut picks = Vec::new();
     let mut judged = Vec::new();
     while offset < nodes.len() {
-        let left = remaining.saturating_sub(used);
-        let count = affordable_count(&nodes[offset..], batch_size, left, judge);
+        let left = limits.remaining.saturating_sub(used);
+        let count = affordable_count(&nodes[offset..], limits.batch_size, left, judge);
         if count == 0 {
             return Err(TomeError::OverBudget {
-                detail: format!("judge call budget {budget_label} exhausted"),
+                detail: format!("judge call budget {} exhausted", limits.budget_label),
             });
         }
         let slice = &nodes[offset..offset + count];
@@ -339,30 +364,20 @@ fn score_set(
                 offset += count;
             }
             _ => {
+                *batch_broken = true;
                 if count > 1 && cost == 1 {
                     used += 1;
                 }
-                for node in slice {
-                    if used >= remaining {
-                        return Err(TomeError::OverBudget {
-                            detail: format!("judge call budget {budget_label} exhausted"),
-                        });
-                    }
-                    let assessment = judge.assess(query, &candidate_of(node, SINGLE_LEAD))?;
-                    if assessment.score > 3 {
-                        return Err(TomeError::JudgeUnavailable {
-                            reason: format!("score {} outside 0..=3", assessment.score),
-                        });
-                    }
-                    push_scored(
-                        std::slice::from_ref(node),
-                        std::slice::from_ref(&assessment),
-                        &mut picks,
-                        &mut judged,
-                    );
-                    used += 1;
-                }
-                offset += count;
+                let (fallback, extra, fallback_used) = lexical_fallback(
+                    &nodes[offset..],
+                    query,
+                    judge,
+                    limits.remaining.saturating_sub(used),
+                    limits.top_k,
+                )?;
+                picks.extend(fallback);
+                judged.extend(extra);
+                return Ok((picks, judged, used + fallback_used));
             }
         }
     }

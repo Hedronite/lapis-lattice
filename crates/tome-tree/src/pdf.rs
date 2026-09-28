@@ -39,6 +39,9 @@ pub(crate) fn load(path: &Path) -> Result<LoadedPdf> {
 }
 
 const MAX_DEPTH: u32 = 64;
+/// Same bound lopdf uses for a page tree. A linked list of `/Pages` nodes
+/// in a long book is deeper than 64 and must still load.
+const PAGE_TREE_DEPTH: u32 = 256;
 
 /// Physical pages in reading order. A `/Kids` or `/Parent` cycle is `parse`,
 /// not a stack overflow inside lopdf.
@@ -58,20 +61,25 @@ fn page_ids(doc: &Document) -> Result<Vec<ObjectId>> {
         if !seen.insert(id) {
             return Err(parse("page tree cycle"));
         }
-        if depth > MAX_DEPTH {
-            return Err(parse("page tree deeper than 64"));
+        if depth > PAGE_TREE_DEPTH {
+            return Err(parse("page tree deeper than 256"));
         }
         let dict = doc.get_dictionary(id).map_err(parse)?;
         let kind = dict.get(b"Type").ok().and_then(|o| o.as_name().ok());
-        let kids = dict.get(b"Kids").ok().and_then(|o| o.as_array().ok());
+        // `/Kids` is often an indirect array. `get` would miss it and fail the book.
+        let kids = dict.get_deref(b"Kids", doc).ok().and_then(|o| o.as_array().ok());
         let is_pages = kind == Some(b"Pages") || (kind != Some(b"Page") && kids.is_some());
         if !is_pages {
             out.push(id);
             continue;
         }
-        let kids = kids.ok_or_else(|| parse("page tree node has no kids"))?;
+        let Some(kids) = kids else {
+            continue;
+        };
         for kid in kids.iter().rev() {
-            let kid_id = kid.as_reference().map_err(|_| parse("page tree kid is not a reference"))?;
+            let Ok(kid_id) = kid.as_reference() else {
+                continue;
+            };
             stack.push((kid_id, depth + 1));
         }
     }
@@ -85,7 +93,9 @@ fn page_ids(doc: &Document) -> Result<Vec<ObjectId>> {
 /// A cyclic `/Parent` or Form XObject is not handed to pdf-extract: that walk
 /// recurses with no bound and aborts the process on stack overflow.
 fn page_text(doc: &Document, page_num: u32, page_id: ObjectId) -> String {
-    if !pdf_extract_safe(doc, page_id) {
+    // The safety scan walks content streams. A panic there must not kill the book.
+    let safe = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pdf_extract_safe(doc, page_id)));
+    if !matches!(safe, Ok(true)) {
         return lopdf_page(doc, page_num);
     }
     let extracted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -173,15 +183,18 @@ fn form_graph_unsafe(doc: &Document, page_id: ObjectId) -> bool {
             let Some(xid) = xobject_id(doc, own.as_ref(), name) else {
                 continue;
             };
-            if is_form(doc, xid) {
-                let form_resources = doc
-                    .get_object(xid)
-                    .ok()
-                    .and_then(|o| o.as_stream().ok())
-                    .and_then(|s| stream_resources(doc, &s.dict))
-                    .or_else(|| own.clone());
-                stack.push((xid, form_resources, depth + 1));
+            // pdf-extract recurses into every `Do` target, including images.
+            // Anything that is not a shallow Form DAG is extracted with lopdf.
+            if !is_form(doc, xid) {
+                return true;
             }
+            let form_resources = doc
+                .get_object(xid)
+                .ok()
+                .and_then(|o| o.as_stream().ok())
+                .and_then(|s| stream_resources(doc, &s.dict))
+                .or_else(|| own.clone());
+            stack.push((xid, form_resources, depth + 1));
         }
     }
     false

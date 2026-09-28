@@ -526,6 +526,80 @@ fn cyclic_outline_is_parse_not_a_stack_overflow() {
 }
 
 #[test]
+fn indirect_kids_and_a_deep_page_tree_still_build() {
+    let dir = scratch("kids");
+    let indirect = dir.join("indirect.pdf");
+    pdf::write_indirect_kids(&indirect);
+    let meta = build_at(&dir, &indirect, "indirect", opts("indirect"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let nodes = index.tree(&meta.doc_id, None, None).unwrap();
+    assert!(nodes.iter().any(|n| n.lead.contains("indirect marker")), "{nodes:?}");
+
+    let deep = dir.join("deep.pdf");
+    pdf::write_deep_page_tree(&deep);
+    let meta = build_at(&dir, &deep, "deep", opts("deep"));
+    let nodes = index.tree(&meta.doc_id, None, None).unwrap();
+    assert!(nodes.iter().any(|n| n.lead.contains("deep marker")), "{nodes:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn image_do_falls_back_per_page_and_keeps_the_text() {
+    let dir = scratch("image-do");
+    let pdf_path = dir.join("image.pdf");
+    pdf::write_image_do(&pdf_path);
+    let meta = build_at(&dir, &pdf_path, "image", opts("image"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let nodes = index.tree(&meta.doc_id, None, None).unwrap();
+    let text: String = nodes.iter().map(|n| n.lead.clone()).collect();
+    assert!(text.contains("gamma marker"), "{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn one_broken_destination_does_not_fail_the_book() {
+    let dir = scratch("baddest");
+    let pdf_path = dir.join("two.pdf");
+    pdf::write_broken_dest(&pdf_path);
+    let meta = build_at(&dir, &pdf_path, "two", opts("two"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let nodes = index.tree(&meta.doc_id, None, None).unwrap();
+    let titles: Vec<_> = nodes.iter().map(|n| n.title.as_str()).collect();
+    assert!(titles.contains(&"Beta"), "{titles:?}");
+    assert!(!titles.contains(&"Alpha"), "{titles:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn wide_descent_stays_inside_the_budget() {
+    let dir = scratch("descend");
+    let pdf_path = dir.join("wide.pdf");
+    let titles: Vec<&'static str> = (0..40)
+        .map(|i| {
+            if i == 39 {
+                "Brass foundry"
+            } else {
+                Box::leak(format!("Section {i:02}").into_boxed_str()) as &'static str
+            }
+        })
+        .collect();
+    let mut marks = vec![pdf::Mark { title: "Book", page: 0, parent: None }];
+    for (i, title) in titles.iter().copied().enumerate() {
+        marks.push(pdf::Mark { title, page: i, parent: Some(0) });
+    }
+    pdf::write(&pdf_path, &pdf::prose(40), &marks);
+    let meta = build_at(&dir, &pdf_path, "wide", opts("wide"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let judge = FakeJudge::new([("0001", 3u8), ("0001.0040", 3u8)]).with_default(0).fail_batch();
+    let walked = index.walk(&meta.doc_id, "brass foundry", &judge, Budget::default()).unwrap();
+    assert!(walked.judge_calls <= 24, "descent spent {}", walked.judge_calls);
+    assert!(walked.judge_calls - walked.root_judge_calls <= 8, "{walked:?}");
+    assert!(walked.nodes.iter().any(|id| id.as_str() == "0001.0040"), "{:?}", walked.nodes);
+    assert!(!walked.passages.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn cyclic_form_without_an_outline_is_no_structure() {
     let dir = scratch("cycle-form");
     let pdf_path = dir.join("form.pdf");

@@ -102,7 +102,9 @@ pub trait Judge {
 
 The walk ranks on `score` only. `confidence` is recorded on `Walk.judged` and is not a gate: a low value does not abort the walk, drop the candidate, or change its rank. `judge_unavailable` is only a transport or model failure (no transport, a missing score, or a score outside 0..=3 on a one-at-a-time call).
 
-A batched response that is malformed or partial (wrong length, missing ids, or a score outside 0..=3) is not `judge_unavailable`. On the root pass the walk pre-ranks every root by token overlap of the query with the title and lead, then judges the top `root_top_k` (default 6) one at a time, inside the calls still left on `root_calls`. `Walk.root_path` records which path ran.
+A batched response that is malformed or partial (wrong length, missing ids, or a score outside 0..=3) is not `judge_unavailable`. The walk pre-ranks that set by token overlap of the query with the title and lead, then judges the top `root_top_k` (default 6) one at a time. The root pass does this inside the calls still left on `root_calls`. A sibling set does the same inside the descent budget, and later sets skip the batch call once one has failed. `Walk.root_path` records which path the root pass ran.
+
+A page pdf-extract cannot safely read (a panic, a `/Parent` cycle, or a `Do` that is not a shallow Form) is extracted with lopdf for that page. One bad page does not fail the book. `/Kids` stored as an indirect array is still a page tree. One outline item whose destination does not resolve is skipped.
 
 `FakeJudge` scripts scores by node id for offline tests. A missing id is `judge_unavailable`.
 
