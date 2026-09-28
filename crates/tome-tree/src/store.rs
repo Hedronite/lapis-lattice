@@ -122,7 +122,7 @@ impl TomeIndex {
             });
         }
         let pages = &built.pages;
-        let (ids, judge_calls) =
+        let (ids, skipped, judge_calls) =
             crate::walk::choose(
                 &built.nodes,
                 query,
@@ -132,7 +132,7 @@ impl TomeIndex {
             )?;
         let page_cap = budget.max_pages.min(OPEN_PAGE_CAP);
         let passages = open_loaded(doc, &built.nodes, pages, &ids, page_cap, OPEN_BYTE_CAP)?;
-        Ok(Walk { doc_id: doc.clone(), query: query.to_string(), nodes: ids, passages, judge_calls })
+        Ok(Walk { doc_id: doc.clone(), query: query.to_string(), nodes: ids, passages, judge_calls, skipped })
     }
 
     pub fn build(&self, pdf: &Path, vault_path: &str, opts: &BuildOptions) -> Result<DocMeta> {

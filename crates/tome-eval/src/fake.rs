@@ -229,7 +229,14 @@ impl TomeApi for FakeTome {
         }
         let ids: Vec<NodeId> = chosen.iter().map(|n| n.id.clone()).collect();
         let passages = self.open(doc, &ids)?;
-        Ok(Walk { doc_id: doc.clone(), query: query.into(), nodes: ids, passages, judge_calls: calls })
+        Ok(Walk {
+            doc_id: doc.clone(),
+            query: query.into(),
+            nodes: ids,
+            passages,
+            judge_calls: calls,
+            skipped: vec![],
+        })
     }
 
     fn backend_name(&self) -> &'static str {

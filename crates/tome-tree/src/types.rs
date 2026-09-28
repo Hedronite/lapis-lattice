@@ -55,15 +55,19 @@ impl<'de> Deserialize<'de> for DocId {
     }
 }
 
-impl From<&str> for DocId {
-    fn from(s: &str) -> Self {
-        DocId::parse(s).unwrap_or_else(|err| panic!("DocId::from: {err}"))
+impl TryFrom<&str> for DocId {
+    type Error = TomeError;
+
+    fn try_from(s: &str) -> Result<Self> {
+        DocId::parse(s)
     }
 }
 
-impl From<String> for DocId {
-    fn from(s: String) -> Self {
-        DocId::from(s.as_str())
+impl TryFrom<String> for DocId {
+    type Error = TomeError;
+
+    fn try_from(s: String) -> Result<Self> {
+        DocId::parse(&s)
     }
 }
 
@@ -213,13 +217,17 @@ pub const LEAD_CHARS: usize = 400;
 
 /// A leaf longer than this is split.
 pub const SPLIT_PAGES: u32 = 10;
-/// Token estimate is `chars / 4`.
+/// Token estimate is `chars / 4`. A leaf is also split when its bytes exceed
+/// [`OPEN_BYTE_CAP`], so one node can still be opened.
 pub const SPLIT_TOKENS: usize = 20_000;
 
 pub const DEFAULT_JUDGE_CALLS: u32 = 24;
 
+/// Judge calls held back at a wide frontier so descent still has room.
+pub const DESCENT_RESERVE: u32 = 8;
+
 /// Builder stamp stored on every tree. A mismatch is `stale`.
-pub const BUILDER_VERSION: &str = "0.2.0";
+pub const BUILDER_VERSION: &str = "0.3.0";
 
 /// Judge-call and open-page budget for one walk. The 48 KB cap always applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,6 +250,10 @@ pub struct Walk {
     pub nodes: Vec<NodeId>,
     pub passages: Vec<Passage>,
     pub judge_calls: u32,
+    /// Beam terminals that were not opened because the page or byte cap would
+    /// have been exceeded. Whole nodes only; nothing here was clipped.
+    #[serde(default)]
+    pub skipped: Vec<NodeId>,
 }
 
 /// What the judge sees for one child. Scores are 0–3.
