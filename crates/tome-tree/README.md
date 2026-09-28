@@ -29,12 +29,12 @@ Every method returns `Result`. An empty `Vec` means "no children", never "the do
 | `docs` | List stored `DocMeta`. Does not re-hash PDFs. |
 | `tree(doc, node, depth)` | Roots, or the one node named by `node`. `depth: None` is the full tree. `Some(0)` keeps the node and clears `children`. `child_count` stays the full count. |
 | `open(doc, nodes)` / `passages(doc, nodes)` | One [`Passage`] per physical page. Hard cap **12 pages / 48 KB**. Over the cap is `over_budget`, not a clipped result. `truncated` is always `false`. A page missing from the store is an error. |
-| `walk(doc, query, judge, budget)` | Judge the roots first, keep beam **2**, then descend the same way. A frontier wider than the calls left after a reserve of **8** is cut in reading order, so descent still has room. Stop at a leaf or a node of **≤ 3 pages**. Open whole nodes that fit the page and byte caps (highest rank first). Nodes that do not fit are listed on `Walk.skipped` and are not clipped. Each scored candidate is on `Walk.judged` (`score`, `confidence`, `rank`). |
+| `walk(doc, query, judge, budget)` | Judge the roots in batches (`root_batch_size`, default **16**), under a separate root budget (`root_calls`, default **4**). Keep beam **2**, then descend the same way. Descent spends `max_judge_calls` (default **24**) and batches sibling sets too. Stop at a leaf or a node of **≤ 3 pages**. Open whole nodes that fit the page and byte caps (highest score first). Nodes that do not fit are listed on `Walk.skipped` and are not clipped. Each scored candidate is on `Walk.judged` (`score`, `confidence`, `rank`). `rank` equals `score`. `Walk.root_path` is `batch` or `lexical_fallback`. |
 | `build(pdf, vault_path, opts)` | Not part of the read surface. Writes the store. |
 | `meta(doc)` | One `DocMeta`. Same staleness check as `tree`. |
 | `content_id(path)` | SHA-256 doc id of a PDF. |
 
-`Budget` defaults to 24 judge calls and 12 opened pages. The 48 KB cap always applies on `open` and `walk`.
+`Budget` defaults to 24 descent calls, 4 root calls, batches of 16, a lexical top-6, and 12 opened pages. The 48 KB cap always applies on `open` and `walk`. `DESCENT_RESERVE` (8) is still exported; frontiers are batched instead of truncated to it.
 
 ## Types
 
@@ -57,7 +57,7 @@ DocMeta {
 }
 
 Passage { node_id, page, text, truncated }
-Walk { doc_id, query, nodes, passages, judge_calls, skipped, judged }
+Walk { doc_id, query, nodes, passages, judge_calls, skipped, judged, root_judge_calls, root_path }
 Judged { node_id, title, page_start, page_end, score, confidence, rank }
 ```
 
@@ -92,24 +92,30 @@ v0 `summary` is the `lead`: the first 400 characters of the node's page text. Th
 ```rust
 pub trait Judge {
     fn score(&self, query: &str, candidate: &Candidate) -> Result<u8>;
+    fn assess(&self, query: &str, candidate: &Candidate) -> Result<Assessment> { /* ... */ }
+    fn score_batch(&self, query: &str, candidates: &[Candidate]) -> Result<Vec<Assessment>> { /* ... */ }
+    fn batch_cost(&self, candidates: &[Candidate]) -> u32 { /* ... */ }
 }
 ```
 
+`score` stays the required method. `score_batch` defaults to one `assess` per candidate (`batch_cost` = that many calls). A batching judge returns one assessment per candidate and reports `batch_cost` 1. Each candidate's text is its title, a short lead, and up to 16 child titles.
+
+The walk ranks on `score` only. `confidence` is recorded on `Walk.judged` and is not a gate: a low value does not abort the walk, drop the candidate, or change its rank. `judge_unavailable` is only a transport or model failure (no transport, a missing score, or a score outside 0..=3 on a one-at-a-time call).
+
+A batched response that is malformed or partial (wrong length, missing ids, or a score outside 0..=3) is not `judge_unavailable`. On the root pass the walk pre-ranks every root by token overlap of the query with the title and lead, then judges the top `root_top_k` (default 6) one at a time, inside the calls still left on `root_calls`. `Walk.root_path` records which path ran.
+
 `FakeJudge` scripts scores by node id for offline tests. A missing id is `judge_unavailable`.
 
-`lapis tome search` uses `jev::JevJudge`, which calls the existing transport (Facet, else `$TYPESAFE_API_KEY`, else none) and reads the shipped relevance score (0–3). A missing transport, a transport error, a missing score, or a score outside 0..=3 is `judge_unavailable`.
-
-Confidence is config, not a hardcoded gate:
+`lapis tome search` uses `jev::JevJudge`, which calls the existing transport (Facet, else `$TYPESAFE_API_KEY`, else none). One candidate reads the shipped relevance score (0–3). Several candidates are one call whose state asks for `sections: [{id, score, confidence}, ...]`. A body that only has the single relevance score is a partial batch, so the walk takes the lexical fallback and then judges those roots with the shipped questions.
 
 ```toml
 [tome]
-judge_min_confidence = 0.6   # historical floor; not tuned
-judge_confidence = "fail_closed"   # or "down_weight"
+root_batch_size = 16
+root_calls = 4
+root_top_k = 6
 ```
 
-`fail_closed` (the default) returns `judge_unavailable` when a reported confidence is below the floor. `down_weight` keeps the candidate and ranks on `round(score * confidence)` instead. Missing confidence is not a failure. The candidate lead includes up to 16 child section titles, because a root that shows only its own 400-character lead is a thin thing to score.
-
-The shipped System One questions still ask whether a *chunk* answers the query, and the recorded confidence is the minimum of the noul, relevance, and cite confidences. A TOC root is not a chunk. On a real book that showed up as relevance around 1.4 with confidence 0.29–0.41: the model was unsure, and the cite score pulled the minimum under 0.6, so every `fail_closed` walk aborted. That is a framing problem, not a transport failure. Eli picks which mode the spike runs.
+The shipped System One questions still ask whether a *chunk* answers the query, and the recorded confidence is the minimum of the noul, relevance, and cite confidences. A TOC root is not a chunk. On a real book that showed up as relevance around 1.4 with confidence 0.29–0.41: the model was unsure, and the cite score pulled the minimum down. That confidence is kept on the walk and does not abort it. Eli's ruling matches the eval schema: rank on score only.
 
 `JevJudge::score` blocks on the current tokio runtime with `block_in_place`. The `lapis` binary uses a multi-thread runtime. A current-thread runtime panics, and calling `walk` from inside an existing `block_on` can deadlock.
 
@@ -124,6 +130,9 @@ Config, not a code constant. v0 still stores the lead as the summary; the model 
 provider = "opencode"
 model = "deepseek-v4.1-flash"
 temperature = 0
+root_batch_size = 16
+root_calls = 4
+root_top_k = 6
 ```
 
 Defaults when the keys are omitted: provider `opencode`, model `deepseek-v4.1-flash`, temperature `0`. Change the file to swap the model. No rebuild of the judge path is required for that swap; the walk never calls this model.

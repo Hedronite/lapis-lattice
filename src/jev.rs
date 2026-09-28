@@ -465,26 +465,26 @@ pub fn hit_line(hit: &Hit) -> Option<String> {
 /// Scores tome-tree candidates with the existing System One transport.
 ///
 /// Relevance is the shipped 0–3 score. A missing transport, a transport error,
-/// a missing score, or a score outside 0..=3 is `judge_unavailable`. Low
-/// confidence is returned on the assessment; the walk applies
-/// [`tome_tree::JudgeConfidence`] from `[tome]`.
+/// a missing score, or a score outside 0..=3 is `judge_unavailable`. Confidence
+/// is returned on the assessment and is not a gate: the walk ranks on the score.
+///
+/// A list of candidates is one `decide` call. The state asks for a `sections`
+/// array, one `{id, score, confidence}` per candidate. Today's System One
+/// questions still return a single relevance score; that body is a partial
+/// batch (`parse`), and the walk falls back to judging the lexical top few
+/// one at a time. A dead transport stays `judge_unavailable`.
 ///
 /// `score` blocks on a multi-thread tokio runtime (`block_in_place` + `block_on`).
 /// The `lapis` binary is multi-thread. A current-thread runtime panics.
 #[cfg(feature = "tome")]
 pub struct JevJudge {
     transport: Transport,
-    policy: tome_tree::JudgeConfidence,
 }
 
 #[cfg(feature = "tome")]
 impl JevJudge {
     pub fn resolve() -> Self {
-        Self { transport: Transport::resolve(), policy: tome_tree::JudgeConfidence::default() }
-    }
-
-    pub fn with_policy(policy: tome_tree::JudgeConfidence) -> Self {
-        Self { policy, ..Self::resolve() }
+        Self { transport: Transport::resolve() }
     }
 }
 
@@ -499,32 +499,111 @@ impl tome_tree::Judge for JevJudge {
         query: &str,
         candidate: &tome_tree::Candidate,
     ) -> tome_tree::Result<tome_tree::Assessment> {
+        let body = self.decide_state(&candidate_state(query, candidate))?;
+        relevance_assessment(&body)
+    }
+
+    fn score_batch(
+        &self,
+        query: &str,
+        candidates: &[tome_tree::Candidate],
+    ) -> tome_tree::Result<Vec<tome_tree::Assessment>> {
+        if candidates.len() <= 1 {
+            return candidates.iter().map(|candidate| self.assess(query, candidate)).collect();
+        }
+        let body = self.decide_state(&batch_state(query, candidates))?;
+        batch_assessments(&body, candidates)
+    }
+
+    fn batch_cost(&self, _candidates: &[tome_tree::Candidate]) -> u32 {
+        1
+    }
+}
+
+#[cfg(feature = "tome")]
+impl JevJudge {
+    fn decide_state(&self, state: &str) -> tome_tree::Result<Value> {
         if let Some(reason) = self.transport.missing_reason() {
             return Err(tome_tree::TomeError::JudgeUnavailable { reason: reason.to_string() });
         }
-        // The shipped questions ask about a retrieved chunk. A TOC node is not
-        // one: say so, and rely on the candidate lead (which lists child titles)
-        // so the model is not scoring a bare chapter title.
-        let state = format!(
-            "Search query: {query}\n\n\
-             This is a table-of-contents node, not a retrieved passage. \
-             The lead is the opening of the section. Child section titles are \
-             listed under the lead when this node has children.\n\n\
-             Section: {}\nPages: {}-{}\n\nLead:\n{}",
-            candidate.title, candidate.page_start, candidate.page_end, candidate.lead
-        );
         let handle = tokio::runtime::Handle::try_current()
             .map_err(|_| tome_tree::TomeError::JudgeUnavailable { reason: "no tokio runtime".into() })?;
-        let body = tokio::task::block_in_place(|| handle.block_on(self.transport.decide(&state)));
-        match body {
+        match tokio::task::block_in_place(|| handle.block_on(self.transport.decide(state))) {
             Err(reason) => Err(tome_tree::TomeError::JudgeUnavailable { reason }),
-            Ok(body) => relevance_assessment(&body),
+            Ok(body) => Ok(body),
         }
     }
+}
 
-    fn confidence_policy(&self) -> tome_tree::JudgeConfidence {
-        self.policy
+#[cfg(feature = "tome")]
+fn candidate_state(query: &str, candidate: &tome_tree::Candidate) -> String {
+    // The shipped questions ask about a retrieved chunk. A TOC node is not
+    // one: say so, and rely on the candidate lead (which lists child titles)
+    // so the model is not scoring a bare chapter title.
+    format!(
+        "Search query: {query}\n\n\
+         This is a table-of-contents node, not a retrieved passage. \
+         The lead is the opening of the section. Child section titles are \
+         listed under the lead when this node has children.\n\n\
+         Section: {}\nPages: {}-{}\n\nLead:\n{}",
+        candidate.title, candidate.page_start, candidate.page_end, candidate.lead
+    )
+}
+
+#[cfg(feature = "tome")]
+fn batch_state(query: &str, candidates: &[tome_tree::Candidate]) -> String {
+    let mut state = format!(
+        "Search query: {query}\n\n\
+         These are table-of-contents nodes, not retrieved passages. \
+         Score every node. Reply with a JSON object whose `sections` array \
+         has one object per node: {{\"id\",\"score\",\"confidence\"}}. \
+         `score` is an integer 0..=3. `confidence` is 0..=1 and does not drop a node.\n\n"
+    );
+    for candidate in candidates {
+        let lead: String = candidate.lead.chars().take(240).collect();
+        state.push_str(&format!(
+            "id: {}\ntitle: {}\npages: {}-{}\nlead:\n{lead}\n\n",
+            candidate.id, candidate.title, candidate.page_start, candidate.page_end
+        ));
     }
+    state
+}
+
+/// One score per candidate id. A single relevance score, a short list, or a
+/// score outside 0..=3 is a partial batch (`parse`), not `judge_unavailable`.
+#[cfg(feature = "tome")]
+fn batch_assessments(
+    body: &Value,
+    candidates: &[tome_tree::Candidate],
+) -> tome_tree::Result<Vec<tome_tree::Assessment>> {
+    let sections = body
+        .pointer("/sections")
+        .or_else(|| body.pointer("/answers/sections"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| tome_tree::TomeError::Parse("batch response has no sections".into()))?;
+    let mut by_id = std::collections::BTreeMap::new();
+    for section in sections {
+        let Some(id) = section.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(score) = section.get("score").and_then(Value::as_f64) else {
+            continue;
+        };
+        if !(0.0..=3.0).contains(&score) {
+            continue;
+        }
+        by_id.insert(
+            id.to_string(),
+            tome_tree::Assessment {
+                score: score.round() as u8,
+                confidence: section.get("confidence").and_then(Value::as_f64),
+            },
+        );
+    }
+    if candidates.iter().any(|candidate| !by_id.contains_key(candidate.id.as_str())) {
+        return Err(tome_tree::TomeError::Parse("batch response did not score every candidate".into()));
+    }
+    Ok(candidates.iter().map(|candidate| by_id[candidate.id.as_str()]).collect())
 }
 
 /// Relevance score and the minimum reported confidence. Low confidence is not
@@ -753,30 +832,71 @@ mod tests {
         };
         let judge = JevJudge {
             transport: Transport::Fake(FakeScript::replies(vec![judged_body(0.9, 3.0, "supports", 0.99)])),
-            policy: tome_tree::JudgeConfidence::default(),
         };
         assert_eq!(tome_tree::Judge::score(&judge, "where", &candidate).unwrap(), 3);
 
-        let judge = JevJudge {
-            transport: Transport::Fake(FakeScript::replies(vec![json!({})])),
-            policy: tome_tree::JudgeConfidence::default(),
-        };
+        let judge = JevJudge { transport: Transport::Fake(FakeScript::replies(vec![json!({})])) };
         let err = tome_tree::Judge::score(&judge, "where", &candidate).unwrap_err();
         assert_eq!(err.code(), "judge_unavailable");
 
-        let judge = JevJudge {
-            transport: Transport::None { reason: "typesafe_key_absent" },
-            policy: tome_tree::JudgeConfidence::default(),
-        };
+        let judge = JevJudge { transport: Transport::None { reason: "typesafe_key_absent" } };
         let err = tome_tree::Judge::score(&judge, "where", &candidate).unwrap_err();
         assert!(err.to_string().contains("typesafe_key_absent"));
 
         let low = JevJudge {
             transport: Transport::Fake(FakeScript::replies(vec![judged_body(0.4, 1.4, "unrelated", 0.35)])),
-            policy: tome_tree::JudgeConfidence::DownWeight { min: 0.6 },
         };
         let assessment = tome_tree::Judge::assess(&low, "where", &candidate).unwrap();
         assert_eq!(assessment.score, 1);
         assert_eq!(assessment.confidence, Some(0.35));
+    }
+
+    #[cfg(feature = "tome")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tome_batch_requires_a_score_per_candidate() {
+        let candidates = [candidate_of("0001"), candidate_of("0002")];
+        let single = JevJudge {
+            transport: Transport::Fake(FakeScript::replies(vec![judged_body(0.9, 3.0, "supports", 0.99)])),
+        };
+        let err = tome_tree::Judge::score_batch(&single, "where", &candidates).unwrap_err();
+        assert_eq!(err.code(), "parse", "one relevance score is a partial batch");
+
+        let missing = JevJudge {
+            transport: Transport::Fake(FakeScript::replies(vec![json!({
+                "sections": [{ "id": "0001", "score": 2, "confidence": 0.8 }]
+            })])),
+        };
+        let err = tome_tree::Judge::score_batch(&missing, "where", &candidates).unwrap_err();
+        assert_eq!(err.code(), "parse");
+
+        let dead = JevJudge { transport: Transport::None { reason: "typesafe_key_absent" } };
+        let err = tome_tree::Judge::score_batch(&dead, "where", &candidates).unwrap_err();
+        assert_eq!(err.code(), "judge_unavailable");
+
+        let batched = JevJudge {
+            transport: Transport::Fake(FakeScript::replies(vec![json!({
+                "sections": [
+                    { "id": "0001", "score": 3, "confidence": 0.2 },
+                    { "id": "0002", "score": 1, "confidence": 0.9 }
+                ]
+            })])),
+        };
+        assert_eq!(tome_tree::Judge::batch_cost(&batched, &candidates), 1);
+        let got = tome_tree::Judge::score_batch(&batched, "where", &candidates).unwrap();
+        assert_eq!(got[0].score, 3);
+        assert_eq!(got[0].confidence, Some(0.2));
+        assert_eq!(got[1].score, 1);
+    }
+
+    #[cfg(feature = "tome")]
+    fn candidate_of(id: &str) -> tome_tree::Candidate {
+        tome_tree::Candidate {
+            id: tome_tree::NodeId::from(id),
+            title: "Chapter".into(),
+            lead: "lead text".into(),
+            page_start: 1,
+            page_end: 2,
+            level: 1,
+        }
     }
 }

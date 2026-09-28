@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use tome_tree::{
     Budget, BuildOptions, DocId, FakeJudge, Judge, NodeId, NodeSource, OPEN_BYTE_CAP, OPEN_PAGE_CAP,
-    OpenPassages, SummaryModel, TomeError, TomeIndex,
+    OpenPassages, RootPath, SummaryModel, TomeError, TomeIndex,
 };
 
 fn scratch(name: &str) -> PathBuf {
@@ -287,7 +287,7 @@ fn walk_beam_stops_at_short_nodes_and_fails_closed() {
     assert!(walked.passages.iter().all(|p| !p.truncated));
     assert!(walked.passages.len() <= OPEN_PAGE_CAP as usize);
 
-    let tight = Budget { max_judge_calls: 1, max_pages: 12 };
+    let tight = Budget { max_judge_calls: 1, ..Budget::default() };
     let err = index.walk(&meta.doc_id, "q", &judge, tight).unwrap_err();
     assert_eq!(code(&err), "over_budget");
 
@@ -558,31 +558,114 @@ fn failed_walk_leaves_summary_model_on_the_doc() {
 }
 
 #[test]
-fn low_confidence_can_down_weight_instead_of_aborting() {
+fn low_confidence_ranks_on_score_and_still_walks() {
     let dir = scratch("conf");
     let pdf_path = dir.join("two.pdf");
     pdf::write(
         &pdf_path,
-        &[vec!["CHAPTER 1", "Alpha body."], vec!["CHAPTER 2", "Beta body."]],
+        &pdf::prose(20),
         &[
             pdf::Mark { title: "Alpha", page: 0, parent: None },
-            pdf::Mark { title: "Beta", page: 1, parent: None },
+            pdf::Mark { title: "Beta", page: 10, parent: None },
         ],
     );
     let meta = build_at(&dir, &pdf_path, "two", opts("two"));
     let index = TomeIndex::open(&dir.join("tomes")).unwrap();
-    let judge = FakeJudge::new([("0001", 3u8), ("0002", 3u8)])
-        .with_confidence([("0001", 0.3), ("0002", 0.95)])
-        .with_policy(tome_tree::JudgeConfidence::DownWeight { min: 0.6 });
+    // Score 3 at confidence 0.1 outranks score 1 at confidence 0.99. The low
+    // confidence is recorded and does not abort or drop the candidate.
+    let judge =
+        FakeJudge::new([("0001", 3u8), ("0002", 1u8)]).with_confidence([("0001", 0.1), ("0002", 0.99)]);
     let walked = index.walk(&meta.doc_id, "beta", &judge, Budget::default()).unwrap();
-    assert!(walked.nodes.iter().any(|id| id.as_str() == "0002"));
+    assert_eq!(walked.nodes.iter().map(|id| id.as_str()).collect::<Vec<_>>(), vec!["0001"]);
+    assert_eq!(walked.skipped.iter().map(|id| id.as_str()).collect::<Vec<_>>(), vec!["0002"]);
     assert_eq!(walked.judged.len(), 2);
     assert_eq!(walked.judged[0].score, 3);
-    assert_eq!(walked.judged[0].confidence, Some(0.3));
-    assert_eq!(walked.judged[0].rank, 1, "3 * 0.3 rounds to 1");
-    let closed = FakeJudge::new([("0001", 3u8)]).with_confidence([("0001", 0.3)]);
-    let err = index.walk(&meta.doc_id, "beta", &closed, Budget::default()).unwrap_err();
-    assert_eq!(code(&err), "judge_unavailable");
+    assert_eq!(walked.judged[0].confidence, Some(0.1));
+    assert_eq!(walked.judged[0].rank, 3);
+    assert_eq!(walked.judged[1].score, 1);
+    assert_eq!(walked.judged[1].confidence, Some(0.99));
+    assert_eq!(walked.judged[1].rank, 1);
+    assert!(!walked.passages.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const THIRTY_CHAPTERS: [&str; 30] = [
+    "Chapter 01",
+    "Chapter 02",
+    "Chapter 03",
+    "Chapter 04",
+    "Chapter 05",
+    "Chapter 06",
+    "Chapter 07",
+    "Chapter 08",
+    "Chapter 09",
+    "Chapter 10",
+    "Chapter 11",
+    "Chapter 12",
+    "Chapter 13",
+    "Chapter 14",
+    "Chapter 15",
+    "Chapter 16",
+    "Chapter 17",
+    "Chapter 18",
+    "Chapter 19",
+    "Chapter 20",
+    "Chapter 21",
+    "Chapter 22",
+    "Chapter 23",
+    "Chapter 24",
+    "Chapter 25",
+    "Chapter 26",
+    "Chapter 27",
+    "Chapter 28",
+    "Chapter 29",
+    "Brass foundry",
+];
+
+fn thirty_root_book(dir: &Path, name: &str) -> tome_tree::DocMeta {
+    let pdf_path = dir.join(format!("{name}.pdf"));
+    let marks: Vec<pdf::Mark> = THIRTY_CHAPTERS
+        .iter()
+        .enumerate()
+        .map(|(i, title)| pdf::Mark { title, page: i, parent: None })
+        .collect();
+    pdf::write(&pdf_path, &pdf::prose(30), &marks);
+    build_at(dir, &pdf_path, name, opts(name))
+}
+
+#[test]
+fn thirty_roots_finish_inside_the_root_budget() {
+    let dir = scratch("thirty");
+    let meta = thirty_root_book(&dir, "thirty");
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let roots = index.tree(&meta.doc_id, None, Some(0)).unwrap();
+    assert_eq!(roots.len(), 30);
+    let judge = FakeJudge::new([("0010", 3u8)]).with_default(1).batched();
+    let walked = index.walk(&meta.doc_id, "chapter", &judge, Budget::default()).unwrap();
+    assert_eq!(walked.root_path, RootPath::Batch);
+    assert_eq!(walked.root_judge_calls, 2, "30 roots at batch 16 are two calls");
+    assert!(walked.root_judge_calls <= walked.judge_calls);
+    assert!(walked.root_judge_calls <= 4);
+    assert_eq!(walked.judged.len(), 30);
+    assert!(walked.nodes.iter().any(|id| id.as_str() == "0010"));
+    assert!(!walked.passages.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn malformed_batch_falls_back_to_lexical_ranking() {
+    let dir = scratch("fallback");
+    let meta = thirty_root_book(&dir, "fallback");
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    // The matching title is the last root, so an id-order top-k would miss it.
+    let judge = FakeJudge::new([("0030", 3u8)]).with_default(0).fail_batch();
+    let walked = index.walk(&meta.doc_id, "brass foundry", &judge, Budget::default()).unwrap();
+    assert_eq!(walked.root_path, RootPath::LexicalFallback);
+    assert_eq!(walked.root_judge_calls, 4, "the failed batch costs one of the four root calls");
+    assert_eq!(walked.judged.len(), 3, "three one-at-a-time calls remain after the failed batch");
+    assert_eq!(walked.judged[0].node_id.as_str(), "0030");
+    assert!(walked.nodes.iter().any(|id| id.as_str() == "0030"));
+    assert!(!walked.passages.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

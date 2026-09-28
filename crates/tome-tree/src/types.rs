@@ -221,55 +221,67 @@ pub const SPLIT_PAGES: u32 = 10;
 /// [`OPEN_BYTE_CAP`], so one node can still be opened.
 pub const SPLIT_TOKENS: usize = 20_000;
 
+/// Descent budget. The root pass does not spend these calls.
 pub const DEFAULT_JUDGE_CALLS: u32 = 24;
 
-/// Judge calls held back at a wide frontier so descent still has room.
+/// Root-pass call budget. Separate from [`DEFAULT_JUDGE_CALLS`].
+pub const DEFAULT_ROOT_CALLS: u32 = 4;
+
+/// Candidates in one batched judge call.
+pub const DEFAULT_ROOT_BATCH: u32 = 16;
+
+/// One-at-a-time judgments after a malformed batch, chosen by lexical overlap.
+pub const DEFAULT_ROOT_TOP_K: u32 = 6;
+
+/// Kept so older imports still compile. Frontiers are batched instead of truncated.
 pub const DESCENT_RESERVE: u32 = 8;
 
 /// Builder stamp stored on every tree. A mismatch is `stale`.
 pub const BUILDER_VERSION: &str = "0.4.0";
 
-/// Default confidence floor. Below this, [`JudgeConfidence::FailClosed`] aborts
-/// the walk. The number is the historical Jev floor; it is config, not a tuned
-/// constant. Eli has not picked the spike policy.
-pub const DEFAULT_JUDGE_MIN_CONFIDENCE: f64 = 0.6;
-
-/// How a reported confidence affects ranking. Missing confidence is not a
-/// failure: the judge did not report one. A missing score, a score outside
-/// 0..=3, or a dead transport is still `judge_unavailable`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum JudgeConfidence {
-    /// `confidence < min` stops the walk.
-    FailClosed { min: f64 },
-    /// `confidence < min` ranks on `round(score * confidence)` instead of aborting.
-    /// At or above `min`, the raw score is the rank.
-    DownWeight { min: f64 },
-}
-
-impl Default for JudgeConfidence {
-    fn default() -> Self {
-        Self::FailClosed { min: DEFAULT_JUDGE_MIN_CONFIDENCE }
-    }
-}
-
-/// One judge call. `score` is the model's 0..=3. `confidence` is whatever the
-/// model reported, including values below the floor.
+/// One judge result. `score` is the model's 0..=3. `confidence` is recorded
+/// and is not a gate: a low value does not drop the candidate.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Assessment {
     pub score: u8,
     pub confidence: Option<f64>,
 }
 
+/// Which root-pass path produced the ranking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RootPath {
+    /// Batches of [`Budget::root_batch_size`] returned a score for every candidate.
+    #[default]
+    Batch,
+    /// A batch was malformed or partial. Roots were pre-ranked on title and lead,
+    /// then the top [`Budget::root_top_k`] were judged one at a time.
+    LexicalFallback,
+}
+
 /// Judge-call and open-page budget for one walk. The 48 KB cap always applies.
+///
+/// `max_judge_calls` is the descent budget. `root_calls` is a separate line for
+/// the root pass, so a book with dozens of chapters does not spend the descent
+/// budget before it opens a page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
     pub max_judge_calls: u32,
     pub max_pages: u32,
+    pub root_calls: u32,
+    pub root_batch_size: u32,
+    pub root_top_k: u32,
 }
 
 impl Default for Budget {
     fn default() -> Self {
-        Self { max_judge_calls: DEFAULT_JUDGE_CALLS, max_pages: OPEN_PAGE_CAP }
+        Self {
+            max_judge_calls: DEFAULT_JUDGE_CALLS,
+            max_pages: OPEN_PAGE_CAP,
+            root_calls: DEFAULT_ROOT_CALLS,
+            root_batch_size: DEFAULT_ROOT_BATCH,
+            root_top_k: DEFAULT_ROOT_TOP_K,
+        }
     }
 }
 
@@ -285,23 +297,30 @@ pub struct Walk {
     /// have been exceeded. Whole nodes only; nothing here was clipped.
     #[serde(default)]
     pub skipped: Vec<NodeId>,
-    /// Every candidate the walk scored, in call order. Present on a finished
-    /// walk so an eval can study score and confidence after the fact.
+    /// Every candidate the walk scored, in call order. Confidence is recorded
+    /// and is not used to drop or reorder a candidate.
     #[serde(default)]
     pub judged: Vec<Judged>,
+    /// Judge calls spent on the root pass. Not part of [`Self::judge_calls`]'s
+    /// descent portion; [`Self::judge_calls`] is the total.
+    #[serde(default)]
+    pub root_judge_calls: u32,
+    /// `batch` or `lexical_fallback`.
+    #[serde(default)]
+    pub root_path: RootPath,
 }
 
-/// One scored candidate. `rank` is what the beam sorted on after the confidence policy.
+/// One scored candidate. `rank` equals `score`: confidence is not applied.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Judged {
     pub node_id: NodeId,
     pub title: String,
     pub page_start: u32,
     pub page_end: u32,
-    /// Model score, 0..=3, before down-weighting.
+    /// Model score, 0..=3. This is what the beam sorts on.
     pub score: u8,
     pub confidence: Option<f64>,
-    /// Score the beam used.
+    /// Same as `score`. Kept so a caller can show the value the beam used.
     pub rank: u8,
 }
 

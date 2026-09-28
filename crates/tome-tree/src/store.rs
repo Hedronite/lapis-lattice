@@ -140,6 +140,8 @@ impl TomeIndex {
             judge_calls: choice.calls,
             skipped: choice.skipped,
             judged: choice.judged,
+            root_judge_calls: choice.root_calls,
+            root_path: choice.root_path,
         })
     }
 
