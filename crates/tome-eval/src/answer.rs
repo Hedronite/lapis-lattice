@@ -214,6 +214,9 @@ async fn opencode_run(
         .args(["run", "--standalone", "--agent", &cfg.agent, "--model", &cfg.model, "--format", "json"])
         .arg(prompt)
         .current_dir(workdir)
+        // OpenCode resolves the project (and so `.opencode/agent/`) from $PWD, not getcwd;
+        // without this the generated agent is "not found" when run from another dir.
+        .env("PWD", workdir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -261,6 +264,7 @@ async fn opencode_usage(cfg: &AnswerCfg, workdir: &Path, session: &str) -> Optio
         tokio::process::Command::new(&cfg.opencode_bin)
             .args(["session", "export", session])
             .current_dir(workdir)
+            .env("PWD", workdir)
             .stdin(Stdio::null())
             .kill_on_drop(true)
             .output(),
