@@ -1,7 +1,9 @@
-//! Facet batch request. Untrusted PDF text and the query sit in the JSON body.
-//! `{` and `}` inside strings are `\u` escapes so a `{{typesafeApiKey}}` in
-//! that text is not a placeholder Facet will fill in. The decoded string is
-//! the original text. The Authorization header still uses the real placeholder.
+//! Facet request body for a tome judge call (one candidate or a batch).
+//! Untrusted PDF text and the query sit in the JSON body. `{` and `}` inside
+//! strings are `\u` escapes so a `{{typesafeApiKey}}` in that text is not a
+//! placeholder Facet will fill in. The decoded string is the original text.
+//! The Authorization header still uses the real placeholder. Hit rerank does
+//! not use this module: it keeps the bundled recipe.
 
 use serde_json::Value;
 
@@ -38,8 +40,9 @@ fn mark_template_braces(value: &Value) -> Value {
     }
 }
 
-/// Facet collection whose body is one batch System One request. The hit-rerank
-/// recipe stays on the single relevance questions; a batch must not use it.
+/// Facet collection whose body is one System One request. The hit-rerank
+/// recipe stays on the bundled file; a tome call must not use that file,
+/// because its `{{state}}` variable would expand placeholders in the text.
 pub(super) fn collection(body: &str) -> String {
     format!(
         "\

@@ -317,6 +317,11 @@ pub struct Walk {
     /// `batch` or `lexical_fallback`.
     #[serde(default)]
     pub root_path: RootPath,
+    /// Root ids the root pass did not score, in tree order. Empty when every
+    /// root was judged. A stop partway through `root_calls`, and a lexical cut
+    /// that judges only `root_top_k`, both list the roots that got no score.
+    #[serde(default)]
+    pub roots_skipped: Vec<NodeId>,
 }
 
 /// One scored candidate. `rank` equals `score`: confidence is not applied.

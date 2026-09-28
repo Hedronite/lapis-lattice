@@ -57,7 +57,7 @@ DocMeta {
 }
 
 Passage { node_id, page, text, truncated }
-Walk { doc_id, query, nodes, passages, judge_calls, skipped, judged, root_judge_calls, root_path }
+Walk { doc_id, query, nodes, passages, judge_calls, skipped, judged, root_judge_calls, root_path, roots_skipped }
 Judged { node_id, title, page_start, page_end, score, confidence, rank }
 ```
 
@@ -102,13 +102,13 @@ pub trait Judge {
 
 The walk ranks on `score` only. `confidence` is recorded on `Walk.judged` and is not a gate: a low value does not abort the walk, drop the candidate, or change its rank. `judge_unavailable` is only a transport or model failure (no transport, a missing score, or a score outside 0..=3 on a one-at-a-time call).
 
-A batched response that is malformed (wrong length, no parseable scores, or a score outside 0..=3) is not `judge_unavailable`. That failed call counts in `judge_calls`. The walk then pre-ranks the set by token overlap of the query with the title and lead, and judges the top `root_top_k` (default 6) one at a time. On the root pass those singles are a separate allowance, so `root_judge_calls` on that path is at most `1 + root_top_k` (the failed batch plus the singles) and is not limited by `root_calls`. A sibling set does the same inside the descent budget, and later sets skip the batch call once one has failed. `Walk.root_path` records which path the root pass ran. A batch that scored some ids and left others out keeps the scores it got. The walk judges only the missing ids, one at a time, until `root_calls` (or the descent budget) is spent. Every one of those calls is in `judge_calls`.
+A batched response that is malformed (wrong length, no parseable scores, or a score outside 0..=3) is not `judge_unavailable`. That failed call counts in `judge_calls`. The walk then pre-ranks the set by token overlap of the query with the title and lead, and judges the top `root_top_k` (default 6) one at a time. On the root pass those singles are a separate allowance, so `root_judge_calls` on that path is at most `1 + root_top_k` (the failed batch plus the singles) and is not limited by `root_calls`. A sibling set does the same inside the descent budget, and later sets skip the batch call once one has failed. `Walk.root_path` records which path the root pass ran. A batch that scored some ids and left others out keeps the scores it got. The walk judges only the missing ids, one at a time, until `root_calls` (or the descent budget) is spent. Every one of those calls is in `judge_calls`. Roots that receive no score, because the budget stopped or the lexical cut kept only `root_top_k`, are listed on `Walk.roots_skipped` in tree order.
 
 A page pdf-extract cannot safely read (a panic, a `/Parent` cycle, or a `Do` that is not a shallow Form) is extracted with lopdf for that page. One bad page does not fail the book. `/Kids` stored as an indirect array is still a page tree. One outline item whose destination does not resolve is skipped.
 
 `FakeJudge` scripts scores by node id for offline tests. A missing id is `judge_unavailable`.
 
-`lapis tome search` uses `jev::JevJudge`, which calls the existing transport (Facet, else `$TYPESAFE_API_KEY`, else none). One candidate reads the shipped relevance score (0–3). Several candidates are one call. The state asks for a JSON array of `{id, score, confidence}`, and the questions are one score rubric per candidate id, so the model is not locked to a single relevance score. The page lead and the child titles are written as separate fields. The parser accepts that array, or the per-id score answers System One returns. Ids that came back are kept. Missing ids are `None`, and the walk judges them one at a time. A body with neither shape is `parse`, and the walk takes the lexical fallback. The Facet batch body escapes `{` and `}` inside strings, so a `{{typesafeApiKey}}` in the PDF text stays literal.
+`lapis tome search` uses `jev::JevJudge`, which calls the existing transport (Facet, else `$TYPESAFE_API_KEY`, else none). One candidate reads the shipped relevance score (0–3). Several candidates are one call. The state asks for a JSON array of `{id, score, confidence}`, and the questions are one score rubric per candidate id, so the model is not locked to a single relevance score. The page lead and the child titles are written as separate fields. The parser accepts that array, or the per-id score answers System One returns. Ids that came back are kept. Missing ids are `None`, and the walk judges them one at a time. A body with neither shape is `parse`, and the walk takes the lexical fallback. Every Facet tome call, including one candidate, inlines an escaped JSON body. `{` and `}` inside strings become `\u` escapes, so a `{{typesafeApiKey}}` in the PDF text or the query stays literal. Hit rerank still uses the bundled recipe.
 
 ```toml
 [tome]

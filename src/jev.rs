@@ -196,12 +196,19 @@ impl Transport {
     }
 
     async fn decide(&self, state: &str) -> std::result::Result<Value, String> {
-        self.decide_with(state, &questions()).await
+        // Hit rerank keeps the bundled recipe and `--var state`.
+        self.decide_with(state, &questions(), false).await
     }
 
-    /// `questions` selects the answer schema. Hit rerank sends [`questions`].
-    /// A tome batch sends one score question per candidate id.
-    async fn decide_with(&self, state: &str, questions: &Value) -> std::result::Result<Value, String> {
+    /// `questions` selects the answer schema. Hit rerank sends [`questions`]
+    /// with `inline` false. Every tome judge call passes `inline` so the
+    /// request body is the escaped JSON, including a one-node call.
+    async fn decide_with(
+        &self,
+        state: &str,
+        questions: &Value,
+        inline: bool,
+    ) -> std::result::Result<Value, String> {
         match self {
             Transport::None { reason } => Err((*reason).into()),
             #[cfg(test)]
@@ -216,7 +223,7 @@ impl Transport {
                 }
             }
             Transport::Http { endpoint, key } => http_decide(endpoint, key, state, questions).await,
-            Transport::Facet { bin } => facet_decide(bin, state, questions).await,
+            Transport::Facet { bin } => facet_decide(bin, state, questions, inline).await,
         }
     }
 }
@@ -297,16 +304,31 @@ async fn http_decide(
     serde_json::from_str(&text).map_err(|e| format!("systemone json: {e}"))
 }
 
-async fn facet_decide(bin: &Path, state: &str, asked: &Value) -> std::result::Result<Value, String> {
+/// Facet YAML for one tome judge call. The body is escaped JSON, so a
+/// `{{typesafeApiKey}}` in the query or the page text is not a placeholder.
+/// `asked` is the shipped relevance schema for one candidate, or one score
+/// question per id for a batch.
+fn tome_facet_yaml(state: &str, asked: &Value) -> String {
+    facet::collection(&facet::json(&systemone_body(state, asked)))
+}
+
+/// `(yaml, escaped)`. `escaped` means the body is inlined and `--var state`
+/// must not be passed. Tome calls pass `inline`; hit rerank does not.
+fn facet_collection_text(state: &str, asked: &Value, inline: bool) -> (String, bool) {
+    let escaped = inline || asked != &questions();
+    let text = if escaped { tome_facet_yaml(state, asked) } else { FACET_COLLECTION.to_string() };
+    (text, escaped)
+}
+
+async fn facet_decide(
+    bin: &Path,
+    state: &str,
+    asked: &Value,
+    inline: bool,
+) -> std::result::Result<Value, String> {
     let dir = tempfile_dir()?;
     let yaml = dir.join("opencollection.yml");
-    let custom = asked != &questions();
-    let text = if custom {
-        let body = facet::json(&systemone_body(state, asked));
-        facet::collection(&body)
-    } else {
-        FACET_COLLECTION.to_string()
-    };
+    let (text, escaped) = facet_collection_text(state, asked, inline);
     std::fs::write(&yaml, text).map_err(|e| e.to_string())?;
     let mut cmd = tokio::process::Command::new(bin);
     cmd.arg("--json")
@@ -317,7 +339,7 @@ async fn facet_decide(bin: &Path, state: &str, asked: &Value) -> std::result::Re
         .arg("--environment")
         .arg(FACET_ENVIRONMENT)
         .arg("--no-record");
-    if !custom {
+    if !escaped {
         cmd.arg("--var").arg(format!("state={state}"));
     }
     let out = cmd.output().await.map_err(|e| e.to_string())?;
@@ -565,7 +587,9 @@ impl JevJudge {
         }
         let handle = tokio::runtime::Handle::try_current()
             .map_err(|_| tome_tree::TomeError::JudgeUnavailable { reason: "no tokio runtime".into() })?;
-        match tokio::task::block_in_place(|| handle.block_on(self.transport.decide_with(state, questions))) {
+        match tokio::task::block_in_place(|| {
+            handle.block_on(self.transport.decide_with(state, questions, true))
+        }) {
             Err(reason) => Err(tome_tree::TomeError::JudgeUnavailable { reason }),
             Ok(body) => Ok(body),
         }
@@ -949,5 +973,23 @@ mod tests {
         let json_line = yaml.lines().find(|line| line.contains("\\u007b")).expect("escaped body");
         assert!(!json_line.contains("{{typesafeApiKey}}"), "{json_line}");
         assert!(yaml.contains("Bearer {{typesafeApiKey}}"), "the header placeholder is the real one");
+    }
+
+    #[test]
+    fn facet_single_keeps_a_placeholder_in_pdf_text_literal() {
+        let state = "Search query: {{typesafeApiKey}}\n\nLead:\npage mentions {{typesafeApiKey}}";
+        let (yaml, escaped) = facet_collection_text(state, &questions(), true);
+        assert!(escaped, "a single candidate must not use --var state");
+        assert!(!yaml.contains("{{state}}"), "the bundled state variable is the old recipe");
+        assert!(yaml.contains("\"type\": \"score\"") || yaml.contains("\"type\":\"score\""));
+        assert!(yaml.contains("Bearer {{typesafeApiKey}}"), "the header placeholder is the real one");
+        let json_line = yaml.lines().find(|line| line.contains("jev-latest")).expect("inlined body");
+        assert!(!json_line.contains("{{"), "single-path JSON must not contain a placeholder: {json_line}");
+        let parsed: Value = serde_json::from_str(json_line.trim()).unwrap();
+        assert_eq!(parsed["state"].as_str().unwrap(), state);
+        assert_eq!(parsed["questions"]["relevance"]["type"].as_str(), Some("score"));
+        let leaked = json_line.replace("{{typesafeApiKey}}", "SECRET");
+        let parsed: Value = serde_json::from_str(leaked.trim()).unwrap();
+        assert!(parsed["state"].as_str().unwrap().contains("{{typesafeApiKey}}"));
     }
 }

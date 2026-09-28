@@ -240,6 +240,7 @@ impl TomeApi for FakeTome {
             judged: vec![],
             root_judge_calls: 0,
             root_path: tome_tree::RootPath::Batch,
+            roots_skipped: vec![],
         })
     }
 

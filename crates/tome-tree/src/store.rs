@@ -142,6 +142,7 @@ impl TomeIndex {
             judged: choice.judged,
             root_judge_calls: choice.root_calls,
             root_path: choice.root_path,
+            roots_skipped: choice.roots_skipped,
         })
     }
 

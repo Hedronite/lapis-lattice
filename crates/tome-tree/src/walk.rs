@@ -12,7 +12,8 @@
 //! lexical pre-rank. The failed batch counts in `judge_calls`. The fallback
 //! singles are a separate `root_top_k` allowance, so that path reports at most
 //! `1 + root_top_k` and does not borrow from `root_calls`. Ids a batch left
-//! out are judged one at a time and each of those calls counts too.
+//! out are judged one at a time and each of those calls counts too. Roots the
+//! pass does not score are listed on [`Walk::roots_skipped`](crate::Walk::roots_skipped).
 
 use crate::error::{Result, TomeError};
 use crate::types::{
@@ -182,10 +183,9 @@ pub(crate) fn choose(
     mut page_len: impl FnMut(u32) -> Result<usize>,
 ) -> Result<Choice> {
     let batch_size = budget.root_batch_size.max(1) as usize;
-    let (root_picks, mut judged, root_calls, root_path) =
-        score_roots(roots, query, judge, budget, batch_size)?;
+    let mut root = score_roots(roots, query, judge, budget, batch_size)?;
     let mut terminals = Vec::new();
-    let mut frontier = beam_next(root_picks, &mut terminals);
+    let mut frontier = beam_next(root.picks, &mut terminals);
     let mut descent_calls = 0u32;
     // Once a batched response is unusable, later sibling sets skip the batch
     // call and pre-rank, so a wide chapter does not spend a call per frontier.
@@ -205,12 +205,20 @@ pub(crate) fn choose(
             &mut batch_broken,
         )?;
         descent_calls += used;
-        judged.extend(extra);
+        root.judged.extend(extra);
         frontier = beam_next(picks, &mut terminals);
     }
     let page_cap = budget.max_pages.min(OPEN_PAGE_CAP);
     let (ids, skipped) = fit_whole_nodes(terminals, page_cap, OPEN_BYTE_CAP, &mut page_len)?;
-    Ok(Choice { ids, skipped, calls: root_calls + descent_calls, judged, root_calls, root_path })
+    Ok(Choice {
+        ids,
+        skipped,
+        calls: root.calls + descent_calls,
+        judged: root.judged,
+        root_calls: root.calls,
+        root_path: root.path,
+        roots_skipped: root.skipped,
+    })
 }
 
 pub(crate) struct Choice {
@@ -220,6 +228,15 @@ pub(crate) struct Choice {
     pub judged: Vec<Judged>,
     pub root_calls: u32,
     pub root_path: RootPath,
+    pub roots_skipped: Vec<NodeId>,
+}
+
+struct RootScore {
+    picks: Vec<Pick>,
+    judged: Vec<Judged>,
+    calls: u32,
+    path: RootPath,
+    skipped: Vec<NodeId>,
 }
 
 /// Score every root that fits in the root budget. The first unusable batch,
@@ -231,7 +248,7 @@ fn score_roots(
     judge: &dyn Judge,
     budget: Budget,
     batch_size: usize,
-) -> Result<(Vec<Pick>, Vec<Judged>, u32, RootPath)> {
+) -> Result<RootScore> {
     let limit = budget.root_calls;
     let mut calls = 0u32;
     let mut judged = Vec::new();
@@ -254,7 +271,13 @@ fn score_roots(
                 let (fallback, extra, used) =
                     lexical_fallback(roots, query, judge, budget.root_top_k, budget.root_top_k)?;
                 judged.extend(extra);
-                return Ok((fallback, judged, calls + used, RootPath::LexicalFallback));
+                return Ok(RootScore {
+                    skipped: unscored_roots(roots, &fallback),
+                    picks: fallback,
+                    judged,
+                    calls: calls + used,
+                    path: RootPath::LexicalFallback,
+                });
             }
             break;
         }
@@ -266,7 +289,13 @@ fn score_roots(
             detail: format!("root pass scored nothing within {limit} calls"),
         });
     }
-    Ok((picks, judged, calls, RootPath::Batch))
+    Ok(RootScore { skipped: unscored_roots(roots, &picks), picks, judged, calls, path: RootPath::Batch })
+}
+
+/// Roots that received no score, in tree order.
+fn unscored_roots(roots: &[Node], picks: &[Pick]) -> Vec<NodeId> {
+    let scored: std::collections::BTreeSet<&str> = picks.iter().map(|pick| pick.node.id.as_str()).collect();
+    roots.iter().filter(|node| !scored.contains(node.id.as_str())).map(|node| node.id.clone()).collect()
 }
 
 /// Pre-rank every root on title and lead, then judge the top `k` one at a time.

@@ -721,6 +721,7 @@ fn thirty_roots_finish_inside_the_root_budget() {
     assert!(walked.root_judge_calls <= walked.judge_calls);
     assert!(walked.root_judge_calls <= 4);
     assert_eq!(walked.judged.len(), 30);
+    assert!(walked.roots_skipped.is_empty(), "every root was scored");
     assert!(walked.nodes.iter().any(|id| id.as_str() == "0010"));
     assert!(!walked.passages.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
@@ -739,6 +740,8 @@ fn malformed_batch_falls_back_to_lexical_ranking() {
     assert_eq!(walked.judge_calls, 7, "the failed batch is part of the reported total");
     assert!(walked.root_judge_calls <= 1 + Budget::default().root_top_k);
     assert_eq!(walked.judged.len(), 6);
+    assert_eq!(walked.roots_skipped.len(), 24, "the lexical cut leaves the other roots visible");
+    assert!(disjoint(&walked.judged, &walked.roots_skipped));
     assert_eq!(walked.judged[0].node_id.as_str(), "0030");
     assert!(walked.nodes.iter().any(|id| id.as_str() == "0030"));
     assert!(!walked.passages.is_empty());
@@ -859,8 +862,21 @@ fn partial_batch_fill_ins_count_against_the_root_budget() {
     assert_eq!(walked.root_judge_calls, 4, "one batch request plus the three fill-ins");
     assert_eq!(walked.judge_calls, 4);
     assert_eq!(walked.judged.len(), 4);
+    assert_eq!(walked.roots_skipped.len(), 26, "unscored holes and the next batch are recorded");
+    assert!(disjoint(&walked.judged, &walked.roots_skipped));
+    let roots = index.tree(&meta.doc_id, None, Some(0)).unwrap();
+    let skipped: Vec<_> = walked.roots_skipped.iter().map(|id| id.as_str()).collect();
+    let judged: std::collections::BTreeSet<_> = walked.judged.iter().map(|j| j.node_id.as_str()).collect();
+    let expected: Vec<_> =
+        roots.iter().filter(|node| !judged.contains(node.id.as_str())).map(|node| node.id.as_str()).collect();
+    assert_eq!(skipped, expected, "skipped roots stay in tree order");
     assert_eq!(walked.root_path, RootPath::Batch);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn disjoint(judged: &[tome_tree::Judged], skipped: &[tome_tree::NodeId]) -> bool {
+    let ids: std::collections::BTreeSet<_> = judged.iter().map(|j| j.node_id.as_str()).collect();
+    skipped.iter().all(|id| !ids.contains(id.as_str()))
 }
 
 /// Vault PDFs are not in this repo. Set `TOME_VAULT` to a directory that
