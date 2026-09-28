@@ -27,6 +27,9 @@ mod safe_file;
 mod tasks;
 mod taxonomy;
 mod templates;
+mod tome_args;
+#[cfg(feature = "tome")]
+mod tome_cmd;
 mod tui;
 mod vault;
 mod write;
@@ -145,11 +148,22 @@ async fn dispatch(ctx: Ctx, cmd: Command) -> Result<()> {
         Command::Doctor => doctor(&ctx).await,
         Command::Tui => tui::run(ctx).await,
         Command::Desktop(args) => desktop(&ctx, args),
+        Command::Tome { command } => tome_entry(&ctx, command).await,
     }
 }
 
+#[cfg(feature = "tome")]
+async fn tome_entry(ctx: &Ctx, command: cli::TomeCommand) -> Result<()> {
+    tome_cmd::run(ctx, command)
+}
+
+#[cfg(not(feature = "tome"))]
+async fn tome_entry(_ctx: &Ctx, _command: cli::TomeCommand) -> Result<()> {
+    Err(LapisError::Usage("`lapis tome` is not in this binary. Rebuild with `--features tome`.".into()))
+}
+
 /// `--json` output: always the `{ok, data, error, meta}` envelope.
-fn emit_json<T: Serialize>(v: &T) -> Result<()> {
+pub(crate) fn emit_json<T: Serialize>(v: &T) -> Result<()> {
     emit_with(v, Meta::default())
 }
 

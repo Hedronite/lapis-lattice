@@ -4,6 +4,8 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::http::Mode;
 
+pub use crate::tome_args::TomeCommand;
+
 const AFTER_HELP: &str = "\
 Exit codes:
   0  ok
@@ -141,6 +143,12 @@ pub enum Command {
 
     /// Desktop shell (GPUI). Needs a build with `--features desktop`; `--check` reports what is available.
     Desktop(DesktopArgs),
+
+    /// Page-spanned PDF tree. Needs a build with `--features tome` (off by default).
+    Tome {
+        #[command(subcommand)]
+        command: TomeCommand,
+    },
 
     /// MCP server over stdio (tools: vault_info, search, read_note, list_notes, neighbors, create_note, append_to_note, list_tasks, toggle_task).
     Mcp,
@@ -592,6 +600,36 @@ mod tests {
         match c.command() {
             Command::Read(r) => assert_eq!(r.path, "notes/SPEC.md"),
             _ => panic!("expected read"),
+        }
+    }
+
+    #[test]
+    fn parses_tome_verbs() {
+        let c = Cli::try_parse_from(["lapis", "tome", "build", "--force", "a.pdf", "b.pdf"]).unwrap();
+        match c.command() {
+            Command::Tome { command: TomeCommand::Build(b) } => {
+                assert!(b.force);
+                assert_eq!(b.pdfs, ["a.pdf", "b.pdf"]);
+            }
+            _ => panic!("expected tome build"),
+        }
+        let c = Cli::try_parse_from(["lapis", "--json", "tome", "search", "abc", "where is it"]).unwrap();
+        assert!(c.global.json);
+        match c.command() {
+            Command::Tome { command: TomeCommand::Search(s) } => {
+                assert_eq!(s.doc, "abc");
+                assert_eq!(s.query, "where is it");
+                assert_eq!(s.max_judge_calls, 24);
+                assert_eq!(s.max_pages, 12);
+            }
+            _ => panic!("expected tome search"),
+        }
+        let c = Cli::try_parse_from(["lapis", "tome", "open", "abc", "0001", "0001.0002"]).unwrap();
+        match c.command() {
+            Command::Tome { command: TomeCommand::Open(o) } => {
+                assert_eq!(o.nodes, ["0001", "0001.0002"]);
+            }
+            _ => panic!("expected tome open"),
         }
     }
 

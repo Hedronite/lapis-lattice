@@ -101,9 +101,30 @@ fn node_id(raw: &str) -> Result<NodeId, ErrorData> {
     }
 }
 
+/// Path or sha256, without panicking. A 64-hex id is normalised via
+/// `tome_tree::DocId::try_from`. Anything else is matched against `docs()`
+/// (`DocMeta.path` / `doc_id` / `sha256`) or left as a path for `doc_meta`.
+fn doc_ref(api: &dyn TomeApi, raw: &str) -> Result<DocId, ErrorData> {
+    let trimmed = raw.trim();
+    if let Ok(id) = tome_tree::DocId::try_from(trimmed) {
+        return Ok(DocId(id.as_str().to_string()));
+    }
+    match api.docs() {
+        Ok(docs) => {
+            if let Some(meta) =
+                docs.into_iter().find(|d| d.path == trimmed || d.doc_id == trimmed || d.sha256 == trimmed)
+            {
+                return Ok(DocId(meta.sha256));
+            }
+            Ok(DocId(trimmed.to_string()))
+        }
+        Err(err) => Err(tome_err(err)),
+    }
+}
+
 /// `tome_tree` body: `{doc: DocMeta, nodes: [Node]}`.
 pub fn tree_value(api: &dyn TomeApi, a: &TomeTreeArg) -> Result<Value, ErrorData> {
-    let doc = DocId(a.doc.clone());
+    let doc = doc_ref(api, &a.doc)?;
     let node = a.node.as_deref().map(node_id).transpose()?;
     let depth = Some(a.depth.unwrap_or(2).clamp(1, 8));
     let meta = api.doc_meta(&doc).map_err(tome_err)?;
@@ -119,7 +140,7 @@ pub fn open_value(api: &dyn TomeApi, a: &TomeOpenArg) -> Result<Value, ErrorData
             Some(json!({ "code": "unknown_node" })),
         ));
     }
-    let doc = DocId(a.doc.clone());
+    let doc = doc_ref(api, &a.doc)?;
     let ids = a.node_ids.iter().map(|n| node_id(n)).collect::<Result<Vec<_>, _>>()?;
     let meta = api.doc_meta(&doc).map_err(tome_err)?;
     let passages = api.open(&doc, &ids).map_err(tome_err)?;

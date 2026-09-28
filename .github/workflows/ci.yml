@@ -121,6 +121,22 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # `tome` is off in the default binary. This job is the all-features check
+  # for the spike (not `desktop`: that needs the GUI libraries above).
+  tome:
+    name: tome feature
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --features tome -- -D warnings
+      - run: cargo test --workspace --features tome
+      - run: cargo clippy -p tome-tree --all-targets --all-features -- -D warnings
+      - run: cargo test -p tome-tree --all-features
+
   scrub:
     name: operator-topology grep gate
     runs-on: ubuntu-latest

@@ -4209,6 +4209,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tome-eval",
+ "tome-tree",
  "toml 1.1.5+spec-1.1.0",
  "yaml_serde",
 ]
@@ -8229,6 +8230,18 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "toml 1.1.5+spec-1.1.0",
+]
+
+[[package]]
+name = "tome-tree"
+version = "0.1.0"
+dependencies = [
+ "lopdf",
+ "pdf-extract",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
