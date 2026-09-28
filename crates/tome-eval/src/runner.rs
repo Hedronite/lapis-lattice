@@ -1,5 +1,5 @@
 //! Runs both arms per question with the same answerer and budget and writes
-//! `results.jsonl` + `summary.json` (schema `tome-eval-result` 0.2.0).
+//! `results.jsonl` + `summary.json` (schema `tome-eval-result` 0.3.0).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -113,6 +113,9 @@ impl Harness {
             index_dir: Some(t.index_dir.display().to_string()),
             summary_model: None,
             summary_temperature: None,
+            root_calls: Some(t.root_calls),
+            root_batch_size: Some(t.root_batch_size),
+            root_top_k: Some(t.root_top_k),
         }
     }
 
@@ -154,30 +157,28 @@ impl Harness {
         })
     }
 
-    /// Walk scores are returned even when the walk errors, so a fail-closed walk
-    /// still records what Jev said about each judged candidate.
+    /// The walk's own `judged`, `root_path` and `root_judge_calls` become the
+    /// record's `walk_scores`. A walk that errored returns no `Walk`, so its
+    /// `walk_scores` is `null` and the error is on the record.
     async fn retrieve_tome(&self, q: &Question) -> (Result<Retrieved, ErrorInfo>, Option<WalkScores>) {
         let judge = JevJudge::new(self.jev.clone(), tokio::runtime::Handle::current());
-        let (res, judge) = self.walk_tome(q, judge).await;
-        let scores = judge.map(|j| WalkScores::score_only(j.take_candidates(), FAIL_CLOSED_FLOOR));
-        (res, scores)
-    }
-
-    async fn walk_tome(
-        &self,
-        q: &Question,
-        judge: JevJudge,
-    ) -> (Result<Retrieved, ErrorInfo>, Option<JevJudge>) {
         let t = &self.cfg.tome;
-        let budget =
-            Budget { max_judge_calls: t.max_judge_calls, max_pages: t.max_open_pages, ..Budget::default() };
+        // Every field from `[tome]`: no `..Budget::default()`, so a new library
+        // field is a compile error here instead of a silent default.
+        let budget = Budget {
+            max_judge_calls: t.max_judge_calls,
+            max_pages: t.max_open_pages,
+            root_calls: t.root_calls,
+            root_batch_size: t.root_batch_size,
+            root_top_k: t.root_top_k,
+        };
         let tome = Arc::clone(&self.tome);
         // The library keys docs by PDF sha256; the path is only on DocMeta.
         let doc = match DocId::parse(&q.doc_sha256) {
             Ok(d) => d,
             Err(e) => {
                 let e = ErrorInfo { kind: "bad_input".into(), message: format!("doc_sha256: {e}") };
-                return (Err(e), Some(judge));
+                return (Err(e), None);
             }
         };
         let query = q.question.clone();
@@ -199,12 +200,13 @@ impl Harness {
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         let (meta, walk) = match walked {
             Ok(x) => x,
-            Err(e) => return (Err(ErrorInfo { kind: e.code().into(), message: e.to_string() }), Some(judge)),
+            Err(e) => return (Err(ErrorInfo { kind: e.code().into(), message: e.to_string() }), None),
         };
+        let scores = Some(WalkScores::from_walk(&walk, FAIL_CLOSED_FLOOR));
         if walk.passages.is_empty() {
             let e =
                 ErrorInfo { kind: "empty".into(), message: "walk returned no passages and no error".into() };
-            return (Err(e), Some(judge));
+            return (Err(e), scores);
         }
         let passages: Vec<PassageIn> = walk
             .passages
@@ -219,7 +221,6 @@ impl Harness {
         let mut pages: Vec<u32> = walk.passages.iter().map(|p| p.page).collect();
         pages.sort_unstable();
         pages.dedup();
-        let calls = judge.calls.load(std::sync::atomic::Ordering::Relaxed);
         let chars = judge.prompt_chars.load(std::sync::atomic::Ordering::Relaxed) as u64;
         let r = Retrieved {
             opened: Opened {
@@ -231,12 +232,13 @@ impl Harness {
             },
             passages,
             latency_ms: ms,
-            judge_calls: Some(walk.judge_calls.max(calls)),
+            // The library counts every call (batches, fill-ins, failed batches) since #34 af55f4d.
+            judge_calls: Some(walk.judge_calls),
             judge_prompt_tokens: Some(chars / 4),
             rerank_status: None,
             summary: Some((meta.summary_model, f64::from(meta.summary_temperature))),
         };
-        (Ok(r), Some(judge))
+        (Ok(r), scores)
     }
 
     pub async fn run_one(&self, run_id: &str, q: &Question, arm: Arm, git_sha: &str) -> ResultRecord {

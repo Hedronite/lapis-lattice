@@ -63,25 +63,35 @@ comes from `opencode session export`. OpenCode has no CLI flag for output tokens
 ## Tome arm
 
 Wired to the frozen `tome_tree` read surface (PR #32): `TomeIndex::open(<vault>/.lapis/tomes)`,
-then `meta` + `walk(&sha256, query, &JevJudge, Budget { max_judge_calls, max_pages })`.
+then `meta` + `walk(&sha256, query, &JevJudge, Budget { max_judge_calls, max_pages, root_calls,
+root_batch_size, root_top_k })`, every field read from `[tome]`.
 Docs are keyed by PDF sha256 (`doc_sha256` in `questions.jsonl`). `crates/tome-eval/src/contract.rs`
 re-exports the library types. Its only addition is an object-safe `TomeApi` trait, so the
 offline tests can swap in `FakeTome`.
 
 - Build the trees first (`lapis tome build <pdf>` with `--features tome`). A missing index dir
   stops the run before any question. An unbuilt doc is recorded as `unknown_doc`.
-- `JevJudge` scores one candidate at a time (0–3). **Spike scoring policy:** the walk ranks on
-  score only, with no confidence gate. Each record's `walk_scores` (schema 0.2.0) lists every
-  judged candidate's `score` and `confidence`. `would_fail_closed` marks walks that the old
-  0.6 gate would have stopped with `judge_unavailable`, and the summary counts them in
-  `would_fail_closed_at_0_6` (out of `walks_judged`). The floor stays 0.6 and is never tuned to
-  this data. Missing or out-of-range scores and an unreachable Jev are still `judge_unavailable`.
-  This is an eval-side adapter; it moves to `Walk`'s per-candidate fields and lapis' `[tome]`
-  floor once the crate lands them.
+- `JevJudge` speaks the same System One protocol as lapis' `JevJudge` (`src/jev.rs`, feature
+  `tome`). `score_batch` is **one call per batch** and `batch_cost` is 1, so the default
+  `root_calls = 4` at `root_batch_size = 16` covers 64 roots. The batch request is lapis'
+  `src/jev/batch.rs` itself, compiled into tome-eval with `#[path]`, so it cannot drift. Ids a
+  batch reply leaves out come back `None` and the walk judges them one at a time, charging each
+  call (#34 af55f4d). `tokens.judge_calls` is the library's `Walk::judge_calls`. `assess` (one candidate: the shipped
+  rerank questions, score plus minimum confidence) and its prompt are mirrored from private
+  functions in `src/jev.rs`; keep them in step.
+- **Spike scoring policy:** the walk ranks on score only, with no confidence gate. Each record's
+  `walk_scores` comes from the walk itself: `candidates` is `Walk::judged` (every scored node,
+  roots included, with `score` and `confidence`), plus `root_path` (`batch` |
+  `lexical_fallback`) and `root_judge_calls` (schema 0.3.0). `would_fail_closed` marks walks that
+  the old 0.6 gate would have stopped with `judge_unavailable`, and the summary counts them in
+  `would_fail_closed_at_0_6` (out of `walks_judged`). A walk that errors returns no `Walk`, so
+  its `walk_scores` is null. The floor stays 0.6 and is never tuned to this data. Missing or
+  out-of-range scores and an unreachable Jev are still `judge_unavailable`.
 - `walk` runs on a blocking thread and the judge blocks on the runtime handle, so the binary
   uses a **multi-thread** tokio runtime on purpose.
 - Every tome record carries `tome.summary_model` / `tome.summary_temperature` from the doc's
-  `DocMeta`, plus `builder_version`, beam, budgets and `index_dir`.
+  `DocMeta`, plus `builder_version`, beam, budgets (including `root_calls`, `root_batch_size`
+  and `root_top_k`, 0.3.0) and `index_dir`.
 
 The MCP tools `tome_tree` / `tome_open` exist only with `--features tome` **and**
 `LAPIS_TOME=1` (off by default). `doc` must be exactly 64 lowercase hex characters. Anything
