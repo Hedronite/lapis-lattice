@@ -236,6 +236,9 @@ impl TomeApi for FakeTome {
             passages,
             judge_calls: calls,
             skipped: vec![],
+            judged: vec![],
+            root_judge_calls: 0,
+            root_path: tome_tree::RootPath::Batch,
         })
     }
 
