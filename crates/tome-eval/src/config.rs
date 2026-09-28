@@ -45,6 +45,16 @@ impl BudgetCfg {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BaselineCfg {
+    /// `http`: GET `<lattice_url>/search` (the lattice service itself; exposes
+    /// `retrieve_k` and `domain`). `lapis`: `lapis --json search` (no retrieve_k).
+    #[serde(default = "default_transport")]
+    pub transport: String,
+    /// Per-modality candidate pool for `transport = "http"` (lattice allows 10..=200).
+    #[serde(default = "default_retrieve_k")]
+    pub retrieve_k: u32,
+    /// Vault-relative PDF path → lattice `domain` filter (narrows the vault-wide search).
+    #[serde(default)]
+    pub domain: std::collections::BTreeMap<String, String>,
     pub lapis_bin: String,
     pub lattice_url: String,
     /// `hybrid` | `bm25` | `vector`.
@@ -57,6 +67,14 @@ pub struct BaselineCfg {
     /// chunk_id → pages join map exported read-only from lattice.db.
     pub chunk_map: PathBuf,
     pub indexer: IndexerCfg,
+}
+
+fn default_transport() -> String {
+    "http".into()
+}
+
+fn default_retrieve_k() -> u32 {
+    200
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -130,6 +148,12 @@ impl EvalConfig {
         if self.baseline.retrieve_limit == 0 || self.baseline.retrieve_limit > 50 {
             return Err("baseline.retrieve_limit must be 1..=50".into());
         }
+        if !matches!(self.baseline.transport.as_str(), "http" | "lapis") {
+            return Err(format!("baseline.transport must be http|lapis, got {}", self.baseline.transport));
+        }
+        if !(10..=200).contains(&self.baseline.retrieve_k) {
+            return Err("baseline.retrieve_k must be 10..=200".into());
+        }
         if self.baseline.top_k == 0 || self.baseline.top_k > self.baseline.retrieve_limit {
             return Err("baseline.top_k must be 1..=retrieve_limit".into());
         }
@@ -163,6 +187,14 @@ mod tests {
         assert_eq!(c.answer.temperature, 0.0);
         assert!(!c.answer.model.is_empty());
         assert!(c.baseline.chunk_map.ends_with("data/chunk-pages.jsonl"));
+        assert_eq!((c.baseline.transport.as_str(), c.baseline.retrieve_k), ("http", 200));
+        let qs = crate::questions::load(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/tome/questions.jsonl"),
+        )
+        .unwrap();
+        for q in qs {
+            assert!(c.baseline.domain.contains_key(&q.doc), "no [baseline.domain] entry for {}", q.doc);
+        }
     }
 
     #[test]

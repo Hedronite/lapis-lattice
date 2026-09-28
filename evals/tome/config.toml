@@ -16,8 +16,12 @@ timeout_s = 180
 context_budget_tokens = 12000
 
 [baseline]
-# Arm A = `lapis search` over the lattice HTTP backend (Python tome_indexer.py chunks),
-# same-PDF post-filter, top_k kept, Jev shadow rerank replayed on that page.
+# Arm A = the lattice HTTP backend (Python tome_indexer.py chunks): GET /search with the
+# PDF's domain filter and retrieve_k 200, same-PDF post-filter, top_k kept, Jev shadow
+# rerank replayed on that page. The search has no per-doc filter; with a vault-wide pool of
+# 50 the tome PDFs are often absent (smoke 2026-09-28: sre-01 → 0 SRE hits), hence domain + retrieve_k.
+transport = "http"                             # http | lapis (lapis CLI cannot set retrieve_k)
+retrieve_k = 200                               # lattice per-modality pool (10..=200)
 lapis_bin = "lapis"
 lattice_url = "http://127.0.0.1:8080"          # lattice uvicorn serve:app (localhost only)
 mode = "hybrid"
@@ -25,6 +29,12 @@ top_k = 8
 retrieve_limit = 50
 rerank_jev = true
 chunk_map = "data/chunk-pages.jsonl"           # chunk_id → page_start/page_end, exported read-only from lattice.db
+
+[baseline.domain]                              # PDF → lattice documents.domain (read-only lookup)
+"Archmagus-Stack/09-Tomes/01-Earth-DevOps/Site Reliability Engineering.pdf" = "01-Earth-DevOps"
+"Archmagus-Stack/09-Tomes/01-Earth-DevOps/The Kubernetes Book - Poulton.pdf" = "01-Earth-DevOps"
+"Archmagus-Stack/09-Tomes/06-Wood-DataOps/Database Internals - Petrov.pdf" = "06-Wood-DataOps"
+"Archmagus-Stack/09-Tomes/07-Aether-QuantOps/Applied-Finance/Advances in Financial Machine Learning - Lopez de Prado.pdf" = "07-Aether-QuantOps"
 
 [baseline.indexer]
 path = "projects/atrium-lattice/tome_indexer.py"   # vault-relative, on the host that runs the lattice service

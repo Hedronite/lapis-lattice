@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use tome_eval::answer::Answerer;
 use tome_eval::baseline::ChunkMap;
 use tome_eval::config::EvalConfig;
-use tome_eval::contract::{TomeApi, TomeIndex};
+use tome_eval::contract::{NoTomeArm, TomeApi, TomeIndex};
 use tome_eval::jev::SystemOne;
 use tome_eval::record::Arm;
 use tome_eval::runner::{Harness, RunOpts};
@@ -143,21 +143,19 @@ fn real_main() -> Result<ExitCode, String> {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let chunks = ChunkMap::load(&cfg.baseline.chunk_map)?;
-            let index_dir = resolve_index_dir(&cfg.tome.index_dir, vault)?;
-            if arms.contains(&Arm::Tome) && !index_dir.is_dir() {
-                return Err(format!(
-                    "tome index {} does not exist; build trees with `lapis tome build` first, or pass --arms baseline",
-                    index_dir.display()
-                ));
-            }
-            // `TomeIndex::open` creates the dir; it is only reached when the dir exists or
-            // the tome arm is off (then nothing is walked and the empty index is unused).
-            let tome: Arc<dyn TomeApi> = Arc::new(if index_dir.is_dir() {
-                TomeIndex::open(&index_dir).map_err(|e| format!("{}: {e}", e.code()))?
+            // The tome index is only resolved and opened when the tome arm runs.
+            let tome: Arc<dyn TomeApi> = if arms.contains(&Arm::Tome) {
+                let index_dir = resolve_index_dir(&cfg.tome.index_dir, vault)?;
+                if !index_dir.is_dir() {
+                    return Err(format!(
+                        "tome index {} does not exist; build trees with `lapis tome build` first, or pass --arms baseline",
+                        index_dir.display()
+                    ));
+                }
+                Arc::new(TomeIndex::open(&index_dir).map_err(|e| format!("{}: {e}", e.code()))?)
             } else {
-                TomeIndex::open(&std::env::temp_dir().join("tome-eval-empty-index"))
-                    .map_err(|e| format!("{}: {e}", e.code()))?
-            });
+                Arc::new(NoTomeArm)
+            };
             let harness = Harness {
                 answerer: Answerer::from_config(&cfg.answer)?,
                 jev: SystemOne::from_config(&cfg.jev),

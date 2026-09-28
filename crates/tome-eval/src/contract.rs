@@ -48,6 +48,37 @@ impl TomeApi for TomeIndex {
     }
 }
 
+/// Placeholder when the tome arm is not requested (`--arms baseline`): never walked.
+/// Any call is a harness bug and fails closed with `parse`.
+pub struct NoTomeArm;
+
+impl NoTomeArm {
+    fn err<T>() -> Result<T> {
+        Err(TomeError::Parse("tome arm not requested for this run".into()))
+    }
+}
+
+impl TomeApi for NoTomeArm {
+    fn docs(&self) -> Result<Vec<DocMeta>> {
+        Self::err()
+    }
+    fn meta(&self, _: &DocId) -> Result<DocMeta> {
+        Self::err()
+    }
+    fn tree(&self, _: &DocId, _: Option<&NodeId>, _: Option<u8>) -> Result<Vec<Node>> {
+        Self::err()
+    }
+    fn open(&self, _: &DocId, _: &[NodeId]) -> Result<Vec<Passage>> {
+        Self::err()
+    }
+    fn walk(&self, _: &DocId, _: &str, _: &dyn Judge, _: Budget) -> Result<Walk> {
+        Self::err()
+    }
+    fn backend_name(&self) -> &'static str {
+        "none"
+    }
+}
+
 /// `true` for exactly 64 lowercase hex characters (a PDF sha256 doc id).
 ///
 /// Callers check this before handing a doc id to the library: until the library's own

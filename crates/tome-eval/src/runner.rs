@@ -86,6 +86,9 @@ impl Harness {
                 retrieve_limit: b.retrieve_limit,
                 per_doc: false,
                 doc_filter: "same_pdf_post_filter".into(),
+                transport: Some(b.transport.clone()),
+                retrieve_k: (b.transport == "http").then_some(b.retrieve_k),
+                domain: None,
             },
             rerank_jev: RerankSettings {
                 enabled: b.rerank_jev,
@@ -116,7 +119,12 @@ impl Harness {
     async fn retrieve_baseline(&self, q: &Question) -> Result<Retrieved, ErrorInfo> {
         let b = &self.cfg.baseline;
         let err = |e: baseline::BaselineError| ErrorInfo { kind: e.kind().into(), message: e.to_string() };
-        let (hits, search_ms) = baseline::lapis_search(b, &q.question).await.map_err(err)?;
+        let domain = b.domain.get(&q.doc).map(String::as_str);
+        let (hits, search_ms) = match b.transport.as_str() {
+            "lapis" => baseline::lapis_search(b, &q.question).await,
+            _ => baseline::http_search(b, &q.question, domain).await,
+        }
+        .map_err(err)?;
         let mut page = baseline::same_pdf(hits, &q.doc, b.top_k);
         if page.is_empty() {
             return Err(err(baseline::BaselineError::NoHitsForDoc(b.retrieve_limit)));
@@ -256,6 +264,9 @@ impl Harness {
             }
         };
         rec.baseline = self.baseline_settings(r.rerank_status.clone());
+        if arm == Arm::Baseline {
+            rec.baseline.search.domain = self.cfg.baseline.domain.get(&q.doc).cloned();
+        }
         if let Some((model, temp)) = &r.summary {
             rec.tome.summary_model = Some(model.clone());
             rec.tome.summary_temperature = Some(*temp);

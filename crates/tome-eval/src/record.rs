@@ -110,6 +110,15 @@ pub struct SearchSettings {
     pub retrieve_limit: u32,
     pub per_doc: bool,
     pub doc_filter: String,
+    /// `http` (lattice `/search`) | `lapis` (`lapis --json search`).
+    #[serde(default)]
+    pub transport: Option<String>,
+    /// Lattice per-modality candidate pool (http only).
+    #[serde(default)]
+    pub retrieve_k: Option<u32>,
+    /// Lattice `domain` filter applied for this question's PDF.
+    #[serde(default)]
+    pub domain: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

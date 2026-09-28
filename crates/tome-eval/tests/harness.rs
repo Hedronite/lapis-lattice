@@ -21,6 +21,8 @@ fn cfg() -> EvalConfig {
     let mut c = EvalConfig::load(&p).unwrap();
     c.answer.provider = "fake".into();
     c.baseline.lapis_bin = "/nonexistent/lapis".into();
+    // Nothing listens on port 9: the http baseline must fail as lattice_down, not empty.
+    c.baseline.lattice_url = "http://127.0.0.1:9".into();
     c
 }
 
@@ -89,10 +91,11 @@ async fn harness_writes_schema_valid_records_for_both_arms_and_the_probe() {
     let s: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("summary.json")).unwrap()).unwrap();
     assert_eq!(c.validate(&s), Vec::<String>::new());
 
-    // Baseline could not spawn lapis: explicit error, never an empty success.
+    // Baseline could not reach the lattice: explicit error, never an empty success.
     assert_eq!(recs[0]["arm"], "baseline");
     assert_eq!(recs[0]["correctness"], "error");
-    assert_eq!(recs[0]["error"]["kind"], "internal");
+    assert_eq!(recs[0]["error"]["kind"], "lattice_down");
+    assert_eq!(recs[0]["baseline"]["search"]["transport"], "http");
     // Tome walked to the gamma leaf, answered, and was graded exact.
     assert_eq!(recs[1]["arm"], "tome");
     assert_eq!(recs[1]["correctness"], "exact", "{}", recs[1]);
