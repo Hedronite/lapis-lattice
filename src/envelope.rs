@@ -51,6 +51,9 @@ pub struct ErrorBody {
     pub kind: &'static str,
     pub message: String,
     pub exit: i32,
+    /// Tome failures. Same string as `kind` (`no_structure`, `over_budget`, …).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -66,10 +69,14 @@ pub fn ok<T: Serialize>(data: T, meta: Meta) -> Envelope<T> {
 }
 
 pub fn err(e: &LapisError, latency_ms: f64) -> Envelope<Value> {
+    let code = match e {
+        LapisError::Tome { code, .. } => Some(*code),
+        _ => None,
+    };
     Envelope {
         ok: false,
         data: None,
-        error: Some(ErrorBody { kind: e.kind(), message: e.message(), exit: e.exit_code() }),
+        error: Some(ErrorBody { kind: e.kind(), message: e.message(), exit: e.exit_code(), code }),
         meta: Meta { latency_ms, ..Meta::default() },
     }
 }

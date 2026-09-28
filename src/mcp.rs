@@ -54,9 +54,10 @@ pub struct LapisServer {
 fn fail(e: LapisError) -> ErrorData {
     let msg = e.to_string();
     match e {
-        LapisError::Usage(_) | LapisError::Path(_) | LapisError::HttpOnly { .. } => {
-            ErrorData::invalid_params(msg, None)
-        }
+        LapisError::Usage(_)
+        | LapisError::Path(_)
+        | LapisError::HttpOnly { .. }
+        | LapisError::Tome { .. } => ErrorData::invalid_params(msg, None),
         LapisError::LatticeDown(_) | LapisError::Internal(_) => ErrorData::internal_error(msg, None),
     }
 }

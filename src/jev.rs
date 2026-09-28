@@ -167,6 +167,15 @@ impl Transport {
         http_from_env()
     }
 
+    /// Why this transport cannot judge, when it is [`Transport::None`].
+    #[cfg(feature = "tome")]
+    pub fn missing_reason(&self) -> Option<&'static str> {
+        match self {
+            Transport::None { reason } => Some(*reason),
+            _ => None,
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Transport::None { .. } => "none",
@@ -453,6 +462,61 @@ pub fn hit_line(hit: &Hit) -> Option<String> {
     }
 }
 
+/// Scores tome-tree candidates with the existing System One transport.
+///
+/// Relevance is the shipped 0–3 score. Unavailable or uncertain answers are
+/// errors: the walk must not guess a path.
+#[cfg(feature = "tome")]
+pub struct JevJudge {
+    transport: Transport,
+}
+
+#[cfg(feature = "tome")]
+impl JevJudge {
+    pub fn resolve() -> Self {
+        Self { transport: Transport::resolve() }
+    }
+}
+
+#[cfg(feature = "tome")]
+impl tome_tree::Judge for JevJudge {
+    fn score(&self, query: &str, candidate: &tome_tree::Candidate) -> tome_tree::Result<u8> {
+        if let Some(reason) = self.transport.missing_reason() {
+            return Err(tome_tree::TomeError::JudgeUnavailable { reason: reason.to_string() });
+        }
+        let state = format!(
+            "Search query: {query}\n\nSection: {}\nPages: {}-{}\n\nLead:\n{}",
+            candidate.title, candidate.page_start, candidate.page_end, candidate.lead
+        );
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| tome_tree::TomeError::JudgeUnavailable { reason: "no tokio runtime".into() })?;
+        let body = tokio::task::block_in_place(|| handle.block_on(self.transport.decide(&state)));
+        match body {
+            Err(reason) => Err(tome_tree::TomeError::JudgeUnavailable { reason }),
+            Ok(body) => relevance_score(&body),
+        }
+    }
+}
+
+#[cfg(feature = "tome")]
+fn relevance_score(body: &Value) -> tome_tree::Result<u8> {
+    let judged = judgment_from_answers(0, body);
+    if judged.status != "judged" {
+        return Err(tome_tree::TomeError::JudgeUnavailable {
+            reason: format!("systemone {}", judged.status),
+        });
+    }
+    let Some(score) = judged.relevance else {
+        return Err(tome_tree::TomeError::JudgeUnavailable { reason: "relevance score missing".into() });
+    };
+    if !(0.0..=3.0).contains(&score) {
+        return Err(tome_tree::TomeError::JudgeUnavailable {
+            reason: format!("relevance {score} outside 0..=3"),
+        });
+    }
+    Ok(score.round() as u8)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,4 +708,29 @@ mod tests {
     }
 
     static ENV: Mutex<()> = Mutex::new(());
+
+    #[cfg(feature = "tome")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tome_judge_maps_relevance_and_refuses_uncertain() {
+        let candidate = tome_tree::Candidate {
+            id: tome_tree::NodeId::from("0001"),
+            title: "Chapter".into(),
+            lead: "lead text".into(),
+            page_start: 1,
+            page_end: 2,
+            level: 1,
+        };
+        let judge = JevJudge {
+            transport: Transport::Fake(FakeScript::replies(vec![judged_body(0.9, 3.0, "supports", 0.99)])),
+        };
+        assert_eq!(tome_tree::Judge::score(&judge, "where", &candidate).unwrap(), 3);
+
+        let judge = JevJudge { transport: Transport::Fake(FakeScript::replies(vec![json!({})])) };
+        let err = tome_tree::Judge::score(&judge, "where", &candidate).unwrap_err();
+        assert_eq!(err.code(), "judge_unavailable");
+
+        let judge = JevJudge { transport: Transport::None { reason: "typesafe_key_absent" } };
+        let err = tome_tree::Judge::score(&judge, "where", &candidate).unwrap_err();
+        assert!(err.to_string().contains("typesafe_key_absent"));
+    }
 }
