@@ -26,3 +26,7 @@ sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time"] }
 toml = "1"
+
+[dev-dependencies]
+# Generated outline PDFs for the real-index harness test (tome-tree's tests/support/pdf.rs).
+lopdf = { version = "0.42", default-features = false }

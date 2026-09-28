@@ -2,7 +2,7 @@
 //! children for `walk`, and replays lapis' shadow rerank on the baseline page.
 //! It never writes an answer. Missing transport or low confidence ⇒ explicit
 //! `unavailable` / `uncertain`, never a guessed grade. The walk judge alone ranks
-//! on score with no confidence gate and records confidence (spike policy).
+//! on score with no confidence gate (spike policy); `Walk::judged` records confidence.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -11,8 +11,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::config::JevCfg;
-use crate::contract::{Candidate, Judge, TomeError};
-use crate::record::{CandidateScore, Correctness};
+use crate::contract::{Assessment, Candidate, Judge, TomeError};
+use crate::record::Correctness;
 use lapis_lattice::Hit;
 
 #[derive(Debug, Clone)]
@@ -229,62 +229,53 @@ impl SystemOne {
 
 // ---- walk judge ------------------------------------------------------------
 
-pub fn child_questions() -> Value {
-    json!({
-        "section": { "type": "score",
-            "instructions": "How likely is it that this book section contains the answer to the question?",
-            "criteria": [ "Unrelated to the question", "Shares terms only; unlikely to hold the answer",
-                          "Related; may hold part of the answer", "Very likely holds the answer" ] }
-    })
-}
-
-pub fn child_state(query: &str, c: &Candidate) -> String {
-    format!(
-        "Question: {query}\n\nSection: {}\nPages: {}-{}\nLead:\n{}",
-        c.title,
-        c.page_start,
-        c.page_end,
-        c.lead.chars().take(1200).collect::<String>()
-    )
-}
+/// The batch request lapis sends. This is lapis' own `src/jev/batch.rs`, compiled
+/// into this crate from the same file, so the eval judge and `lapis --features tome`
+/// cannot drift apart. It needs only `tome_tree`, serde and serde_json. The flake
+/// builds from the repo root (`src = ./.`), like the schema `include_str!`.
+#[path = "../../../src/jev/batch.rs"]
+mod batch;
 
 /// Fixed reporting floor for `would_fail_closed_at_0_6` (Eli ruling 2026-09-28).
 /// It matches `[jev] confidence_floor` and is never tuned to eval data.
 pub const FAIL_CLOSED_FLOOR: f64 = 0.6;
 
-/// `tome_tree::Judge` over System One. The trait is sync, so the harness runs `walk`
+/// `tome_tree::Judge` over System One, the same protocol as lapis' `JevJudge`
+/// (`src/jev.rs`, feature `tome`). The trait is sync, so the harness runs `walk`
 /// on a blocking thread of a multi-thread runtime and this blocks on the handle.
 /// Jev only scores; it never answers.
 ///
+/// - `assess`: one candidate, the shipped rerank questions, score 0..=3 plus the
+///   minimum reported confidence.
+/// - `score_batch`: one System One call per batch (`batch::state` +
+///   `batch::questions`). Ids the reply did not score are judged again one at a
+///   time. A reply with no array and no per-id score is `parse`, and the walk
+///   pre-ranks.
+/// - `batch_cost` is 1, so a 16-root batch spends one of `root_calls`.
+///
 /// Spike policy (Eli ruling 2026-09-28): the walk ranks on score ONLY, with no
-/// confidence gate. Every candidate's score and confidence is recorded, so the
-/// run can report how many walks *would* have failed closed at the 0.6 floor.
-/// This is a small eval-side adapter. Once `tome_tree::Walk` carries per-candidate
-/// score/confidence and lapis has a `[tome]` floor with record-and-down-weight
-/// mode (crate agent), read them from `Walk` instead. A missing or out-of-range
-/// score is malformed output, not low confidence, so it still fails closed.
+/// confidence gate. Per-candidate score and confidence come from `Walk::judged`.
+/// A missing or out-of-range score, or a dead transport, is `judge_unavailable`.
 pub struct JevJudge {
     pub so: SystemOne,
     pub handle: tokio::runtime::Handle,
+    /// System One calls actually sent. A batch is one; each fill-in `assess` is one more.
     pub calls: AtomicU32,
     pub prompt_chars: AtomicU32,
-    pub candidates: Mutex<Vec<CandidateScore>>,
 }
 
 impl JevJudge {
     pub fn new(so: SystemOne, handle: tokio::runtime::Handle) -> Self {
-        Self {
-            so,
-            handle,
-            calls: AtomicU32::new(0),
-            prompt_chars: AtomicU32::new(0),
-            candidates: Mutex::new(Vec::new()),
-        }
+        Self { so, handle, calls: AtomicU32::new(0), prompt_chars: AtomicU32::new(0) }
     }
 
-    /// Candidates judged so far, in walk order.
-    pub fn take_candidates(&self) -> Vec<CandidateScore> {
-        self.candidates.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
+    fn decide(&self, state: &str, questions: Value) -> crate::contract::Result<Value> {
+        if let Transport::None { reason } = &self.so.transport {
+            return Err(unavailable(reason.clone()));
+        }
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.prompt_chars.fetch_add(state.len() as u32, Ordering::Relaxed);
+        self.handle.block_on(self.so.decide(state, questions)).map_err(unavailable)
     }
 }
 
@@ -294,36 +285,63 @@ fn unavailable(reason: impl Into<String>) -> TomeError {
 
 impl Judge for JevJudge {
     fn score(&self, query: &str, c: &Candidate) -> crate::contract::Result<u8> {
-        if let Transport::None { reason } = &self.so.transport {
-            return Err(unavailable(reason.clone()));
+        Ok(self.assess(query, c)?.score)
+    }
+
+    fn assess(&self, query: &str, c: &Candidate) -> crate::contract::Result<Assessment> {
+        let body = self.decide(&candidate_state(query, c), rerank_questions())?;
+        relevance_assessment(&body)
+    }
+
+    fn score_batch(&self, query: &str, candidates: &[Candidate]) -> crate::contract::Result<Vec<Assessment>> {
+        if candidates.len() <= 1 {
+            return candidates.iter().map(|c| self.assess(query, c)).collect();
         }
-        let state = child_state(query, c);
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        self.prompt_chars.fetch_add(state.len() as u32, Ordering::Relaxed);
-        let body = self.handle.block_on(self.so.decide(&state, child_questions())).map_err(unavailable)?;
-        let a = answers(&body);
-        let score = a.pointer("/section/score").and_then(Value::as_f64);
-        let conf = a.pointer("/section/confidence").and_then(Value::as_f64);
-        let ok = score.filter(|s| (0.0..=3.0).contains(s)).map(|s| s.round() as u8);
-        if let Ok(mut v) = self.candidates.lock() {
-            v.push(CandidateScore {
-                node_id: c.id.0.clone(),
-                title: c.title.clone(),
-                page_start: c.page_start,
-                page_end: c.page_end,
-                score: ok,
-                confidence: conf,
+        let body = self.decide(&batch::state(query, candidates), batch::questions(candidates))?;
+        let parsed = batch::assessments(&body, candidates)?;
+        let mut out = Vec::with_capacity(candidates.len());
+        for (c, slot) in candidates.iter().zip(parsed) {
+            out.push(match slot {
+                Some(a) => a,
+                None => self.assess(query, c)?,
             });
         }
-        match (ok, score) {
-            (Some(s), _) => Ok(s),
-            (None, Some(s)) => Err(unavailable(format!("score {s} outside 0..=3 for {}", c.id))),
-            (None, None) => Err(unavailable(format!(
-                "no score for {} (confidence={conf:?}, floor={})",
-                c.id, self.so.floor
-            ))),
-        }
+        Ok(out)
     }
+
+    fn batch_cost(&self, _candidates: &[Candidate]) -> u32 {
+        1
+    }
+}
+
+/// Mirror of lapis `src/jev.rs` `candidate_state` (a private fn there; keep the two
+/// in step). A TOC node is not a retrieved chunk, so the prompt says so.
+pub fn candidate_state(query: &str, c: &Candidate) -> String {
+    format!(
+        "Search query: {query}\n\n\
+         This is a table-of-contents node, not a retrieved passage. \
+         The lead is the opening of the section. Child section titles are \
+         listed under the lead when this node has children.\n\n\
+         Section: {}\nPages: {}-{}\n\nLead:\n{}",
+        c.title, c.page_start, c.page_end, c.lead
+    )
+}
+
+/// Mirror of lapis `src/jev.rs` `relevance_assessment`: the 0..=3 relevance score
+/// and the minimum reported confidence. Low confidence is not an error; a missing
+/// or out-of-range score is.
+pub fn relevance_assessment(body: &Value) -> crate::contract::Result<Assessment> {
+    let a = answers(body);
+    let score = a.pointer("/relevance/score").and_then(Value::as_f64);
+    let confs = ["/answers/confidence", "/relevance/confidence", "/cite/confidence"];
+    let confidence = confs.iter().filter_map(|p| a.pointer(p).and_then(Value::as_f64)).reduce(f64::min);
+    let Some(score) = score else {
+        return Err(unavailable("relevance score missing"));
+    };
+    if !(0.0..=3.0).contains(&score) {
+        return Err(unavailable(format!("relevance {score} outside 0..=3")));
+    }
+    Ok(Assessment { score: score.round() as u8, confidence })
 }
 
 #[cfg(test)]
@@ -389,38 +407,33 @@ mod tests {
         assert_eq!(hits[0].path, "a");
     }
 
-    #[test]
-    fn walk_judge_ranks_on_score_only() {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        let c = Candidate {
-            id: crate::contract::NodeId("0001".into()),
-            title: "t".into(),
+    fn cand(id: &str) -> Candidate {
+        Candidate {
+            id: crate::contract::NodeId(id.into()),
+            title: format!("t{id}"),
             lead: "l".into(),
             page_start: 1,
             page_end: 2,
             level: 1,
-        };
-        let j = JevJudge::new(
-            SystemOne::fake(vec![json!({"section":{"score":2,"confidence":0.9}})]),
-            rt.handle().clone(),
-        );
-        assert_eq!(j.score("q", &c).unwrap(), 2);
-        let j = JevJudge::new(
-            SystemOne::fake(vec![json!({"section":{"score":3,"confidence":0.2}})]),
-            rt.handle().clone(),
-        );
-        assert_eq!(j.score("q", &c).unwrap(), 3, "score-only: low confidence is recorded, not gated");
-        let rec = j.take_candidates();
-        assert_eq!((rec[0].score, rec[0].confidence), (Some(3), Some(0.2)));
-        assert!(rec[0].below(FAIL_CLOSED_FLOOR));
-        let j =
-            JevJudge::new(SystemOne::fake(vec![json!({"section":{"confidence":0.9}})]), rt.handle().clone());
+        }
+    }
+
+    fn judge(rt: &tokio::runtime::Runtime, replies: Vec<Value>) -> JevJudge {
+        JevJudge::new(SystemOne::fake(replies), rt.handle().clone())
+    }
+
+    #[test]
+    fn walk_judge_assesses_on_score_only() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let c = cand("0001");
+        let a = judge(&rt, vec![rr(0.9, 2.0, 0.9)]).assess("q", &c).unwrap();
+        assert_eq!((a.score, a.confidence), (2, Some(0.9)));
+        let low = json!({"answers":{"answers":{"noul":0.9,"confidence":0.8},"relevance":{"score":3,"confidence":0.2}}});
+        let a = judge(&rt, vec![low]).assess("q", &c).unwrap();
+        assert_eq!((a.score, a.confidence), (3, Some(0.2)), "low confidence is recorded, not gated");
+        let j = judge(&rt, vec![json!({"relevance":{"confidence":0.9}})]);
         assert_eq!(j.score("q", &c).unwrap_err().code(), "judge_unavailable", "missing score fails closed");
-        assert_eq!(j.take_candidates()[0].score, None);
-        let j = JevJudge::new(
-            SystemOne::fake(vec![json!({"section":{"score":4,"confidence":0.9}})]),
-            rt.handle().clone(),
-        );
+        let j = judge(&rt, vec![rr(0.9, 4.0, 0.9)]);
         assert_eq!(j.score("q", &c).unwrap_err().code(), "judge_unavailable", "1..=4 scale fails closed");
         let none = SystemOne {
             transport: Transport::None { reason: "k".into() },
@@ -429,5 +442,45 @@ mod tests {
         };
         let j = JevJudge::new(none, rt.handle().clone());
         assert_eq!(j.score("q", &c).unwrap_err().code(), "judge_unavailable");
+        assert_eq!(j.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn score_batch_is_one_call_and_fills_missing_ids() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let cs = [cand("0001"), cand("0002"), cand("0003")];
+        let reply = json!({"answers":[
+            {"id":"0001","score":1,"confidence":0.8},
+            {"id":"0003","score":3,"confidence":0.5}
+        ]});
+        let j = judge(&rt, vec![reply, rr(0.9, 2.0, 0.7)]);
+        assert_eq!(j.batch_cost(&cs), 1);
+        let got = j.score_batch("q", &cs).unwrap();
+        let got: Vec<(u8, Option<f64>)> = got.iter().map(|a| (a.score, a.confidence)).collect();
+        assert_eq!(got, vec![(1, Some(0.8)), (2, Some(0.7)), (3, Some(0.5))]);
+        assert_eq!(j.calls.load(Ordering::Relaxed), 2, "one batch call plus one fill-in for 0002");
+
+        let full = json!([
+            {"id":"0001","score":0,"confidence":0.9},
+            {"id":"0002","score":0,"confidence":0.9},
+            {"id":"0003","score":2,"confidence":0.9}
+        ]);
+        let j = judge(&rt, vec![full]);
+        assert_eq!(j.score_batch("q", &cs).unwrap()[2].score, 2);
+        assert_eq!(j.calls.load(Ordering::Relaxed), 1);
+
+        let j = judge(&rt, vec![json!({"relevance":{"score":3,"confidence":0.9}})]);
+        assert_eq!(j.score_batch("q", &cs).unwrap_err().code(), "parse", "a single-hit body is not a batch");
+    }
+
+    #[test]
+    fn batch_request_matches_lapis() {
+        let cs = [cand("0001"), cand("0002")];
+        let s = batch::state("where is it", &cs);
+        assert!(s.starts_with("Search query: where is it\n\n"));
+        assert!(s.contains("id: 0002\ntitle: t0002\npages: 1-2\n"));
+        let q = batch::questions(&cs);
+        assert_eq!(q.as_object().unwrap().keys().collect::<Vec<_>>(), vec!["0001", "0002"]);
+        assert_eq!(q["0001"]["type"], "score");
     }
 }
