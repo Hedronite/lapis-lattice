@@ -1,23 +1,63 @@
 //! Public tree types. Field names and JSON spellings are frozen for MCP.
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::error::TomeError;
+use crate::error::{Result, TomeError};
 
 /// Lowercase hex SHA-256 of the PDF bytes. This is the doc id.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+///
+/// The inner string is private. [`DocId::parse`] accepts 64 hex characters
+/// (case-insensitive) and stores them lowercase. Anything else, including
+/// `../`, is rejected so the id can be used as a single file name.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
-pub struct DocId(pub String);
+pub struct DocId(String);
 
 impl DocId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// 64 hex characters. Uppercase is folded. Path characters are rejected.
+    pub fn parse(raw: &str) -> Result<Self> {
+        let s = raw.trim().to_ascii_lowercase();
+        if s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
+            Ok(DocId(s))
+        } else {
+            let shown: String = raw.chars().take(80).collect();
+            Err(TomeError::Parse(format!("doc id must be 64 hex characters, got {shown}")))
+        }
+    }
+
+    /// `sha256` from this crate's hasher. Debug-checked, not a user parser.
+    pub(crate) fn from_verified(hex: String) -> Self {
+        debug_assert!(
+            hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+            "from_verified got {hex}"
+        );
+        DocId(hex)
+    }
+
+    pub(crate) fn checked(&self) -> Result<&str> {
+        if self.0.len() == 64 && self.0.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            Ok(&self.0)
+        } else {
+            Err(TomeError::Parse("doc id must be 64 lowercase hex".into()))
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DocId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        DocId::parse(&s).map_err(D::Error::custom)
+    }
 }
 
 impl From<&str> for DocId {
     fn from(s: &str) -> Self {
-        DocId(s.trim().to_ascii_lowercase())
+        DocId::parse(s).unwrap_or_else(|err| panic!("DocId::from: {err}"))
     }
 }
 
@@ -149,7 +189,7 @@ impl SummaryModel {
         format!("{}/{}", self.provider.trim(), self.model.trim())
     }
 
-    pub(crate) fn check(&self) -> Result<(), TomeError> {
+    pub(crate) fn check(&self) -> Result<()> {
         if self.provider.trim().is_empty() || self.model.trim().is_empty() {
             return Err(TomeError::Parse(
                 "summary model is empty; set [tome] provider and model in config".into(),

@@ -132,7 +132,7 @@ fn bad_input(msg: String) -> ErrorData {
 /// (no trimming, no case folding), so no caller string can reach a filesystem path.
 fn doc_id(raw: &str) -> Result<DocId, ErrorData> {
     if is_doc_sha256(raw) {
-        Ok(DocId(raw.to_string()))
+        DocId::parse(raw).map_err(tome_err)
     } else {
         Err(bad_input(format!("doc must be the PDF sha256 (64 lowercase hex characters), got {raw:?}")))
     }
@@ -222,7 +222,7 @@ mod tests {
     use tome_eval::fake::{FakeTome, no_structure_doc, sample_doc};
 
     fn doc() -> String {
-        sample_doc().0
+        sample_doc().as_str().to_string()
     }
 
     fn code(e: &ErrorData) -> String {
@@ -313,7 +313,7 @@ mod tests {
             (open(&["3.2"]).unwrap_err(), "bad_input", ErrorCode::INVALID_PARAMS),
             (open(&[]).unwrap_err(), "bad_input", ErrorCode::INVALID_PARAMS),
             (tree(&api, &"c".repeat(64)).unwrap_err(), "unknown_doc", ErrorCode::INVALID_PARAMS),
-            (tree(&api, &no_structure_doc().0).unwrap_err(), "no_structure", ErrorCode::INTERNAL_ERROR),
+            (tree(&api, no_structure_doc().as_str()).unwrap_err(), "no_structure", ErrorCode::INTERNAL_ERROR),
         ] {
             assert_eq!((code(&e).as_str(), e.code), (want, kind));
         }

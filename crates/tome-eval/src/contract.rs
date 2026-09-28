@@ -133,7 +133,7 @@ mod tests {
         let idx = TomeIndex::open(&dir).unwrap();
         let api: &dyn TomeApi = &idx;
         assert!(api.docs().unwrap().is_empty());
-        let e = api.tree(&DocId("b".repeat(64)), None, None).unwrap_err();
+        let e = api.tree(&DocId::parse(&"b".repeat(64)).unwrap(), None, None).unwrap_err();
         assert_eq!(e.code(), "unknown_doc");
         assert_eq!(api.backend_name(), "tome_tree");
         let _ = std::fs::remove_dir_all(dir);

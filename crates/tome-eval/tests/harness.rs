@@ -68,9 +68,13 @@ async fn harness_writes_schema_valid_records_for_both_arms_and_the_probe() {
         cfg: cfg(),
     };
     let doc = "Archmagus-Stack/09-Tomes/fake/Fake Book.pdf";
-    let qs = vec![q("fake-01", doc, &sample_doc().0, true)];
-    let probes =
-        vec![q("fake-fc-01", "Archmagus-Stack/09-Tomes/fake/No Outline.pdf", &no_structure_doc().0, false)];
+    let qs = vec![q("fake-01", doc, sample_doc().as_str(), true)];
+    let probes = vec![q(
+        "fake-fc-01",
+        "Archmagus-Stack/09-Tomes/fake/No Outline.pdf",
+        no_structure_doc().as_str(),
+        false,
+    )];
     let opts = RunOpts {
         questions_file: qfile,
         out_dir: dir.clone(),

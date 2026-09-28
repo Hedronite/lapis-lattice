@@ -80,6 +80,30 @@ fn page_stream(lines: &[&str]) -> Stream {
     Stream::new(dictionary! {}, Content { operations: ops }.encode().unwrap())
 }
 
+/// Drop the GoTo action on the outline item whose title matches, so the item has no destination.
+pub fn strip_outline_action(path: &Path, title: &str) {
+    let mut doc = Document::load(path).unwrap();
+    let ids: Vec<_> = doc.objects.keys().copied().collect();
+    for id in ids {
+        let Some(Object::Dictionary(dict)) = doc.objects.get(&id) else {
+            continue;
+        };
+        let Ok(title_obj) = dict.get(b"Title") else {
+            continue;
+        };
+        let Ok(text) = lopdf::decode_text_string(title_obj) else {
+            continue;
+        };
+        if text == title {
+            let mut dict = dict.clone();
+            dict.remove(b"A");
+            dict.remove(b"Dest");
+            doc.objects.insert(id, Object::Dictionary(dict));
+        }
+    }
+    doc.save(path).unwrap();
+}
+
 pub fn prose(n: usize) -> Vec<Vec<&'static str>> {
     let mut pages = Vec::with_capacity(n);
     for _ in 0..n {

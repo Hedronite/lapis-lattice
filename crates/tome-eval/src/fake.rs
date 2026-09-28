@@ -10,12 +10,12 @@ use crate::contract::{
 
 /// Doc id of the sample book (a fake sha256).
 pub fn sample_doc() -> DocId {
-    DocId("a".repeat(64))
+    DocId::parse(&"a".repeat(64)).expect("valid hex")
 }
 
 /// Doc id that fails closed with `no_structure` (stands in for the Red Team Guide probe).
 pub fn no_structure_doc() -> DocId {
-    DocId("b".repeat(64))
+    DocId::parse(&"b".repeat(64)).expect("valid hex")
 }
 
 #[derive(Debug, Clone)]
@@ -54,7 +54,7 @@ impl FakeTome {
         let meta = DocMeta {
             doc_id: sha.clone(),
             path: "Archmagus-Stack/09-Tomes/fake/Fake Book.pdf".into(),
-            sha256: sha.0,
+            sha256: sha.as_str().to_string(),
             pages: 20,
             outline: true,
             source: NodeSource::Outline,
@@ -96,14 +96,14 @@ impl FakeTome {
     fn doc(&self, doc: &DocId) -> Result<&FakeDoc> {
         if self.no_structure.contains(doc) {
             return Err(TomeError::NoStructure {
-                doc: doc.0.clone(),
+                doc: doc.as_str().to_string(),
                 detail: "no outline, no headings".into(),
             });
         }
         self.docs
             .iter()
             .find(|d| &d.meta.doc_id == doc)
-            .ok_or_else(|| TomeError::UnknownDoc { doc: doc.0.clone() })
+            .ok_or_else(|| TomeError::UnknownDoc { doc: doc.as_str().to_string() })
     }
 }
 
@@ -141,8 +141,10 @@ impl TomeApi for FakeTome {
         match node {
             None => Ok(d.roots.iter().map(|n| cut(n, depth)).collect()),
             Some(id) => {
-                let n = find(&d.roots, id)
-                    .ok_or_else(|| TomeError::UnknownNode { doc: doc.0.clone(), node: id.0.clone() })?;
+                let n = find(&d.roots, id).ok_or_else(|| TomeError::UnknownNode {
+                    doc: doc.as_str().to_string(),
+                    node: id.0.clone(),
+                })?;
                 Ok(n.children.iter().map(|k| cut(k, depth)).collect())
             }
         }
@@ -151,12 +153,14 @@ impl TomeApi for FakeTome {
     fn open(&self, doc: &DocId, nodes: &[NodeId]) -> Result<Vec<Passage>> {
         let d = self.doc(doc)?;
         if nodes.is_empty() {
-            return Err(TomeError::UnknownNode { doc: doc.0.clone(), node: "(none)".into() });
+            return Err(TomeError::UnknownNode { doc: doc.as_str().to_string(), node: "(none)".into() });
         }
         let mut want = Vec::new();
         for id in nodes {
-            let n = find(&d.roots, id)
-                .ok_or_else(|| TomeError::UnknownNode { doc: doc.0.clone(), node: id.0.clone() })?;
+            let n = find(&d.roots, id).ok_or_else(|| TomeError::UnknownNode {
+                doc: doc.as_str().to_string(),
+                node: id.0.clone(),
+            })?;
             for p in n.page_start..=n.page_end {
                 want.push((id.clone(), p));
             }
@@ -262,7 +266,10 @@ mod tests {
     #[test]
     fn errors_are_distinguishable_from_empty() {
         let t = FakeTome::sample();
-        assert_eq!(t.tree(&DocId("c".repeat(64)), None, None).unwrap_err().code(), "unknown_doc");
+        assert_eq!(
+            t.tree(&DocId::parse(&"c".repeat(64)).unwrap(), None, None).unwrap_err().code(),
+            "unknown_doc"
+        );
         assert_eq!(
             t.tree(&sample_doc(), Some(&NodeId("0009".into())), None).unwrap_err().code(),
             "unknown_node"

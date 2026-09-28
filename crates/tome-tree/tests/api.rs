@@ -273,10 +273,16 @@ fn walk_beam_stops_at_short_nodes_and_fails_closed() {
     );
     let meta = build_at(&dir, &pdf_path, "walk", opts("walk"));
     let index = TomeIndex::open(&dir.join("tomes")).unwrap();
-    let judge =
-        FakeJudge::new([("0001.0001", 1u8), ("0001.0002", 3u8), ("0002.0001", 3u8), ("0002.0002", 0u8)]);
+    let judge = FakeJudge::new([
+        ("0001", 3u8),
+        ("0002", 3u8),
+        ("0001.0001", 1u8),
+        ("0001.0002", 3u8),
+        ("0002.0001", 3u8),
+        ("0002.0002", 0u8),
+    ]);
     let walked = index.walk(&meta.doc_id, "where is the section", &judge, Budget::default()).unwrap();
-    assert_eq!(walked.judge_calls, 4);
+    assert_eq!(walked.judge_calls, 6);
     assert_eq!(walked.nodes.iter().map(|id| id.as_str()).collect::<Vec<_>>(), vec!["0001.0002", "0002.0001"]);
     assert!(walked.passages.iter().all(|p| !p.truncated));
     assert!(walked.passages.len() <= OPEN_PAGE_CAP as usize);
@@ -315,12 +321,139 @@ fn walk_does_not_descend_into_a_short_node() {
     );
     let meta = build_at(&dir, &pdf_path, "short", opts("short"));
     let index = TomeIndex::open(&dir.join("tomes")).unwrap();
-    let walked = index
-        .walk(&meta.doc_id, "q", &FakeJudge::new(std::iter::empty::<(&str, u8)>()), Budget::default())
-        .unwrap();
-    assert_eq!(walked.judge_calls, 0);
+    let walked = index.walk(&meta.doc_id, "q", &FakeJudge::new([("0001", 2u8)]), Budget::default()).unwrap();
+    assert_eq!(walked.judge_calls, 1);
     assert_eq!(walked.nodes[0].as_str(), "0001");
     assert_eq!(walked.passages.len(), 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn wide_outline_walks_inside_the_default_budget() {
+    let dir = scratch("wide");
+    let pdf_path = dir.join("wide.pdf");
+    let mut marks = vec![
+        pdf::Mark { title: "R1", page: 0, parent: None },
+        pdf::Mark { title: "R1a", page: 0, parent: Some(0) },
+        pdf::Mark { title: "R1b", page: 0, parent: Some(1) },
+        pdf::Mark { title: "R2", page: 6, parent: None },
+        pdf::Mark { title: "R2a", page: 6, parent: Some(3) },
+        pdf::Mark { title: "R2b", page: 6, parent: Some(4) },
+    ];
+    for i in 0..18 {
+        marks.push(pdf::Mark { title: "Later", page: 12 + i * 4, parent: None });
+    }
+    pdf::write(&pdf_path, &pdf::prose(12 + 18 * 4), &marks);
+    let meta = build_at(&dir, &pdf_path, "wide", opts("wide"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let roots = index.tree(&meta.doc_id, None, Some(0)).unwrap();
+    assert_eq!(roots.len(), 20);
+
+    struct PreferFirstTwo;
+    impl Judge for PreferFirstTwo {
+        fn score(&self, _: &str, candidate: &tome_tree::Candidate) -> tome_tree::Result<u8> {
+            let id = candidate.id.as_str();
+            if id == "0001" || id == "0002" || id.starts_with("0001.") || id.starts_with("0002.") {
+                Ok(3)
+            } else {
+                Ok(0)
+            }
+        }
+    }
+    let walked = index.walk(&meta.doc_id, "deep section", &PreferFirstTwo, Budget::default()).unwrap();
+    assert!(walked.judge_calls <= 24, "calls {}", walked.judge_calls);
+    assert_eq!(
+        walked.nodes.iter().map(|id| id.as_str()).collect::<Vec<_>>(),
+        vec!["0001.0001.0001", "0002.0001.0001"]
+    );
+    assert!(walked.passages.len() <= OPEN_PAGE_CAP as usize);
+    assert!(walked.passages.iter().all(|p| !p.truncated));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn walk_opens_whole_nodes_that_fit_the_page_budget() {
+    let dir = scratch("fit");
+    let pdf_path = dir.join("fit.pdf");
+    pdf::write(
+        &pdf_path,
+        &pdf::prose(20),
+        &[
+            pdf::Mark { title: "Left", page: 0, parent: None },
+            pdf::Mark { title: "Right", page: 10, parent: None },
+        ],
+    );
+    let meta = build_at(&dir, &pdf_path, "fit", opts("fit"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let judge = FakeJudge::new([("0001", 1u8), ("0002", 3u8)]);
+    let walked = index.walk(&meta.doc_id, "q", &judge, Budget::default()).unwrap();
+    assert_eq!(walked.nodes.iter().map(|id| id.as_str()).collect::<Vec<_>>(), vec!["0002"]);
+    assert_eq!(walked.passages.len(), 10);
+    assert_eq!(walked.passages.first().unwrap().page, 11);
+    assert_eq!(walked.passages.last().unwrap().page, 20);
+    assert!(walked.passages.iter().all(|p| !p.truncated));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn doc_id_rejects_path_traversal() {
+    for raw in ["../secret", "..", "a/../../etc/passwd", "ab", &"g".repeat(64), ""] {
+        let err = DocId::parse(raw).unwrap_err();
+        assert_eq!(code(&err), "parse", "{raw}");
+    }
+    let id = DocId::parse(&"AB".repeat(32)).unwrap();
+    assert_eq!(id.as_str(), "ab".repeat(32));
+
+    let dir = scratch("trav");
+    let store = dir.join("tomes");
+    let index = TomeIndex::open(&store).unwrap();
+    let err = index.tree(&id, None, None).unwrap_err();
+    assert_eq!(code(&err), "unknown_doc");
+    let missing = store.join(format!("{}.tree.json", id.as_str()));
+    assert_eq!(missing.parent(), Some(store.as_path()));
+    assert!(!dir.join(format!("{}.tree.json", id.as_str())).exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn missing_page_is_an_error_and_directory_read_is_io() {
+    let dir = scratch("pages");
+    let pdf_path = dir.join("p.pdf");
+    pdf::write(&pdf_path, &pdf::prose(1), &[pdf::Mark { title: "Only", page: 0, parent: None }]);
+    let meta = build_at(&dir, &pdf_path, "p", opts("p"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let pages = dir.join("tomes").join(format!("{}.pages.jsonl", meta.doc_id));
+    std::fs::write(&pages, "{\"page\":2,\"text\":\"nope\"}\n").unwrap();
+    let err = index.passages(&meta.doc_id, &[NodeId::from("0001")]).unwrap_err();
+    assert_eq!(code(&err), "parse");
+    assert!(err.to_string().contains("missing"));
+
+    let err = index.build(&dir, "dir", &opts("dir")).unwrap_err();
+    assert_eq!(code(&err), "io");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn outline_item_without_destination_is_skipped() {
+    let dir = scratch("nodest");
+    let pdf_path = dir.join("n.pdf");
+    pdf::write(
+        &pdf_path,
+        &pdf::prose(2),
+        &[
+            pdf::Mark { title: "Ghost", page: 0, parent: None },
+            pdf::Mark { title: "Kept child", page: 1, parent: Some(0) },
+            pdf::Mark { title: "Sibling", page: 0, parent: None },
+        ],
+    );
+    pdf::strip_outline_action(&pdf_path, "Ghost");
+    let meta = build_at(&dir, &pdf_path, "n", opts("n"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let nodes = index.tree(&meta.doc_id, None, None).unwrap();
+    let titles: Vec<_> = nodes.iter().map(|n| n.title.as_str()).collect();
+    assert!(titles.contains(&"Kept child"), "{titles:?}");
+    assert!(titles.contains(&"Sibling"), "{titles:?}");
+    assert!(!titles.contains(&"Ghost"), "{titles:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

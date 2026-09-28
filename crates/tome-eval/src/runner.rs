@@ -160,7 +160,8 @@ impl Harness {
         let tome = Arc::clone(&self.tome);
         let judge = JevJudge::new(self.jev.clone(), tokio::runtime::Handle::current());
         // The library keys docs by PDF sha256; the path is only on DocMeta.
-        let doc = DocId(q.doc_sha256.clone());
+        let doc = DocId::parse(&q.doc_sha256)
+            .map_err(|e| ErrorInfo { kind: "bad_input".into(), message: format!("doc_sha256: {e}") })?;
         let query = q.question.clone();
         let t0 = Instant::now();
         // `Judge` is sync: walk on a blocking thread so the judge can block on the
