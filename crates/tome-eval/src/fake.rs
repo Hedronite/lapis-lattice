@@ -206,6 +206,7 @@ impl TomeApi for FakeTome {
                         id: c.id.clone(),
                         title: c.title.clone(),
                         lead: c.lead.clone(),
+                        child_titles: vec![],
                         page_start: c.page_start,
                         page_end: c.page_end,
                         level: c.level,

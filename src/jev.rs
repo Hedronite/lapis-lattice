@@ -13,6 +13,7 @@ use lapis_lattice::Hit;
 
 #[cfg(feature = "tome")]
 mod batch;
+mod facet;
 
 /// Bundled Facet OpenCollection (Hit rerank recipe).
 pub const FACET_COLLECTION: &str = include_str!("../docs/examples/typesafe/opencollection.yml");
@@ -301,8 +302,8 @@ async fn facet_decide(bin: &Path, state: &str, asked: &Value) -> std::result::Re
     let yaml = dir.join("opencollection.yml");
     let custom = asked != &questions();
     let text = if custom {
-        let body = serde_json::to_string(&systemone_body(state, asked)).map_err(|e| e.to_string())?;
-        facet_batch_collection(&body)
+        let body = facet::json(&systemone_body(state, asked));
+        facet::collection(&body)
     } else {
         FACET_COLLECTION.to_string()
     };
@@ -328,52 +329,6 @@ async fn facet_decide(bin: &Path, state: &str, asked: &Value) -> std::result::Re
     }
     let v: Value = serde_json::from_slice(&out.stdout).map_err(|e| format!("facet json: {e}"))?;
     parse_facet_answers(&v)
-}
-
-/// Facet collection whose body is the batch System One request. The hit-rerank
-/// recipe stays on the single relevance questions; a batch must not use it.
-fn facet_batch_collection(body: &str) -> String {
-    format!(
-        "\
-opencollection: 1.0.0
-info:
-  name: Tome batch
-  version: 0.0.0
-config:
-  environments:
-    - name: typesafe
-      variables:
-        - name: typesafeApi
-          value: https://api.typesafe.ai
-        - secret: true
-          name: typesafeApiKey
-          type: string
-items:
-  - info:
-      name: System One
-      type: folder
-      seq: 1
-    items:
-      - info:
-          name: Batch
-          type: http
-          seq: 1
-        http:
-          method: POST
-          url: \"{{{{typesafeApi}}}}/v1/systemone\"
-          headers:
-            - name: Authorization
-              value: \"Bearer {{{{typesafeApiKey}}}}\"
-            - name: Content-Type
-              value: application/json
-            - name: Accept
-              value: application/json
-          body:
-            type: json
-            data: |-
-              {body}
-"
-    )
 }
 
 fn tempfile_dir() -> std::result::Result<PathBuf, String> {
@@ -545,10 +500,9 @@ pub fn hit_line(hit: &Hit) -> Option<String> {
 /// Several candidates are one `decide` call. The state asks for a JSON array
 /// of `{id, score, confidence}`, and the questions are one score rubric per
 /// candidate id. Ids the array (or the per-id answers) actually scored are
-/// kept. Only the missing ids are judged again, one at a time, with the
-/// shipped single-candidate questions. A body with no array and no per-id
-/// score is `parse`, and the walk then pre-ranks. A dead transport stays
-/// `judge_unavailable`.
+/// `Some`. Missing ids are `None`: the walk judges those one at a time and
+/// counts each call. A body with no array and no per-id score is `parse`, and
+/// the walk then pre-ranks. A dead transport stays `judge_unavailable`.
 ///
 /// `score` blocks on a multi-thread tokio runtime (`block_in_place` + `block_on`).
 /// The `lapis` binary is multi-thread. A current-thread runtime panics.
@@ -583,24 +537,18 @@ impl tome_tree::Judge for JevJudge {
         &self,
         query: &str,
         candidates: &[tome_tree::Candidate],
-    ) -> tome_tree::Result<Vec<tome_tree::Assessment>> {
+    ) -> tome_tree::Result<Vec<Option<tome_tree::Assessment>>> {
         if candidates.len() <= 1 {
-            return candidates.iter().map(|candidate| self.assess(query, candidate)).collect();
+            return candidates.iter().map(|candidate| self.assess(query, candidate).map(Some)).collect();
         }
         let questions = batch::questions(candidates);
         let body = self.decide_questions(&batch::state(query, candidates), &questions)?;
-        let parsed = batch::assessments(&body, candidates)?;
-        let mut out = Vec::with_capacity(candidates.len());
-        for (candidate, slot) in candidates.iter().zip(parsed) {
-            out.push(match slot {
-                Some(assessment) => assessment,
-                None => self.assess(query, candidate)?,
-            });
-        }
-        Ok(out)
+        // Missing ids stay `None`. The walk judges them and counts each call.
+        batch::assessments(&body, candidates)
     }
 
     fn batch_cost(&self, _candidates: &[tome_tree::Candidate]) -> u32 {
+        // The batch request only. Fill-ins are separate `assess` calls.
         1
     }
 }
@@ -627,16 +575,22 @@ impl JevJudge {
 #[cfg(feature = "tome")]
 fn candidate_state(query: &str, candidate: &tome_tree::Candidate) -> String {
     // The shipped questions ask about a retrieved chunk. A TOC node is not
-    // one: say so, and rely on the candidate lead (which lists child titles)
-    // so the model is not scoring a bare chapter title.
-    format!(
+    // one: say so, and pass the page lead and the child titles as separate
+    // fields so a long lead cannot hide the titles.
+    let mut out = format!(
         "Search query: {query}\n\n\
-         This is a table-of-contents node, not a retrieved passage. \
-         The lead is the opening of the section. Child section titles are \
-         listed under the lead when this node has children.\n\n\
-         Section: {}\nPages: {}-{}\n\nLead:\n{}",
-        candidate.title, candidate.page_start, candidate.page_end, candidate.lead
-    )
+         This is a table-of-contents node, not a retrieved passage.\n\n\
+         Section: {}\nPages: {}-{}\n",
+        candidate.title, candidate.page_start, candidate.page_end
+    );
+    if !candidate.child_titles.is_empty() {
+        out.push_str("\nChild titles:\n");
+        for child in &candidate.child_titles {
+            out.push_str(&format!("- {} (pp. {}–{})\n", child.title, child.page_start, child.page_end));
+        }
+    }
+    out.push_str(&format!("\nLead:\n{}", candidate.lead));
+    out
 }
 
 /// Relevance score and the minimum reported confidence. Low confidence is not
@@ -859,6 +813,7 @@ mod tests {
             id: tome_tree::NodeId::from("0001"),
             title: "Chapter".into(),
             lead: "lead text".into(),
+            child_titles: vec![],
             page_start: 1,
             page_end: 2,
             level: 1,
@@ -888,7 +843,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn tome_batch_parses_a_json_array_and_keeps_partial_ids() {
         let mut with_child = candidate_of("0001");
-        with_child.lead = format!("Child sections:\n- Section A (pp. 2–2)\n\n{}", "alpha ".repeat(80));
+        with_child.lead = "alpha ".repeat(80);
+        with_child.child_titles =
+            vec![tome_tree::ChildTitle { title: "Section A".into(), page_start: 2, page_end: 2 }];
         let candidates = [with_child, candidate_of("0002")];
 
         let realistic = json!({
@@ -912,28 +869,28 @@ mod tests {
         let batched = JevJudge { transport: Transport::Fake(script.clone()) };
         assert_eq!(tome_tree::Judge::batch_cost(&batched, &candidates), 1);
         let got = tome_tree::Judge::score_batch(&batched, "where", &candidates).unwrap();
-        assert_eq!(got[0].score, 3);
-        assert_eq!(got[0].confidence, Some(0.82));
-        assert_eq!(got[1].score, 1);
+        assert_eq!(got[0].unwrap().score, 3);
+        assert_eq!(got[0].unwrap().confidence, Some(0.82));
+        assert_eq!(got[1].unwrap().score, 1);
         let (state, asked) = script.seen.lock().unwrap()[0].clone();
         assert!(state.contains("JSON array"), "{state}");
         assert!(state.contains("\"id\""), "{state}");
-        assert!(state.contains("Section A"), "child titles survive the batch prompt: {state}");
-        assert!(state.contains("alpha"), "{state}");
+        assert!(state.contains("child titles:\n- Section A"), "child titles are their own field: {state}");
+        let page = state.split("lead:\n").nth(1).unwrap().split("\n\n").next().unwrap();
+        assert_eq!(page.chars().count(), 240, "the page lead is capped on its own: {page}");
+        assert!(!page.contains("Section A"), "{page}");
         assert_eq!(asked["0001"]["type"].as_str(), Some("score"));
         assert_eq!(asked["0002"]["type"].as_str(), Some("score"));
         assert!(asked.get("relevance").is_none(), "a batch must not send the single relevance question");
 
-        let partial_script = FakeScript::replies(vec![
-            json!([{ "id": "0001", "score": 2, "confidence": 0.7 }]),
-            judged_body(0.9, 3.0, "supports", 0.5),
-        ]);
-        let partial = JevJudge { transport: Transport::Fake(partial_script) };
+        let partial_script =
+            FakeScript::replies(vec![json!([{ "id": "0001", "score": 2, "confidence": 0.7 }])]);
+        let partial = JevJudge { transport: Transport::Fake(partial_script.clone()) };
         let got = tome_tree::Judge::score_batch(&partial, "where", &candidates).unwrap();
-        assert_eq!(got[0].score, 2, "the id that came back is kept");
-        assert_eq!(got[0].confidence, Some(0.7));
-        assert_eq!(got[1].score, 3, "only the missing id is judged one at a time");
-        assert_eq!(got[1].confidence, Some(0.5));
+        assert_eq!(got[0].unwrap().score, 2, "the id that came back is kept");
+        assert_eq!(got[0].unwrap().confidence, Some(0.7));
+        assert!(got[1].is_none(), "the missing id is not filled in inside the batch call");
+        assert_eq!(partial_script.seen.lock().unwrap().len(), 1, "a partial reply is one model call");
 
         let from_scores = json!({
             "model": "jev-1.13.0",
@@ -963,9 +920,34 @@ mod tests {
             id: tome_tree::NodeId::from(id),
             title: "Chapter".into(),
             lead: "lead text".into(),
+            child_titles: vec![],
             page_start: 1,
             page_end: 2,
             level: 1,
         }
+    }
+
+    #[test]
+    fn facet_batch_keeps_a_placeholder_in_pdf_text_literal() {
+        let state = "page text mentions {{typesafeApiKey}} and should stay literal";
+        let questions = json!({
+            "0001": {
+                "type": "score",
+                "instructions": "section title {{typesafeApiKey}}",
+                "criteria": ["a", "b", "c", "d"]
+            }
+        });
+        let body = facet::json(&systemone_body(state, &questions));
+        assert!(!body.contains("{{"), "template braces must not survive into the JSON source: {body}");
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["state"].as_str().unwrap(), state);
+        assert!(parsed["questions"]["0001"]["instructions"].as_str().unwrap().contains("{{typesafeApiKey}}"));
+        let leaked = body.replace("{{typesafeApiKey}}", "SECRET");
+        let parsed: Value = serde_json::from_str(&leaked).unwrap();
+        assert!(parsed["state"].as_str().unwrap().contains("{{typesafeApiKey}}"));
+        let yaml = facet::collection(&body);
+        let json_line = yaml.lines().find(|line| line.contains("\\u007b")).expect("escaped body");
+        assert!(!json_line.contains("{{typesafeApiKey}}"), "{json_line}");
+        assert!(yaml.contains("Bearer {{typesafeApiKey}}"), "the header placeholder is the real one");
     }
 }

@@ -735,7 +735,9 @@ fn malformed_batch_falls_back_to_lexical_ranking() {
     let judge = FakeJudge::new([("0030", 3u8)]).with_default(0).fail_batch();
     let walked = index.walk(&meta.doc_id, "brass foundry", &judge, Budget::default()).unwrap();
     assert_eq!(walked.root_path, RootPath::LexicalFallback);
-    assert_eq!(walked.root_judge_calls, 6, "the failed batch is not charged against root_calls");
+    assert_eq!(walked.root_judge_calls, 7, "the failed batch plus six fallback singles");
+    assert_eq!(walked.judge_calls, 7, "the failed batch is part of the reported total");
+    assert!(walked.root_judge_calls <= 1 + Budget::default().root_top_k);
     assert_eq!(walked.judged.len(), 6);
     assert_eq!(walked.judged[0].node_id.as_str(), "0030");
     assert!(walked.nodes.iter().any(|id| id.as_str() == "0030"));
@@ -761,15 +763,16 @@ fn candidate_lead_includes_child_titles() {
     impl Judge for See {
         fn score(&self, _: &str, c: &tome_tree::Candidate) -> tome_tree::Result<u8> {
             if c.id.as_str() == "0001" {
-                *self.0.lock().unwrap() = c.lead.clone();
+                let titles: Vec<_> = c.child_titles.iter().map(|child| child.title.clone()).collect();
+                *self.0.lock().unwrap() = titles.join(",");
             }
             Ok(if c.id.as_str() == "0001" { 3 } else { 0 })
         }
     }
     let see = See(std::sync::Mutex::new(String::new()));
     index.walk(&meta.doc_id, "q", &see, Budget::default()).unwrap();
-    let lead = see.0.lock().unwrap().clone();
-    assert!(lead.contains("Section A"), "{lead}");
+    let titles = see.0.lock().unwrap().clone();
+    assert!(titles.contains("Section A"), "{titles}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -789,7 +792,7 @@ fn batch_path_keeps_child_titles_past_the_page_lead() {
     );
     let meta = build_at(&dir, &pdf_path, "tree", opts("tree"));
     let index = TomeIndex::open(&dir.join("tomes")).unwrap();
-    struct See(std::sync::Mutex<String>);
+    struct See(std::sync::Mutex<(String, String)>);
     impl Judge for See {
         fn score(&self, _: &str, _: &tome_tree::Candidate) -> tome_tree::Result<u8> {
             Ok(3)
@@ -798,23 +801,65 @@ fn batch_path_keeps_child_titles_past_the_page_lead() {
             &self,
             _: &str,
             candidates: &[tome_tree::Candidate],
-        ) -> tome_tree::Result<Vec<tome_tree::Assessment>> {
+        ) -> tome_tree::Result<Vec<Option<tome_tree::Assessment>>> {
             if let Some(root) = candidates.iter().find(|c| c.id.as_str() == "0001") {
-                *self.0.lock().unwrap() = root.lead.clone();
+                let titles =
+                    root.child_titles.iter().map(|child| child.title.as_str()).collect::<Vec<_>>().join(",");
+                *self.0.lock().unwrap() = (root.lead.clone(), titles);
             }
-            Ok(candidates.iter().map(|_| tome_tree::Assessment { score: 3, confidence: None }).collect())
+            Ok(candidates
+                .iter()
+                .map(|_| Some(tome_tree::Assessment { score: 3, confidence: None }))
+                .collect())
         }
         fn batch_cost(&self, _: &[tome_tree::Candidate]) -> u32 {
             1
         }
     }
-    let see = See(std::sync::Mutex::new(String::new()));
+    let see = See(std::sync::Mutex::new((String::new(), String::new())));
     let walked = index.walk(&meta.doc_id, "q", &see, Budget::default()).unwrap();
     assert_eq!(walked.root_path, RootPath::Batch);
-    let lead = see.0.lock().unwrap().clone();
-    assert!(lead.contains("Section A"), "{lead}");
-    assert!(lead.contains("Child sections:"), "{lead}");
-    assert!(lead.chars().count() > 240, "titles are not inside a 240-char page lead: {lead}");
+    let (lead, titles) = see.0.lock().unwrap().clone();
+    assert_eq!(titles, "Section A", "{titles}");
+    assert!(lead.chars().count() <= 240, "page lead is capped on its own: {lead}");
+    assert!(!lead.contains("Section A"), "{lead}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn partial_batch_fill_ins_count_against_the_root_budget() {
+    let dir = scratch("partial");
+    let meta = thirty_root_book(&dir, "partial");
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    struct Partial(std::sync::atomic::AtomicU32);
+    impl Judge for Partial {
+        fn score(&self, _: &str, _: &tome_tree::Candidate) -> tome_tree::Result<u8> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(1)
+        }
+        fn score_batch(
+            &self,
+            _: &str,
+            candidates: &[tome_tree::Candidate],
+        ) -> tome_tree::Result<Vec<Option<tome_tree::Assessment>>> {
+            Ok(candidates
+                .iter()
+                .enumerate()
+                .map(|(i, _)| (i == 0).then_some(tome_tree::Assessment { score: 3, confidence: Some(0.4) }))
+                .collect())
+        }
+        fn batch_cost(&self, _: &[tome_tree::Candidate]) -> u32 {
+            1
+        }
+    }
+    let judge = Partial(std::sync::atomic::AtomicU32::new(0));
+    let walked = index.walk(&meta.doc_id, "chapter", &judge, Budget::default()).unwrap();
+    let fills = judge.0.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(fills, 3, "fifteen holes do not become fifteen free calls");
+    assert_eq!(walked.root_judge_calls, 4, "one batch request plus the three fill-ins");
+    assert_eq!(walked.judge_calls, 4);
+    assert_eq!(walked.judged.len(), 4);
+    assert_eq!(walked.root_path, RootPath::Batch);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

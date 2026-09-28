@@ -396,6 +396,7 @@ mod tests {
             id: crate::contract::NodeId("0001".into()),
             title: "t".into(),
             lead: "l".into(),
+            child_titles: vec![],
             page_start: 1,
             page_end: 2,
             level: 1,
