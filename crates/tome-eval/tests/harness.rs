@@ -49,7 +49,9 @@ fn walk_scores() -> Vec<Value> {
         json!({"section": {"score": 0, "confidence": 0.9}}),
         json!({"section": {"score": 0, "confidence": 0.9}}),
         json!({"section": {"score": 1, "confidence": 0.9}}),
-        json!({"section": {"score": 3, "confidence": 0.9}}),
+        // Low confidence on the winning child: score-only still ranks it first,
+        // and the record says a 0.6 gate would have failed this walk closed.
+        json!({"section": {"score": 3, "confidence": 0.41}}),
         grade("exact"),
     ]
 }
@@ -109,10 +111,20 @@ async fn harness_writes_schema_valid_records_for_both_arms_and_the_probe() {
     assert_eq!(recs[1]["tome"]["summary_model"], "fake/lead");
     assert_eq!(recs[1]["tome"]["summary_temperature"], 0.0);
     assert_eq!(recs[1]["tome"]["backend"], "fake");
+    assert_eq!(recs[1]["schema_version"], "0.2.0");
+    let ws = &recs[1]["walk_scores"];
+    assert_eq!((ws["policy"].as_str(), ws["confidence_floor"].as_f64()), (Some("score_only"), Some(0.6)));
+    assert_eq!(ws["would_fail_closed"], true);
+    let cands = ws["candidates"].as_array().unwrap();
+    assert_eq!(cands.len(), 4);
+    assert!(cands.iter().any(|c| c["node_id"] == "0002.0002" && c["score"] == 3 && c["confidence"] == 0.41));
+    assert!(recs[0]["walk_scores"].is_null(), "baseline records carry no walk scores");
     // Probe fails closed with no_structure and is not scored.
     assert_eq!(recs[2]["scored"], false);
     assert_eq!(recs[2]["error"]["kind"], "no_structure");
     assert_eq!(summary.verdict.decision, "incomplete");
     assert_eq!(summary.arms.tome.silent_empties, 0);
+    assert_eq!((summary.walks_judged, summary.would_fail_closed_at_0_6), (1, 1));
+    assert_eq!(s["would_fail_closed_at_0_6"], 1);
     let _ = std::fs::remove_dir_all(&dir);
 }

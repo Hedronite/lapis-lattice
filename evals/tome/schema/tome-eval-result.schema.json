@@ -346,6 +346,85 @@
         }
       }
     },
+    "candidateScore": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "One judged tree child (0.2.0): the score the walk ranked on and the confidence it no longer gates on.",
+      "required": [
+        "node_id",
+        "title",
+        "page_start",
+        "page_end",
+        "score",
+        "confidence"
+      ],
+      "properties": {
+        "node_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "page_start": {
+          "$ref": "#/$defs/page"
+        },
+        "page_end": {
+          "$ref": "#/$defs/page"
+        },
+        "score": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 3
+        },
+        "confidence": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "walkScores": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "description": "Tome-arm walk judging (0.2.0). Spike policy: rank on score only, no confidence gate; null on baseline records.",
+      "required": [
+        "policy",
+        "confidence_floor",
+        "would_fail_closed",
+        "candidates"
+      ],
+      "properties": {
+        "policy": {
+          "enum": [
+            "score_only"
+          ]
+        },
+        "confidence_floor": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "would_fail_closed": {
+          "type": "boolean",
+          "description": "Some candidate had confidence < confidence_floor, so the pre-ruling judge would have returned judge_unavailable."
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/candidateScore"
+          }
+        }
+      }
+    },
     "result": {
       "type": "object",
       "additionalProperties": false,
@@ -379,7 +458,7 @@
           "const": "result"
         },
         "schema_version": {
-          "const": "0.1.0"
+          "const": "0.2.0"
         },
         "run_id": {
           "type": "string"
@@ -655,6 +734,9 @@
         "tome": {
           "$ref": "#/$defs/tomeSettings"
         },
+        "walk_scores": {
+          "$ref": "#/$defs/walkScores"
+        },
         "git_sha": {
           "$ref": "#/$defs/gitSha"
         },
@@ -845,7 +927,7 @@
           "const": "summary"
         },
         "schema_version": {
-          "const": "0.1.0"
+          "const": "0.2.0"
         },
         "run_id": {
           "type": "string"
@@ -988,6 +1070,16 @@
         },
         "tome": {
           "$ref": "#/$defs/tomeSettings"
+        },
+        "walks_judged": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Scored tome walks that judged at least one candidate (0.2.0)."
+        },
+        "would_fail_closed_at_0_6": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Of walks_judged, walks that would have failed closed at the fixed 0.6 confidence floor (0.2.0)."
         },
         "git_sha": {
           "$ref": "#/$defs/gitSha"

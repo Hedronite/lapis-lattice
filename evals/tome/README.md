@@ -70,8 +70,14 @@ offline tests can swap in `FakeTome`.
 
 - Build the trees first (`lapis tome build <pdf>` with `--features tome`). A missing index dir
   stops the run before any question. An unbuilt doc is recorded as `unknown_doc`.
-- `JevJudge` scores one candidate at a time (0–3). Uncertain, out-of-range or unavailable
-  answers are `judge_unavailable`: the walk stops and never guesses.
+- `JevJudge` scores one candidate at a time (0–3). **Spike scoring policy:** the walk ranks on
+  score only, with no confidence gate. Each record's `walk_scores` (schema 0.2.0) lists every
+  judged candidate's `score` and `confidence`. `would_fail_closed` marks walks that the old
+  0.6 gate would have stopped with `judge_unavailable`, and the summary counts them in
+  `would_fail_closed_at_0_6` (out of `walks_judged`). The floor stays 0.6 and is never tuned to
+  this data. Missing or out-of-range scores and an unreachable Jev are still `judge_unavailable`.
+  This is an eval-side adapter; it moves to `Walk`'s per-candidate fields and lapis' `[tome]`
+  floor once the crate lands them.
 - `walk` runs on a blocking thread and the judge blocks on the runtime handle, so the binary
   uses a **multi-thread** tokio runtime on purpose.
 - Every tome record carries `tome.summary_model` / `tome.summary_temperature` from the doc's

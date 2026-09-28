@@ -34,6 +34,18 @@ fn mean(values: impl Iterator<Item = f64>) -> Option<f64> {
     (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
 }
 
+/// `(walks_judged, would_fail_closed_at_0_6)` over scored tome records: walks that
+/// judged at least one candidate, and of those the walks where some candidate's
+/// confidence was below the 0.6 floor the pre-ruling judge gated on.
+pub fn fail_closed_counts(records: &[ResultRecord]) -> (u32, u32) {
+    let walks = records
+        .iter()
+        .filter(|r| r.arm == Arm::Tome && r.scored)
+        .filter_map(|r| r.walk_scores.as_ref())
+        .filter(|w| !w.candidates.is_empty());
+    walks.fold((0, 0), |(n, f), w| (n + 1, f + u32::from(w.would_fail_closed)))
+}
+
 pub fn summarize_arm(records: &[&ResultRecord]) -> ArmSummary {
     let scored: Vec<&&ResultRecord> = records.iter().filter(|r| r.scored).collect();
     let mut s = ArmSummary { n: scored.len() as u32, ..ArmSummary::default() };
@@ -202,6 +214,26 @@ mod tests {
         assert_eq!(percentile(&v, 95.0), Some(19.0));
         assert_eq!(percentile(&[], 50.0), None);
         assert_eq!(percentile(&[7.0], 95.0), Some(7.0));
+    }
+
+    #[test]
+    fn fail_closed_count_uses_the_fixed_floor() {
+        use crate::record::{CandidateScore, WalkScores};
+        let cand = |conf| CandidateScore {
+            node_id: "0001".into(),
+            title: "t".into(),
+            page_start: 1,
+            page_end: 1,
+            score: Some(2),
+            confidence: conf,
+        };
+        let low = WalkScores::score_only(vec![cand(Some(0.9)), cand(Some(0.41))], 0.6);
+        let ok = WalkScores::score_only(vec![cand(Some(0.6)), cand(None)], 0.6);
+        assert!(
+            low.would_fail_closed && !ok.would_fail_closed,
+            "0.6 itself passes; missing confidence passes"
+        );
+        assert_eq!(low.policy, "score_only");
     }
 
     #[test]

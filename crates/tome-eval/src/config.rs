@@ -188,6 +188,7 @@ mod tests {
         assert!(!c.answer.model.is_empty());
         assert!(c.baseline.chunk_map.ends_with("data/chunk-pages.jsonl"));
         assert_eq!((c.baseline.transport.as_str(), c.baseline.retrieve_k), ("http", 200));
+        assert_eq!(c.jev.confidence_floor, crate::jev::FAIL_CLOSED_FLOOR, "floor stays 0.6; never tuned");
         let qs = crate::questions::load(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/tome/questions.jsonl"),
         )

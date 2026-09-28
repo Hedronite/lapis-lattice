@@ -59,5 +59,9 @@ max_open_bytes = 49152
 transport = "http"                             # http | none
 endpoint = "https://api.typesafe.ai/v1/systemone"
 key_env = "TYPESAFE_API_KEY"                   # name only; the key is read from the environment
+# Grade + baseline rerank gate on this floor. The tome WALK does not (spike policy,
+# Eli ruling 2026-09-28): it ranks on score only, records every candidate's score and
+# confidence, and the summary counts would_fail_closed_at_0_6. Fixed at 0.6; never tuned
+# to eval data.
 confidence_floor = 0.6
 timeout_s = 30
