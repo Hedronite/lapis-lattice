@@ -1,0 +1,232 @@
+//! Public tree types. Field names and JSON spellings are frozen for MCP.
+
+use serde::{Deserialize, Serialize};
+
+use crate::error::TomeError;
+
+/// Lowercase hex SHA-256 of the PDF bytes. This is the doc id.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DocId(pub String);
+
+impl DocId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for DocId {
+    fn from(s: &str) -> Self {
+        DocId(s.trim().to_ascii_lowercase())
+    }
+}
+
+impl From<String> for DocId {
+    fn from(s: String) -> Self {
+        DocId::from(s.as_str())
+    }
+}
+
+impl std::fmt::Display for DocId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Dotted sibling path, 1-based, four digits per level: `0003.0002`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct NodeId(pub String);
+
+impl NodeId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for NodeId {
+    fn from(s: &str) -> Self {
+        NodeId(s.trim().to_string())
+    }
+}
+
+impl From<String> for NodeId {
+    fn from(s: String) -> Self {
+        NodeId(s)
+    }
+}
+
+impl std::fmt::Display for NodeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Where a node's bounds came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeSource {
+    Outline,
+    Heading,
+    Llm,
+    Window,
+}
+
+impl std::fmt::Display for NodeSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            NodeSource::Outline => "outline",
+            NodeSource::Heading => "heading",
+            NodeSource::Llm => "llm",
+            NodeSource::Window => "window",
+        })
+    }
+}
+
+/// One TOC node. `children` may be cut by `depth`; `child_count` is the full count.
+///
+/// Pages are 1-based physical PDF pages, inclusive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Node {
+    pub id: NodeId,
+    pub title: String,
+    /// Depth in the tree. Roots are 1.
+    pub level: u8,
+    pub page_start: u32,
+    pub page_end: u32,
+    /// First ~400 characters of the node's page text.
+    pub lead: String,
+    /// v0: the same text as `lead`. A later summary model may replace it.
+    pub summary: String,
+    pub source: NodeSource,
+    pub child_count: usize,
+    pub children: Vec<Node>,
+}
+
+/// One built document, as stored beside the tree.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DocMeta {
+    pub doc_id: DocId,
+    /// Vault-relative path when the PDF lives in the vault, otherwise the path
+    /// that was passed to `build`.
+    pub path: String,
+    pub sha256: String,
+    pub pages: u32,
+    /// True when the PDF had an outline that survived front-matter cleanup.
+    pub outline: bool,
+    pub source: NodeSource,
+    /// RFC3339 UTC, second precision.
+    pub built_at: String,
+    pub builder_version: String,
+    /// `{provider}/{model}` recorded from config. v0 does not call it.
+    #[serde(default)]
+    pub summary_model: String,
+    #[serde(default)]
+    pub summary_temperature: f32,
+}
+
+/// One physical page of one node. `truncated` is always false: over-budget calls error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Passage {
+    pub node_id: NodeId,
+    pub page: u32,
+    pub text: String,
+    pub truncated: bool,
+}
+
+/// Answer and summary model. The crate stores this; it does not pick a model.
+///
+/// Jev is the judge and is not configured here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SummaryModel {
+    pub provider: String,
+    pub model: String,
+    pub temperature: f32,
+}
+
+impl SummaryModel {
+    pub fn id(&self) -> String {
+        format!("{}/{}", self.provider.trim(), self.model.trim())
+    }
+
+    pub(crate) fn check(&self) -> Result<(), TomeError> {
+        if self.provider.trim().is_empty() || self.model.trim().is_empty() {
+            return Err(TomeError::Parse(
+                "summary model is empty; set [tome] provider and model in config".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Hard caps for [`crate::TomeIndex::open`] (the passage read).
+pub const OPEN_PAGE_CAP: u32 = 12;
+pub const OPEN_BYTE_CAP: usize = 48 * 1024;
+
+/// Beam width for [`crate::TomeIndex::walk`].
+pub const BEAM: usize = 2;
+
+/// Walk stops descending at a leaf or a node that spans this many pages.
+pub const STOP_PAGES: u32 = 3;
+
+pub const LEAD_CHARS: usize = 400;
+
+/// A leaf longer than this is split.
+pub const SPLIT_PAGES: u32 = 10;
+/// Token estimate is `chars / 4`.
+pub const SPLIT_TOKENS: usize = 20_000;
+
+pub const DEFAULT_JUDGE_CALLS: u32 = 24;
+
+/// Builder stamp stored on every tree. A mismatch is `stale`.
+pub const BUILDER_VERSION: &str = "0.2.0";
+
+/// Judge-call and open-page budget for one walk. The 48 KB cap always applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    pub max_judge_calls: u32,
+    pub max_pages: u32,
+}
+
+impl Default for Budget {
+    fn default() -> Self {
+        Self { max_judge_calls: DEFAULT_JUDGE_CALLS, max_pages: OPEN_PAGE_CAP }
+    }
+}
+
+/// Result of a walk: the nodes that were opened, and their pages.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Walk {
+    pub doc_id: DocId,
+    pub query: String,
+    pub nodes: Vec<NodeId>,
+    pub passages: Vec<Passage>,
+    pub judge_calls: u32,
+}
+
+/// What the judge sees for one child. Scores are 0–3.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub id: NodeId,
+    pub title: String,
+    pub lead: String,
+    pub page_start: u32,
+    pub page_end: u32,
+    pub level: u8,
+}
+
+/// In-progress node, before ids and leads are assigned.
+#[derive(Debug, Clone)]
+pub(crate) struct RawNode {
+    pub title: String,
+    pub page_start: u32,
+    pub page_end: u32,
+    pub source: NodeSource,
+    pub children: Vec<RawNode>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BuiltTree {
+    pub meta: DocMeta,
+    pub nodes: Vec<Node>,
+}

@@ -1,13 +1,19 @@
-# Credits
+# Provenance
 
-Lapis is built by [Hedronite](https://hedronite.com).
+`tome-tree` is a clean-room implementation.
 
-Interface and task-line ideas draw on [ZenNotes/tui](https://github.com/ZenNotes/tui) (MIT). When those files are adapted here, they keep their notices. The ZenNotes license:
+Concepts taken from [VectifyAI/PageIndex](https://github.com/VectifyAI/PageIndex) at commit `619cbd8` (MIT):
+
+- a table-of-contents tree whose nodes span pages
+- the model walks that tree and chooses which nodes to open, with no vector step for "which section"
+- nodes that run too long are split
+
+No PageIndex source was copied, translated line by line, or kept open while this crate was written. Prompts, JSON field names, and the file layout are ours. The license notice below records the inspiration only.
 
 ```
 MIT License
 
-Copyright (c) 2026 Adib Hanna and ZenNotes contributors
+Copyright (c) 2025 Vectify AI
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -27,5 +33,3 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
-
-The `tome-tree` spike is inspired by [VectifyAI/PageIndex](https://github.com/VectifyAI/PageIndex) (MIT, commit `619cbd8`). The Rust crate is a clean-room reimplementation: concepts only, no code copied. See `crates/tome-tree/PROVENANCE.md`.
