@@ -7,7 +7,7 @@ use std::path::Path;
 use lopdf::Document;
 use sha2::{Digest, Sha256};
 
-use crate::error::{Result, parse};
+use crate::error::{Result, io, parse};
 
 pub(crate) struct LoadedPdf {
     pub doc: Document,
@@ -16,7 +16,7 @@ pub(crate) struct LoadedPdf {
 }
 
 pub(crate) fn load(path: &Path) -> Result<LoadedPdf> {
-    let bytes = std::fs::read(path).map_err(|e| parse(format!("{}: {e}", path.display())))?;
+    let bytes = std::fs::read(path).map_err(|e| io(format!("{}: {e}", path.display())))?;
     if bytes.is_empty() {
         return Err(parse(format!("{}: empty file", path.display())));
     }
@@ -26,8 +26,14 @@ pub(crate) fn load(path: &Path) -> Result<LoadedPdf> {
     if physical == 0 {
         return Err(parse(format!("{}: pdf has no pages", path.display())));
     }
-    let mut pages =
-        pdf_extract::extract_text_from_mem_by_pages(&bytes).map_err(|e| parse(format!("text: {e}")))?;
+    let extracted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pdf_extract::extract_text_from_mem_by_pages(&bytes)
+    }));
+    let mut pages = match extracted {
+        Ok(Ok(pages)) => pages,
+        Ok(Err(e)) => return Err(parse(format!("text: {e}"))),
+        Err(_) => return Err(parse(format!("{}: text extract panicked", path.display()))),
+    };
     if pages.len() < physical {
         pages.resize(physical, String::new());
     } else if pages.len() > physical {
@@ -37,11 +43,11 @@ pub(crate) fn load(path: &Path) -> Result<LoadedPdf> {
 }
 
 pub(crate) fn sha256_file(path: &Path) -> Result<String> {
-    let mut file = File::open(path).map_err(parse)?;
+    let mut file = File::open(path).map_err(|e| io(format!("{}: {e}", path.display())))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let n = file.read(&mut buf).map_err(parse)?;
+        let n = file.read(&mut buf).map_err(|e| io(format!("{}: {e}", path.display())))?;
         if n == 0 {
             break;
         }

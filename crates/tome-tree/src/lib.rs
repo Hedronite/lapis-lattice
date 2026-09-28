@@ -15,7 +15,10 @@
 //!
 //! `TomeIndex::open` is the constructor. Passage `open` is the [`OpenPassages`]
 //! method, because Rust has one `open` per type. `use tome_tree::OpenPassages`
-//! makes `index.open(&doc, &ids)?` resolve.
+//! makes `index.open(&doc, &ids)?` resolve. [`TomeIndex::passages`] is the same
+//! read without the trait import.
+//!
+//! [`TomeIndex::walk`] with the Jev judge needs a multi-thread tokio runtime.
 
 #![forbid(unsafe_code)]
 
@@ -40,7 +43,7 @@ pub use walk::{FakeJudge, Judge};
 
 /// SHA-256 of a PDF, lowercase hex. This is the doc id.
 pub fn content_id(path: &std::path::Path) -> Result<DocId> {
-    Ok(DocId(pdf::sha256_file(path)?))
+    DocId::parse(&pdf::sha256_file(path)?)
 }
 
 /// Passage read. Import this trait to call `index.open(doc, nodes)`.

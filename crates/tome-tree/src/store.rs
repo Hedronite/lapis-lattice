@@ -1,12 +1,14 @@
 //! `<index>/<sha256>.tree.json` and `<sha256>.pages.jsonl`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Result, TomeError, parse};
+use crate::error::{Result, TomeError, io, parse};
 use crate::pdf::{self, LoadedPdf};
 use crate::types::{
     BUILDER_VERSION, Budget, BuiltTree, DocId, DocMeta, Node, NodeId, NodeSource, OPEN_BYTE_CAP,
@@ -39,30 +41,44 @@ struct PageRec {
     text: String,
 }
 
+/// mtime + length of a PDF whose bytes already matched `sha256`.
+#[derive(Debug, Clone)]
+struct Stamp {
+    modified: Option<SystemTime>,
+    len: u64,
+    sha256: String,
+}
+
 /// On-disk tome index. `open` takes the directory (`<vault>/.lapis/tomes`).
 #[derive(Debug, Clone)]
 pub struct TomeIndex {
     dir: PathBuf,
     vault_root: PathBuf,
+    /// Skip re-hashing a PDF when path, mtime, and size are unchanged.
+    stamps: Arc<Mutex<HashMap<PathBuf, Stamp>>>,
 }
 
 impl TomeIndex {
     pub fn open(index_dir: &Path) -> Result<Self> {
-        fs::create_dir_all(index_dir).map_err(|e| parse(format!("index dir: {e}")))?;
-        Ok(Self { dir: index_dir.to_path_buf(), vault_root: vault_root_for(index_dir) })
+        fs::create_dir_all(index_dir).map_err(|e| io(format!("index dir: {e}")))?;
+        Ok(Self {
+            dir: index_dir.to_path_buf(),
+            vault_root: vault_root_for(index_dir),
+            stamps: Arc::new(Mutex::new(HashMap::new())),
+        })
     }
 
     pub fn docs(&self) -> Result<Vec<DocMeta>> {
         let mut out = Vec::new();
-        let entries = fs::read_dir(&self.dir).map_err(parse)?;
+        let entries = fs::read_dir(&self.dir).map_err(|e| io(format!("index dir: {e}")))?;
         for entry in entries {
-            let entry = entry.map_err(parse)?;
+            let entry = entry.map_err(|e| io(format!("index dir: {e}")))?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if !name.ends_with(".tree.json") {
                 continue;
             }
-            let text = fs::read_to_string(entry.path()).map_err(parse)?;
+            let text = fs::read_to_string(entry.path()).map_err(io)?;
             let file: TreeFile = serde_json::from_str(&text).map_err(|e| parse(format!("{name}: {e}")))?;
             out.push(file.meta);
         }
@@ -87,6 +103,11 @@ impl TomeIndex {
         Ok(selected.iter().map(|n| cut(n, depth)).collect())
     }
 
+    /// Passage read. Same as [`crate::OpenPassages::open`], without importing the trait.
+    pub fn passages(&self, doc: &DocId, nodes: &[NodeId]) -> Result<Vec<Passage>> {
+        self.read_passages(doc, nodes)
+    }
+
     pub(crate) fn read_passages(&self, doc: &DocId, nodes: &[NodeId]) -> Result<Vec<Passage>> {
         let built = self.load(doc)?;
         open_loaded(doc, &built.nodes, &built.pages, nodes, OPEN_PAGE_CAP, OPEN_BYTE_CAP)
@@ -100,16 +121,24 @@ impl TomeIndex {
                 detail: "stored tree is empty".into(),
             });
         }
-        let (ids, judge_calls) = crate::walk::choose(&built.nodes, query, judge, budget)?;
+        let pages = &built.pages;
+        let (ids, judge_calls) =
+            crate::walk::choose(
+                &built.nodes,
+                query,
+                judge,
+                budget,
+                |page| Ok(page_text(pages, page)?.len()),
+            )?;
         let page_cap = budget.max_pages.min(OPEN_PAGE_CAP);
-        let passages = open_loaded(doc, &built.nodes, &built.pages, &ids, page_cap, OPEN_BYTE_CAP)?;
+        let passages = open_loaded(doc, &built.nodes, pages, &ids, page_cap, OPEN_BYTE_CAP)?;
         Ok(Walk { doc_id: doc.clone(), query: query.to_string(), nodes: ids, passages, judge_calls })
     }
 
     pub fn build(&self, pdf: &Path, vault_path: &str, opts: &BuildOptions) -> Result<DocMeta> {
         opts.summary_model.check()?;
         let loaded = pdf::load(pdf)?;
-        let id = DocId(loaded.sha256.clone());
+        let id = DocId::from_verified(loaded.sha256.clone());
         if !opts.force
             && let Some(meta) = self.fresh_cached(&id)?
         {
@@ -149,11 +178,11 @@ impl TomeIndex {
     }
 
     fn fresh_cached(&self, id: &DocId) -> Result<Option<DocMeta>> {
-        let path = self.tree_path(id);
+        let path = self.tree_path(id)?;
         if !path.is_file() {
             return Ok(None);
         }
-        let text = fs::read_to_string(&path).map_err(parse)?;
+        let text = fs::read_to_string(&path).map_err(io)?;
         let file: TreeFile = match serde_json::from_str(&text) {
             Ok(file) => file,
             Err(_) => return Ok(None),
@@ -181,11 +210,11 @@ impl TomeIndex {
     }
 
     fn read_stored(&self, doc: &DocId) -> Result<BuiltTree> {
-        let path = self.tree_path(doc);
+        let path = self.tree_path(doc)?;
         if !path.is_file() {
             return Err(TomeError::UnknownDoc { doc: doc.to_string() });
         }
-        let text = fs::read_to_string(&path).map_err(parse)?;
+        let text = fs::read_to_string(&path).map_err(io)?;
         let file: TreeFile =
             serde_json::from_str(&text).map_err(|e| parse(format!("{}: {e}", path.display())))?;
         Ok(BuiltTree { meta: file.meta, nodes: file.nodes })
@@ -205,6 +234,12 @@ impl TomeIndex {
             });
         }
         if let Some(path) = self.pdf_on_disk(meta) {
+            let file_meta = fs::metadata(&path).map_err(|e| io(format!("{}: {e}", path.display())))?;
+            let modified = file_meta.modified().ok();
+            let len = file_meta.len();
+            if self.stamp_matches(&path, modified, len, &meta.sha256) {
+                return Ok(());
+            }
             let hash = pdf::sha256_file(&path)?;
             if hash != meta.sha256 {
                 return Err(TomeError::Stale {
@@ -212,8 +247,24 @@ impl TomeIndex {
                     detail: "pdf bytes changed".into(),
                 });
             }
+            self.remember_stamp(path, modified, len, hash);
         }
         Ok(())
+    }
+
+    fn stamp_matches(&self, path: &Path, modified: Option<SystemTime>, len: u64, sha256: &str) -> bool {
+        let Ok(guard) = self.stamps.lock() else {
+            return false;
+        };
+        guard
+            .get(path)
+            .is_some_and(|stamp| stamp.modified == modified && stamp.len == len && stamp.sha256 == sha256)
+    }
+
+    fn remember_stamp(&self, path: PathBuf, modified: Option<SystemTime>, len: u64, sha256: String) {
+        if let Ok(mut guard) = self.stamps.lock() {
+            guard.insert(path, Stamp { modified, len, sha256 });
+        }
     }
 
     fn pdf_on_disk(&self, meta: &DocMeta) -> Option<PathBuf> {
@@ -223,8 +274,8 @@ impl TomeIndex {
     }
 
     fn read_pages(&self, doc: &DocId) -> Result<BTreeMap<u32, String>> {
-        let path = self.pages_path(doc);
-        let text = fs::read_to_string(&path).map_err(|e| parse(format!("{}: {e}", path.display())))?;
+        let path = self.pages_path(doc)?;
+        let text = fs::read_to_string(&path).map_err(|e| io(format!("{}: {e}", path.display())))?;
         let mut pages = BTreeMap::new();
         for (i, line) in text.lines().enumerate() {
             if line.trim().is_empty() {
@@ -245,19 +296,19 @@ impl TomeIndex {
             body.push('\n');
         }
         // Pages first, so a tree file is never visible without its text.
-        write_atomic(&self.pages_path(&meta.doc_id), body.as_bytes())?;
+        write_atomic(&self.pages_path(&meta.doc_id)?, body.as_bytes())?;
         let file = TreeFile { meta: meta.clone(), nodes: nodes.to_vec() };
         let json = serde_json::to_vec_pretty(&file).map_err(parse)?;
-        write_atomic(&self.tree_path(&meta.doc_id), &json)?;
+        write_atomic(&self.tree_path(&meta.doc_id)?, &json)?;
         Ok(())
     }
 
-    fn tree_path(&self, doc: &DocId) -> PathBuf {
-        self.dir.join(format!("{}.tree.json", doc.as_str()))
+    fn tree_path(&self, doc: &DocId) -> Result<PathBuf> {
+        Ok(self.dir.join(format!("{}.tree.json", doc.checked()?)))
     }
 
-    fn pages_path(&self, doc: &DocId) -> PathBuf {
-        self.dir.join(format!("{}.pages.jsonl", doc.as_str()))
+    fn pages_path(&self, doc: &DocId) -> Result<PathBuf> {
+        Ok(self.dir.join(format!("{}.pages.jsonl", doc.checked()?)))
     }
 }
 
@@ -376,7 +427,7 @@ fn open_loaded(
             continue;
         }
         for page in node.page_start..=node.page_end {
-            let text = pages.get(&page).cloned().unwrap_or_default();
+            let text = page_text(pages, page)?.to_string();
             let next_bytes = bytes.saturating_add(text.len());
             if u32::try_from(out.len()).unwrap_or(u32::MAX) + 1 > page_cap || next_bytes > byte_cap {
                 return Err(TomeError::OverBudget {
@@ -390,12 +441,19 @@ fn open_loaded(
     Ok(out)
 }
 
+fn page_text(pages: &BTreeMap<u32, String>, page: u32) -> Result<&str> {
+    pages
+        .get(&page)
+        .map(String::as_str)
+        .ok_or_else(|| TomeError::Parse(format!("page {page} is missing from the page store")))
+}
+
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension("partial");
-    fs::write(&tmp, bytes).map_err(parse)?;
+    fs::write(&tmp, bytes).map_err(|e| io(format!("{}: {e}", tmp.display())))?;
     fs::rename(&tmp, path).map_err(|e| {
         let _ = fs::remove_file(&tmp);
-        parse(e)
+        io(format!("{}: {e}", path.display()))
     })
 }
 

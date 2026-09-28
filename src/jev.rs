@@ -466,6 +466,9 @@ pub fn hit_line(hit: &Hit) -> Option<String> {
 ///
 /// Relevance is the shipped 0–3 score. Unavailable or uncertain answers are
 /// errors: the walk must not guess a path.
+///
+/// `score` blocks on a multi-thread tokio runtime (`block_in_place` + `block_on`).
+/// The `lapis` binary is multi-thread. A current-thread runtime panics.
 #[cfg(feature = "tome")]
 pub struct JevJudge {
     transport: Transport,

@@ -9,12 +9,13 @@ Clean-room note: [PROVENANCE.md](PROVENANCE.md).
 ## Frozen interface
 
 ```rust
-use tome_tree::{Budget, DocId, FakeJudge, Judge, NodeId, OpenPassages, TomeIndex};
+use tome_tree::{Budget, DocId, DocMeta, FakeJudge, Judge, NodeId, OpenPassages, TomeIndex};
 
 let index = TomeIndex::open(index_dir)?;          // `<vault>/.lapis/tomes`
 let docs: Vec<DocMeta> = index.docs()?;
 let nodes = index.tree(&doc, node, depth)?;       // node: Option<&NodeId>, depth: Option<u8>
-let passages = index.open(&doc, &node_ids)?;      // needs `OpenPassages` in scope
+let passages = index.passages(&doc, &node_ids)?;  // same read as `open`
+let _via_trait = index.open(&doc, &node_ids)?;    // needs `OpenPassages` in scope
 let walked = index.walk(&doc, query, &judge, Budget::default())?;
 ```
 
@@ -27,8 +28,8 @@ Every method returns `Result`. An empty `Vec` means "no children", never "the do
 | `TomeIndex::open(index_dir)` | Open or create the JSON store directory. |
 | `docs` | List stored `DocMeta`. Does not re-hash PDFs. |
 | `tree(doc, node, depth)` | Roots, or the one node named by `node`. `depth: None` is the full tree. `Some(0)` keeps the node and clears `children`. `child_count` stays the full count. |
-| `open(doc, nodes)` | One [`Passage`] per physical page. Hard cap **12 pages / 48 KB**. Over the cap is `over_budget`, not a clipped result. `truncated` is always `false`. |
-| `walk(doc, query, judge, budget)` | Beam **2**. At each level, score children 0–3, keep the top 2, stop at a leaf or a node of **≤ 3 pages**, then open. |
+| `open(doc, nodes)` / `passages(doc, nodes)` | One [`Passage`] per physical page. Hard cap **12 pages / 48 KB**. Over the cap is `over_budget`, not a clipped result. `truncated` is always `false`. A page missing from the store is an error. |
+| `walk(doc, query, judge, budget)` | Judge the roots first, keep beam **2**, then descend the same way. Stop at a leaf or a node of **≤ 3 pages**. Open whole nodes that fit the page and byte caps (highest score first). A node is never clipped. |
 | `build(pdf, vault_path, opts)` | Not part of the read surface. Writes the store. |
 | `meta(doc)` | One `DocMeta`. Same staleness check as `tree`. |
 | `content_id(path)` | SHA-256 doc id of a PDF. |
@@ -67,7 +68,7 @@ v0 `summary` is the `lead`: the first 400 characters of the node's page text. Th
 
 ## Build rules
 
-1. PDF outline (`lopdf`), destinations resolved to physical pages. Titles are trimmed. `Cover`, `Contents`, `Table of Contents`, `Title Page`, and `TOC` are dropped.
+1. PDF outline (`lopdf`), destinations resolved to physical pages. Titles are trimmed. `Cover`, `Contents`, `Table of Contents`, `Title Page`, and `TOC` are dropped. An item with no destination is skipped and its children are kept.
 2. If there is no outline, heading detection: `CHAPTER n`, numbered `n.m Title`, and a short title-case line at the top of a page. Repeated running headers are suppressed.
 3. `llm-struct` is a stub. It returns `no_structure` and does not invent a tree. The feature is off by default.
 4. `--allow-windows` is the only way to build a page-window tree when both of the above fail. Those nodes have `source: "window"`.
@@ -81,7 +82,9 @@ v0 `summary` is the `lead`: the first 400 characters of the node's page text. Th
 <vault>/.lapis/tomes/<sha256>.pages.jsonl
 ```
 
-`tree` / `open` / `walk` return `stale` when `builder_version` differs or the PDF at `DocMeta.path` exists and its bytes hash to something else. A missing file is not treated as a change: the doc id is the hash. `lapis tome build --force` rebuilds.
+`tree` / `open` / `walk` return `stale` when `builder_version` differs or the PDF at `DocMeta.path` exists and its bytes hash to something else. A missing file is not treated as a change: the doc id is the hash. After a hash matches, later calls skip the re-hash while that path's mtime and size stay the same. `lapis tome build --force` rebuilds.
+
+`DocId::parse` accepts 64 hex characters and rejects anything else, so a doc id cannot escape the index directory.
 
 ## Judge
 
@@ -94,6 +97,8 @@ pub trait Judge {
 `FakeJudge` scripts scores by node id for offline tests. A missing id is `judge_unavailable`.
 
 `lapis tome search` uses `jev::JevJudge`, which calls the existing transport (Facet, else `$TYPESAFE_API_KEY`, else none) and reads the shipped relevance score (0–3). `Transport::None`, an error, or an uncertain / low-confidence answer is `judge_unavailable`. The walk does not guess.
+
+`JevJudge::score` blocks on the current tokio runtime with `block_in_place`. The `lapis` binary uses a multi-thread runtime. A current-thread runtime panics, and calling `walk` from inside an existing `block_on` can deadlock.
 
 Jev does not write answers or summaries.
 
@@ -114,7 +119,7 @@ Defaults when the keys are omitted: provider `opencode`, model `deepseek-v4.1-fl
 
 `TomeError::code()` is one of:
 
-`unknown_doc` · `unknown_node` · `stale` · `no_structure` · `parse` · `over_budget` · `judge_unavailable`
+`unknown_doc` · `unknown_node` · `stale` · `no_structure` · `parse` · `io` · `over_budget` · `judge_unavailable`
 
 `lapis --json` puts that string on both `error.kind` and `error.code`.
 
