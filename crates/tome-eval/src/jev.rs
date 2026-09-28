@@ -286,7 +286,10 @@ impl Judge for JevJudge {
             Some(s) if !(0.0..=3.0).contains(&s) => {
                 Err(unavailable(format!("score {s} outside 0..=3 for {}", c.id)))
             }
-            _ => Err(unavailable(format!("uncertain score for {}", c.id))),
+            _ => Err(unavailable(format!(
+                "uncertain score for {} (score={score:?}, confidence={conf:?}, floor={})",
+                c.id, self.so.floor
+            ))),
         }
     }
 }
