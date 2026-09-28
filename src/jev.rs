@@ -464,31 +464,53 @@ pub fn hit_line(hit: &Hit) -> Option<String> {
 
 /// Scores tome-tree candidates with the existing System One transport.
 ///
-/// Relevance is the shipped 0–3 score. Unavailable or uncertain answers are
-/// errors: the walk must not guess a path.
+/// Relevance is the shipped 0–3 score. A missing transport, a transport error,
+/// a missing score, or a score outside 0..=3 is `judge_unavailable`. Low
+/// confidence is returned on the assessment; the walk applies
+/// [`tome_tree::JudgeConfidence`] from `[tome]`.
 ///
 /// `score` blocks on a multi-thread tokio runtime (`block_in_place` + `block_on`).
 /// The `lapis` binary is multi-thread. A current-thread runtime panics.
 #[cfg(feature = "tome")]
 pub struct JevJudge {
     transport: Transport,
+    policy: tome_tree::JudgeConfidence,
 }
 
 #[cfg(feature = "tome")]
 impl JevJudge {
     pub fn resolve() -> Self {
-        Self { transport: Transport::resolve() }
+        Self { transport: Transport::resolve(), policy: tome_tree::JudgeConfidence::default() }
+    }
+
+    pub fn with_policy(policy: tome_tree::JudgeConfidence) -> Self {
+        Self { policy, ..Self::resolve() }
     }
 }
 
 #[cfg(feature = "tome")]
 impl tome_tree::Judge for JevJudge {
     fn score(&self, query: &str, candidate: &tome_tree::Candidate) -> tome_tree::Result<u8> {
+        Ok(self.assess(query, candidate)?.score)
+    }
+
+    fn assess(
+        &self,
+        query: &str,
+        candidate: &tome_tree::Candidate,
+    ) -> tome_tree::Result<tome_tree::Assessment> {
         if let Some(reason) = self.transport.missing_reason() {
             return Err(tome_tree::TomeError::JudgeUnavailable { reason: reason.to_string() });
         }
+        // The shipped questions ask about a retrieved chunk. A TOC node is not
+        // one: say so, and rely on the candidate lead (which lists child titles)
+        // so the model is not scoring a bare chapter title.
         let state = format!(
-            "Search query: {query}\n\nSection: {}\nPages: {}-{}\n\nLead:\n{}",
+            "Search query: {query}\n\n\
+             This is a table-of-contents node, not a retrieved passage. \
+             The lead is the opening of the section. Child section titles are \
+             listed under the lead when this node has children.\n\n\
+             Section: {}\nPages: {}-{}\n\nLead:\n{}",
             candidate.title, candidate.page_start, candidate.page_end, candidate.lead
         );
         let handle = tokio::runtime::Handle::try_current()
@@ -496,20 +518,26 @@ impl tome_tree::Judge for JevJudge {
         let body = tokio::task::block_in_place(|| handle.block_on(self.transport.decide(&state)));
         match body {
             Err(reason) => Err(tome_tree::TomeError::JudgeUnavailable { reason }),
-            Ok(body) => relevance_score(&body),
+            Ok(body) => relevance_assessment(&body),
         }
+    }
+
+    fn confidence_policy(&self) -> tome_tree::JudgeConfidence {
+        self.policy
     }
 }
 
+/// Relevance score and the minimum reported confidence. Low confidence is not
+/// an error here; a missing or out-of-range score is.
 #[cfg(feature = "tome")]
-fn relevance_score(body: &Value) -> tome_tree::Result<u8> {
-    let judged = judgment_from_answers(0, body);
-    if judged.status != "judged" {
-        return Err(tome_tree::TomeError::JudgeUnavailable {
-            reason: format!("systemone {}", judged.status),
-        });
-    }
-    let Some(score) = judged.relevance else {
+fn relevance_assessment(body: &Value) -> tome_tree::Result<tome_tree::Assessment> {
+    let answers = body.get("answers").unwrap_or(body);
+    let score = answers.pointer("/relevance/score").and_then(Value::as_f64);
+    let noul_conf = answers.pointer("/answers/confidence").and_then(Value::as_f64);
+    let score_conf = answers.pointer("/relevance/confidence").and_then(Value::as_f64);
+    let cite_conf = answers.pointer("/cite/confidence").and_then(Value::as_f64);
+    let confidence = [noul_conf, score_conf, cite_conf].into_iter().flatten().reduce(f64::min);
+    let Some(score) = score else {
         return Err(tome_tree::TomeError::JudgeUnavailable { reason: "relevance score missing".into() });
     };
     if !(0.0..=3.0).contains(&score) {
@@ -517,7 +545,7 @@ fn relevance_score(body: &Value) -> tome_tree::Result<u8> {
             reason: format!("relevance {score} outside 0..=3"),
         });
     }
-    Ok(score.round() as u8)
+    Ok(tome_tree::Assessment { score: score.round() as u8, confidence })
 }
 
 #[cfg(test)]
@@ -725,15 +753,30 @@ mod tests {
         };
         let judge = JevJudge {
             transport: Transport::Fake(FakeScript::replies(vec![judged_body(0.9, 3.0, "supports", 0.99)])),
+            policy: tome_tree::JudgeConfidence::default(),
         };
         assert_eq!(tome_tree::Judge::score(&judge, "where", &candidate).unwrap(), 3);
 
-        let judge = JevJudge { transport: Transport::Fake(FakeScript::replies(vec![json!({})])) };
+        let judge = JevJudge {
+            transport: Transport::Fake(FakeScript::replies(vec![json!({})])),
+            policy: tome_tree::JudgeConfidence::default(),
+        };
         let err = tome_tree::Judge::score(&judge, "where", &candidate).unwrap_err();
         assert_eq!(err.code(), "judge_unavailable");
 
-        let judge = JevJudge { transport: Transport::None { reason: "typesafe_key_absent" } };
+        let judge = JevJudge {
+            transport: Transport::None { reason: "typesafe_key_absent" },
+            policy: tome_tree::JudgeConfidence::default(),
+        };
         let err = tome_tree::Judge::score(&judge, "where", &candidate).unwrap_err();
         assert!(err.to_string().contains("typesafe_key_absent"));
+
+        let low = JevJudge {
+            transport: Transport::Fake(FakeScript::replies(vec![judged_body(0.4, 1.4, "unrelated", 0.35)])),
+            policy: tome_tree::JudgeConfidence::DownWeight { min: 0.6 },
+        };
+        let assessment = tome_tree::Judge::assess(&low, "where", &candidate).unwrap();
+        assert_eq!(assessment.score, 1);
+        assert_eq!(assessment.confidence, Some(0.35));
     }
 }

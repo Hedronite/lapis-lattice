@@ -111,6 +111,21 @@ pub struct TomeModelConfig {
     /// Sampling temperature. `0` and `0.0` both parse.
     #[serde(default, deserialize_with = "de_temperature")]
     pub temperature: f32,
+    /// Confidence floor for the walk judge. Default `0.6` (the historical Jev floor).
+    #[serde(default = "default_judge_min_confidence", deserialize_with = "de_unit_interval")]
+    pub judge_min_confidence: f64,
+    /// `fail_closed` (default) or `down_weight`. Eli has not picked the spike policy.
+    /// `down_weight` records a low confidence and ranks on `round(score * confidence)`.
+    #[serde(default = "default_judge_confidence")]
+    pub judge_confidence: String,
+}
+
+fn default_judge_min_confidence() -> f64 {
+    0.6
+}
+
+fn default_judge_confidence() -> String {
+    "fail_closed".into()
 }
 
 fn default_tome_provider() -> String {
@@ -119,6 +134,22 @@ fn default_tome_provider() -> String {
 
 fn default_tome_model() -> String {
     "deepseek-v4.1-flash".into()
+}
+
+fn de_unit_interval<'de, D>(deserializer: D) -> std::result::Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = toml::Value::deserialize(deserializer)?;
+    let n = match value {
+        toml::Value::Float(n) => n,
+        toml::Value::Integer(n) => n as f64,
+        _ => return Err(serde::de::Error::custom("judge_min_confidence must be a number")),
+    };
+    if !(0.0..=1.0).contains(&n) {
+        return Err(serde::de::Error::custom("judge_min_confidence must be between 0 and 1"));
+    }
+    Ok(n)
 }
 
 fn de_temperature<'de, D>(deserializer: D) -> std::result::Result<f32, D::Error>
@@ -135,7 +166,13 @@ where
 
 impl Default for TomeModelConfig {
     fn default() -> Self {
-        Self { provider: default_tome_provider(), model: default_tome_model(), temperature: 0.0 }
+        Self {
+            provider: default_tome_provider(),
+            model: default_tome_model(),
+            temperature: 0.0,
+            judge_min_confidence: default_judge_min_confidence(),
+            judge_confidence: default_judge_confidence(),
+        }
     }
 }
 
@@ -490,6 +527,8 @@ mod tests {
         assert_eq!(c.tome.provider, "opencode");
         assert_eq!(c.tome.model, "deepseek-v4.1-flash");
         assert_eq!(c.tome.temperature, 0.0);
+        assert_eq!(c.tome.judge_min_confidence, 0.6);
+        assert_eq!(c.tome.judge_confidence, "fail_closed");
         let c: Config =
             toml::from_str("[tome]\nprovider = \"opencode\"\nmodel = \"other-model\"\ntemperature = 0\n")
                 .unwrap();
@@ -498,6 +537,10 @@ mod tests {
         let c: Config = toml::from_str("[tome]\ntemperature = 0.2\n").unwrap();
         assert_eq!(c.tome.provider, "opencode");
         assert_eq!(c.tome.temperature, 0.2);
+        let c: Config =
+            toml::from_str("[tome]\njudge_min_confidence = 0\njudge_confidence = \"down_weight\"\n").unwrap();
+        assert_eq!(c.tome.judge_min_confidence, 0.0);
+        assert_eq!(c.tome.judge_confidence, "down_weight");
     }
 
     #[test]

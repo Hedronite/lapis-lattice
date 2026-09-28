@@ -2,7 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use tome_tree::{Budget, BuildOptions, DocId, Node, NodeId, OpenPassages, SummaryModel, TomeIndex};
+use tome_tree::{
+    Budget, BuildOptions, DocId, JudgeConfidence, Node, NodeId, OpenPassages, SummaryModel, TomeIndex,
+};
 
 use crate::error::{LapisError, Result};
 use crate::jev::JevJudge;
@@ -20,6 +22,17 @@ pub fn run(ctx: &Ctx, command: TomeCommand) -> Result<()> {
 
 fn index(ctx: &Ctx) -> Result<TomeIndex> {
     TomeIndex::open(&ctx.vault.root.join(".lapis").join("tomes")).map_err(LapisError::from)
+}
+
+fn judge_policy(ctx: &Ctx) -> Result<JudgeConfidence> {
+    let min = ctx.cfg.tome.judge_min_confidence;
+    match ctx.cfg.tome.judge_confidence.as_str() {
+        "fail_closed" => Ok(JudgeConfidence::FailClosed { min }),
+        "down_weight" => Ok(JudgeConfidence::DownWeight { min }),
+        other => Err(LapisError::Usage(format!(
+            "judge_confidence must be fail_closed or down_weight, got {other}"
+        ))),
+    }
 }
 
 fn summary_model(ctx: &Ctx) -> Result<SummaryModel> {
@@ -91,7 +104,9 @@ fn search(ctx: &Ctx, args: TomeSearchArgs) -> Result<()> {
     let index = index(ctx)?;
     let doc = resolve_doc(&index, &ctx.vault.root, &args.doc)?;
     let budget = Budget { max_judge_calls: args.max_judge_calls, max_pages: args.max_pages };
-    let walked = index.walk(&doc, &args.query, &JevJudge::resolve(), budget).map_err(LapisError::from)?;
+    let walked = index
+        .walk(&doc, &args.query, &JevJudge::with_policy(judge_policy(ctx)?), budget)
+        .map_err(LapisError::from)?;
     if ctx.json {
         crate::emit_json(&walked)?;
     } else {

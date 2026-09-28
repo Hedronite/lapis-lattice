@@ -35,9 +35,9 @@ mod walk;
 pub use error::{Result, TomeError};
 pub use store::{BuildOptions, TomeIndex};
 pub use types::{
-    BEAM, BUILDER_VERSION, Budget, Candidate, DEFAULT_JUDGE_CALLS, DESCENT_RESERVE, DocId, DocMeta,
-    LEAD_CHARS, Node, NodeId, NodeSource, OPEN_BYTE_CAP, OPEN_PAGE_CAP, Passage, SPLIT_PAGES, SPLIT_TOKENS,
-    STOP_PAGES, SummaryModel, Walk,
+    Assessment, BEAM, BUILDER_VERSION, Budget, Candidate, DEFAULT_JUDGE_CALLS, DEFAULT_JUDGE_MIN_CONFIDENCE,
+    DESCENT_RESERVE, DocId, DocMeta, JudgeConfidence, Judged, LEAD_CHARS, Node, NodeId, NodeSource,
+    OPEN_BYTE_CAP, OPEN_PAGE_CAP, Passage, SPLIT_PAGES, SPLIT_TOKENS, STOP_PAGES, SummaryModel, Walk,
 };
 pub use walk::{FakeJudge, Judge};
 

@@ -486,6 +486,136 @@ fn dense_leaf_walk_fits_the_byte_cap() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn malformed_page_is_a_parse_fallback_not_a_panic() {
+    let dir = scratch("panic-page");
+    let pdf_path = dir.join("bad.pdf");
+    pdf::write_panic_page(&pdf_path);
+    let meta = build_at(&dir, &pdf_path, "bad", opts("bad"));
+    assert!(meta.outline);
+    assert_eq!(meta.summary_model, "opencode/test-model");
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let nodes = index.tree(&meta.doc_id, None, None).unwrap();
+    let text: String = nodes.iter().map(|n| n.lead.clone()).collect();
+    assert!(text.contains("gamma marker"), "good page survived the bad page: {text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cyclic_page_tree_is_parse_not_a_stack_overflow() {
+    let dir = scratch("cycle-pages");
+    let pdf_path = dir.join("cycle.pdf");
+    pdf::write_cyclic_page_tree(&pdf_path);
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let err = index.build(&pdf_path, "cycle.pdf", &opts("cycle")).unwrap_err();
+    assert_eq!(code(&err), "parse", "{err}");
+    assert!(err.to_string().contains("cycle"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cyclic_outline_is_parse_not_a_stack_overflow() {
+    let dir = scratch("cycle-outline");
+    let pdf_path = dir.join("cycle.pdf");
+    pdf::write_cyclic_outline(&pdf_path);
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let err = index.build(&pdf_path, "cycle.pdf", &opts("cycle")).unwrap_err();
+    assert_eq!(code(&err), "parse", "{err}");
+    assert!(err.to_string().contains("cycle"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cyclic_form_without_an_outline_is_no_structure() {
+    let dir = scratch("cycle-form");
+    let pdf_path = dir.join("form.pdf");
+    pdf::write_cyclic_form(&pdf_path);
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let err = index.build(&pdf_path, "form.pdf", &opts("form")).unwrap_err();
+    assert_eq!(code(&err), "no_structure", "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn failed_walk_leaves_summary_model_on_the_doc() {
+    let dir = scratch("summary");
+    let pdf_path = dir.join("one.pdf");
+    pdf::write(
+        &pdf_path,
+        &[vec!["CHAPTER 1", "Introduction", "alpha marker."]],
+        &[pdf::Mark { title: "Chapter", page: 0, parent: None }],
+    );
+    let meta = build_at(&dir, &pdf_path, "one", opts("one"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let err = index
+        .walk(&meta.doc_id, "q", &FakeJudge::new(Vec::<(&str, u8)>::new()), Budget::default())
+        .unwrap_err();
+    assert_eq!(code(&err), "judge_unavailable");
+    let again = index.meta(&meta.doc_id).unwrap();
+    assert_eq!(again.summary_model, "opencode/test-model");
+    assert_eq!(again.summary_temperature, 0.0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn low_confidence_can_down_weight_instead_of_aborting() {
+    let dir = scratch("conf");
+    let pdf_path = dir.join("two.pdf");
+    pdf::write(
+        &pdf_path,
+        &[vec!["CHAPTER 1", "Alpha body."], vec!["CHAPTER 2", "Beta body."]],
+        &[
+            pdf::Mark { title: "Alpha", page: 0, parent: None },
+            pdf::Mark { title: "Beta", page: 1, parent: None },
+        ],
+    );
+    let meta = build_at(&dir, &pdf_path, "two", opts("two"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let judge = FakeJudge::new([("0001", 3u8), ("0002", 3u8)])
+        .with_confidence([("0001", 0.3), ("0002", 0.95)])
+        .with_policy(tome_tree::JudgeConfidence::DownWeight { min: 0.6 });
+    let walked = index.walk(&meta.doc_id, "beta", &judge, Budget::default()).unwrap();
+    assert!(walked.nodes.iter().any(|id| id.as_str() == "0002"));
+    assert_eq!(walked.judged.len(), 2);
+    assert_eq!(walked.judged[0].score, 3);
+    assert_eq!(walked.judged[0].confidence, Some(0.3));
+    assert_eq!(walked.judged[0].rank, 1, "3 * 0.3 rounds to 1");
+    let closed = FakeJudge::new([("0001", 3u8)]).with_confidence([("0001", 0.3)]);
+    let err = index.walk(&meta.doc_id, "beta", &closed, Budget::default()).unwrap_err();
+    assert_eq!(code(&err), "judge_unavailable");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn candidate_lead_includes_child_titles() {
+    let dir = scratch("children");
+    let pdf_path = dir.join("tree.pdf");
+    pdf::write(
+        &pdf_path,
+        &[vec!["CHAPTER 1", "Intro body."], vec!["Section A", "detail body."]],
+        &[
+            pdf::Mark { title: "Chapter", page: 0, parent: None },
+            pdf::Mark { title: "Section A", page: 1, parent: Some(0) },
+        ],
+    );
+    let meta = build_at(&dir, &pdf_path, "tree", opts("tree"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    struct See(std::sync::Mutex<String>);
+    impl Judge for See {
+        fn score(&self, _: &str, c: &tome_tree::Candidate) -> tome_tree::Result<u8> {
+            if c.id.as_str() == "0001" {
+                *self.0.lock().unwrap() = c.lead.clone();
+            }
+            Ok(if c.id.as_str() == "0001" { 3 } else { 0 })
+        }
+    }
+    let see = See(std::sync::Mutex::new(String::new()));
+    index.walk(&meta.doc_id, "q", &see, Budget::default()).unwrap();
+    let lead = see.0.lock().unwrap().clone();
+    assert!(lead.contains("Section A"), "{lead}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Vault PDFs are not in this repo. Set `TOME_VAULT` to a directory that
 /// contains the spike picks and run with `--ignored`.
 #[test]

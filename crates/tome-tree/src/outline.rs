@@ -29,12 +29,21 @@ pub(crate) fn extract(doc: &Document) -> Result<Option<Vec<RawNode>>> {
     if nodes.is_empty() { Ok(None) } else { Ok(Some(nodes)) }
 }
 
+const MAX_DEPTH: u32 = 64;
+
 /// Drop Cover / Contents front-matter and consecutive duplicate titles.
 pub(crate) fn drop_front_matter(nodes: Vec<RawNode>) -> Vec<RawNode> {
+    drop_front_matter_at(nodes, 0)
+}
+
+fn drop_front_matter_at(nodes: Vec<RawNode>, depth: u32) -> Vec<RawNode> {
+    if depth > MAX_DEPTH {
+        return nodes;
+    }
     let mut out = Vec::new();
     for mut node in nodes {
         node.title = normalize_title(&node.title);
-        node.children = drop_front_matter(node.children);
+        node.children = drop_front_matter_at(node.children, depth + 1);
         if is_front_matter(&node.title) {
             out.extend(node.children);
             continue;
@@ -55,6 +64,13 @@ pub(crate) fn drop_front_matter(nodes: Vec<RawNode>) -> Vec<RawNode> {
 
 /// Fill `page_end` from the next sibling that starts later, capped by the parent.
 pub(crate) fn assign_ends(nodes: &mut [RawNode], parent_end: u32) {
+    assign_ends_at(nodes, parent_end, 0);
+}
+
+fn assign_ends_at(nodes: &mut [RawNode], parent_end: u32, depth: u32) {
+    if depth > MAX_DEPTH {
+        return;
+    }
     for i in 0..nodes.len() {
         let start = nodes[i].page_start.min(parent_end).max(1);
         nodes[i].page_start = start;
@@ -68,7 +84,7 @@ pub(crate) fn assign_ends(nodes: &mut [RawNode], parent_end: u32) {
             end = start;
         }
         nodes[i].page_end = end;
-        assign_ends(&mut nodes[i].children, end);
+        assign_ends_at(&mut nodes[i].children, end, depth + 1);
     }
 }
 
@@ -232,9 +248,30 @@ fn named_destinations(doc: &Document) -> Result<HashMap<Vec<u8>, Object>> {
     }
     if let Some(names) = opt(catalog, b"Names") {
         let names = deref_dict(doc, names)?;
-        if let Some(dests) = opt(&names, b"Dests") {
-            let tree = deref_dict(doc, dests)?;
-            collect_name_tree(doc, &tree, &mut out, 0)?;
+        if let Some(dests) = opt(&names, b"Dests").cloned() {
+            match dests {
+                Object::Reference(id) => {
+                    let mut seen = HashSet::new();
+                    collect_name_tree(doc, id, &mut out, &mut seen, 0)?;
+                }
+                other => {
+                    let dict = deref_dict(doc, &other)?;
+                    if let Some(kids) =
+                        opt(&dict, b"Kids").and_then(|o| o.as_array().ok()).map(|k| k.to_vec())
+                    {
+                        let mut seen = HashSet::new();
+                        for kid in kids {
+                            let kid_id =
+                                kid.as_reference().map_err(|_| parse("name tree kid is not a reference"))?;
+                            collect_name_tree(doc, kid_id, &mut out, &mut seen, 1)?;
+                        }
+                    }
+                    let dict = deref_dict(doc, &other)?;
+                    if let Some(pairs) = opt(&dict, b"Names").and_then(|o| o.as_array().ok()) {
+                        collect_name_pairs(doc, pairs, &mut out)?;
+                    }
+                }
+            }
         }
     }
     Ok(out)
@@ -256,32 +293,47 @@ fn collect_name_dict(doc: &Document, dict: &Dictionary, out: &mut HashMap<Vec<u8
 
 fn collect_name_tree(
     doc: &Document,
-    node: &Dictionary,
+    id: ObjectId,
     out: &mut HashMap<Vec<u8>, Object>,
+    seen: &mut HashSet<ObjectId>,
     depth: u8,
 ) -> Result<()> {
+    if !seen.insert(id) {
+        return Err(parse("name tree cycle"));
+    }
     if depth > 32 {
         return Err(parse("name tree too deep"));
     }
-    if let Some(kids) = opt(node, b"Kids").and_then(|o| o.as_array().ok()) {
-        for kid in kids {
-            let dict = deref_dict(doc, kid)?;
-            collect_name_tree(doc, &dict, out, depth + 1)?;
-        }
+    let kids = {
+        let node = doc.get_dictionary(id).map_err(parse)?;
+        opt(node, b"Kids").and_then(|o| o.as_array().ok()).map(|kids| kids.to_vec()).unwrap_or_default()
+    };
+    for kid in kids {
+        let kid_id = kid.as_reference().map_err(|_| parse("name tree kid is not a reference"))?;
+        collect_name_tree(doc, kid_id, out, seen, depth + 1)?;
     }
-    if let Some(names) = opt(node, b"Names").and_then(|o| o.as_array().ok()) {
-        let mut it = names.iter();
-        while let Some(key) = it.next() {
-            let Some(val) = it.next() else {
-                break;
-            };
-            let key = key.as_str().map_err(parse)?.to_vec();
-            let resolved = match val {
-                Object::Reference(id) => doc.get_object(*id).map_err(parse)?.clone(),
-                other => other.clone(),
-            };
-            out.insert(key, resolved);
-        }
+    let names = {
+        let node = doc.get_dictionary(id).map_err(parse)?;
+        opt(node, b"Names").and_then(|o| o.as_array().ok()).map(|names| names.to_vec())
+    };
+    if let Some(names) = names {
+        collect_name_pairs(doc, &names, out)?;
+    }
+    Ok(())
+}
+
+fn collect_name_pairs(doc: &Document, names: &[Object], out: &mut HashMap<Vec<u8>, Object>) -> Result<()> {
+    let mut it = names.iter();
+    while let Some(key) = it.next() {
+        let Some(val) = it.next() else {
+            break;
+        };
+        let key = key.as_str().map_err(parse)?.to_vec();
+        let resolved = match val {
+            Object::Reference(id) => doc.get_object(*id).map_err(parse)?.clone(),
+            other => other.clone(),
+        };
+        out.insert(key, resolved);
     }
     Ok(())
 }

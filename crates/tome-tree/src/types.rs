@@ -227,7 +227,38 @@ pub const DEFAULT_JUDGE_CALLS: u32 = 24;
 pub const DESCENT_RESERVE: u32 = 8;
 
 /// Builder stamp stored on every tree. A mismatch is `stale`.
-pub const BUILDER_VERSION: &str = "0.3.0";
+pub const BUILDER_VERSION: &str = "0.4.0";
+
+/// Default confidence floor. Below this, [`JudgeConfidence::FailClosed`] aborts
+/// the walk. The number is the historical Jev floor; it is config, not a tuned
+/// constant. Eli has not picked the spike policy.
+pub const DEFAULT_JUDGE_MIN_CONFIDENCE: f64 = 0.6;
+
+/// How a reported confidence affects ranking. Missing confidence is not a
+/// failure: the judge did not report one. A missing score, a score outside
+/// 0..=3, or a dead transport is still `judge_unavailable`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum JudgeConfidence {
+    /// `confidence < min` stops the walk.
+    FailClosed { min: f64 },
+    /// `confidence < min` ranks on `round(score * confidence)` instead of aborting.
+    /// At or above `min`, the raw score is the rank.
+    DownWeight { min: f64 },
+}
+
+impl Default for JudgeConfidence {
+    fn default() -> Self {
+        Self::FailClosed { min: DEFAULT_JUDGE_MIN_CONFIDENCE }
+    }
+}
+
+/// One judge call. `score` is the model's 0..=3. `confidence` is whatever the
+/// model reported, including values below the floor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Assessment {
+    pub score: u8,
+    pub confidence: Option<f64>,
+}
 
 /// Judge-call and open-page budget for one walk. The 48 KB cap always applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,6 +285,24 @@ pub struct Walk {
     /// have been exceeded. Whole nodes only; nothing here was clipped.
     #[serde(default)]
     pub skipped: Vec<NodeId>,
+    /// Every candidate the walk scored, in call order. Present on a finished
+    /// walk so an eval can study score and confidence after the fact.
+    #[serde(default)]
+    pub judged: Vec<Judged>,
+}
+
+/// One scored candidate. `rank` is what the beam sorted on after the confidence policy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Judged {
+    pub node_id: NodeId,
+    pub title: String,
+    pub page_start: u32,
+    pub page_end: u32,
+    /// Model score, 0..=3, before down-weighting.
+    pub score: u8,
+    pub confidence: Option<f64>,
+    /// Score the beam used.
+    pub rank: u8,
 }
 
 /// What the judge sees for one child. Scores are 0–3.

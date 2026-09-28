@@ -5,34 +5,45 @@ use crate::outline::normalize_title;
 use crate::pdf::char_count;
 use crate::types::{NodeSource, OPEN_BYTE_CAP, RawNode, SPLIT_PAGES, SPLIT_TOKENS};
 
-pub(crate) fn split_all(nodes: &mut [RawNode], pages: &[String]) {
+const MAX_DEPTH: u32 = 64;
+
+pub(crate) fn split_all(nodes: &mut [RawNode], pages: &[String]) -> crate::error::Result<()> {
     for node in nodes {
-        split_node(node, pages);
+        split_node(node, pages, 0)?;
     }
+    Ok(())
 }
 
-fn split_node(node: &mut RawNode, pages: &[String]) {
+fn split_node(node: &mut RawNode, pages: &[String], depth: u32) -> crate::error::Result<()> {
+    if depth > MAX_DEPTH {
+        return Err(crate::error::parse("split deeper than 64"));
+    }
     for child in &mut node.children {
-        split_node(child, pages);
+        split_node(child, pages, depth + 1)?;
     }
     if !node.children.is_empty() {
-        return;
+        return Ok(());
     }
     let span = node.page_end.saturating_sub(node.page_start).saturating_add(1);
     let tokens = char_count(pages, node.page_start, node.page_end) / 4;
     let bytes = byte_count(pages, node.page_start, node.page_end);
     if span <= SPLIT_PAGES && tokens <= SPLIT_TOKENS && bytes <= OPEN_BYTE_CAP {
-        return;
+        return Ok(());
     }
     let subs = subheadings(node, pages);
     if !subs.is_empty() {
         node.children = subs;
         for child in &mut node.children {
-            split_node(child, pages);
+            // A child that still covers the whole node cannot be split again.
+            if child.page_start == node.page_start && child.page_end == node.page_end {
+                continue;
+            }
+            split_node(child, pages, depth + 1)?;
         }
-        return;
+        return Ok(());
     }
     node.children = windows_under(node, pages);
+    Ok(())
 }
 
 fn subheadings(node: &RawNode, pages: &[String]) -> Vec<RawNode> {
@@ -117,7 +128,7 @@ mod tests {
     fn long_leaf_becomes_page_windows() {
         let pages = vec!["not a heading, just a sentence about the page.".into(); 25];
         let mut nodes = vec![leaf(1, 25)];
-        split_all(&mut nodes, &pages);
+        split_all(&mut nodes, &pages).unwrap();
         assert_eq!(nodes[0].source, NodeSource::Outline);
         assert_eq!(nodes[0].children.len(), 3);
         assert_eq!(nodes[0].children[0].page_start, 1);
@@ -133,7 +144,7 @@ mod tests {
         let big = "a".repeat(80_000);
         let pages = vec![big, "short".into(), "short".into()];
         let mut nodes = vec![leaf(1, 3)];
-        split_all(&mut nodes, &pages);
+        split_all(&mut nodes, &pages).unwrap();
         assert!(nodes[0].children.len() >= 2);
         assert_eq!(nodes[0].children[0].page_start, 1);
         assert_eq!(nodes[0].children[0].page_end, 1);
@@ -144,7 +155,7 @@ mod tests {
         let page = "d".repeat(6_000);
         let pages = vec![page; 10];
         let mut nodes = vec![leaf(1, 10)];
-        split_all(&mut nodes, &pages);
+        split_all(&mut nodes, &pages).unwrap();
         assert!(nodes[0].children.len() >= 2, "10 dense pages must split under the open byte cap");
         for child in &nodes[0].children {
             assert!(byte_count(&pages, child.page_start, child.page_end) <= OPEN_BYTE_CAP);

@@ -122,7 +122,7 @@ impl TomeIndex {
             });
         }
         let pages = &built.pages;
-        let (ids, skipped, judge_calls) =
+        let choice =
             crate::walk::choose(
                 &built.nodes,
                 query,
@@ -131,8 +131,16 @@ impl TomeIndex {
                 |page| Ok(page_text(pages, page)?.len()),
             )?;
         let page_cap = budget.max_pages.min(OPEN_PAGE_CAP);
-        let passages = open_loaded(doc, &built.nodes, pages, &ids, page_cap, OPEN_BYTE_CAP)?;
-        Ok(Walk { doc_id: doc.clone(), query: query.to_string(), nodes: ids, passages, judge_calls, skipped })
+        let passages = open_loaded(doc, &built.nodes, pages, &choice.ids, page_cap, OPEN_BYTE_CAP)?;
+        Ok(Walk {
+            doc_id: doc.clone(),
+            query: query.to_string(),
+            nodes: choice.ids,
+            passages,
+            judge_calls: choice.calls,
+            skipped: choice.skipped,
+            judged: choice.judged,
+        })
     }
 
     pub fn build(&self, pdf: &Path, vault_path: &str, opts: &BuildOptions) -> Result<DocMeta> {
@@ -147,14 +155,14 @@ impl TomeIndex {
         let (mut raw, source, had_outline) = structure(&loaded, opts, id.as_str())?;
         let page_count = loaded.pages.len() as u32;
         crate::outline::assign_ends(&mut raw, page_count);
-        crate::split::split_all(&mut raw, &loaded.pages);
+        crate::split::split_all(&mut raw, &loaded.pages)?;
         if raw.is_empty() {
             return Err(TomeError::NoStructure {
                 doc: id.to_string(),
                 detail: "refusing to store an empty tree".into(),
             });
         }
-        let nodes = finalize(&raw, &loaded.pages, "", 1);
+        let nodes = finalize(&raw, &loaded.pages, "", 1)?;
         if nodes.is_empty() {
             return Err(TomeError::NoStructure {
                 doc: id.to_string(),
@@ -356,38 +364,49 @@ fn structure(
     })
 }
 
-fn finalize(nodes: &[RawNode], pages: &[String], prefix: &str, depth: u8) -> Vec<Node> {
-    nodes
-        .iter()
-        .enumerate()
-        .map(|(i, node)| {
-            let local = format!("{:04}", i + 1);
-            let id = NodeId(if prefix.is_empty() { local } else { format!("{prefix}.{local}") });
-            let children = finalize(&node.children, pages, id.as_str(), depth.saturating_add(1));
-            let lead = pdf::lead_text(pages, node.page_start, node.page_end);
-            Node {
-                id,
-                title: node.title.clone(),
-                level: depth,
-                page_start: node.page_start,
-                page_end: node.page_end,
-                lead: lead.clone(),
-                summary: lead,
-                source: node.source,
-                child_count: children.len(),
-                children,
-            }
-        })
-        .collect()
+fn finalize(nodes: &[RawNode], pages: &[String], prefix: &str, depth: u8) -> Result<Vec<Node>> {
+    if depth > 64 {
+        return Err(parse("tree deeper than 64"));
+    }
+    let mut out = Vec::with_capacity(nodes.len());
+    for (i, node) in nodes.iter().enumerate() {
+        let local = format!("{:04}", i + 1);
+        let id = NodeId(if prefix.is_empty() { local } else { format!("{prefix}.{local}") });
+        let children = finalize(&node.children, pages, id.as_str(), depth.saturating_add(1))?;
+        let lead = pdf::lead_text(pages, node.page_start, node.page_end);
+        out.push(Node {
+            id,
+            title: node.title.clone(),
+            level: depth,
+            page_start: node.page_start,
+            page_end: node.page_end,
+            lead: lead.clone(),
+            summary: lead,
+            source: node.source,
+            child_count: children.len(),
+            children,
+        });
+    }
+    Ok(out)
 }
 
 fn cut(node: &Node, depth: Option<u8>) -> Node {
+    cut_at(node, depth, 0)
+}
+
+fn cut_at(node: &Node, depth: Option<u8>, hops: u8) -> Node {
     let mut out = node.clone();
+    if hops >= 64 {
+        out.children.clear();
+        return out;
+    }
     match depth {
-        None => {}
+        None => {
+            out.children = node.children.iter().map(|child| cut_at(child, None, hops + 1)).collect();
+        }
         Some(0) => out.children.clear(),
         Some(d) => {
-            out.children = node.children.iter().map(|child| cut(child, Some(d - 1))).collect();
+            out.children = node.children.iter().map(|child| cut_at(child, Some(d - 1), hops + 1)).collect();
         }
     }
     out.child_count = node.children.len();
@@ -395,13 +414,17 @@ fn cut(node: &Node, depth: Option<u8>) -> Node {
 }
 
 fn find<'a>(nodes: &'a [Node], id: &NodeId) -> Option<&'a Node> {
-    for node in nodes {
+    let mut stack: Vec<&Node> = nodes.iter().rev().collect();
+    let mut guard = 0u32;
+    while let Some(node) = stack.pop() {
+        guard += 1;
+        if guard > 100_000 {
+            return None;
+        }
         if &node.id == id {
             return Some(node);
         }
-        if let Some(hit) = find(&node.children, id) {
-            return Some(hit);
-        }
+        stack.extend(node.children.iter().rev());
     }
     None
 }

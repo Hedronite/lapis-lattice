@@ -29,7 +29,7 @@ Every method returns `Result`. An empty `Vec` means "no children", never "the do
 | `docs` | List stored `DocMeta`. Does not re-hash PDFs. |
 | `tree(doc, node, depth)` | Roots, or the one node named by `node`. `depth: None` is the full tree. `Some(0)` keeps the node and clears `children`. `child_count` stays the full count. |
 | `open(doc, nodes)` / `passages(doc, nodes)` | One [`Passage`] per physical page. Hard cap **12 pages / 48 KB**. Over the cap is `over_budget`, not a clipped result. `truncated` is always `false`. A page missing from the store is an error. |
-| `walk(doc, query, judge, budget)` | Judge the roots first, keep beam **2**, then descend the same way. A frontier wider than the calls left after a reserve of **8** is cut in reading order, so descent still has room. Stop at a leaf or a node of **≤ 3 pages**. Open whole nodes that fit the page and byte caps (highest score first). Nodes that do not fit are listed on `Walk.skipped` and are not clipped. |
+| `walk(doc, query, judge, budget)` | Judge the roots first, keep beam **2**, then descend the same way. A frontier wider than the calls left after a reserve of **8** is cut in reading order, so descent still has room. Stop at a leaf or a node of **≤ 3 pages**. Open whole nodes that fit the page and byte caps (highest rank first). Nodes that do not fit are listed on `Walk.skipped` and are not clipped. Each scored candidate is on `Walk.judged` (`score`, `confidence`, `rank`). |
 | `build(pdf, vault_path, opts)` | Not part of the read surface. Writes the store. |
 | `meta(doc)` | One `DocMeta`. Same staleness check as `tree`. |
 | `content_id(path)` | SHA-256 doc id of a PDF. |
@@ -57,7 +57,8 @@ DocMeta {
 }
 
 Passage { node_id, page, text, truncated }
-Walk { doc_id, query, nodes, passages, judge_calls, skipped }
+Walk { doc_id, query, nodes, passages, judge_calls, skipped, judged }
+Judged { node_id, title, page_start, page_end, score, confidence, rank }
 ```
 
 `level` is the depth in the tree. Roots are 1.
@@ -96,7 +97,19 @@ pub trait Judge {
 
 `FakeJudge` scripts scores by node id for offline tests. A missing id is `judge_unavailable`.
 
-`lapis tome search` uses `jev::JevJudge`, which calls the existing transport (Facet, else `$TYPESAFE_API_KEY`, else none) and reads the shipped relevance score (0–3). `Transport::None`, an error, or an uncertain / low-confidence answer is `judge_unavailable`. The walk does not guess.
+`lapis tome search` uses `jev::JevJudge`, which calls the existing transport (Facet, else `$TYPESAFE_API_KEY`, else none) and reads the shipped relevance score (0–3). A missing transport, a transport error, a missing score, or a score outside 0..=3 is `judge_unavailable`.
+
+Confidence is config, not a hardcoded gate:
+
+```toml
+[tome]
+judge_min_confidence = 0.6   # historical floor; not tuned
+judge_confidence = "fail_closed"   # or "down_weight"
+```
+
+`fail_closed` (the default) returns `judge_unavailable` when a reported confidence is below the floor. `down_weight` keeps the candidate and ranks on `round(score * confidence)` instead. Missing confidence is not a failure. The candidate lead includes up to 16 child section titles, because a root that shows only its own 400-character lead is a thin thing to score.
+
+The shipped System One questions still ask whether a *chunk* answers the query, and the recorded confidence is the minimum of the noul, relevance, and cite confidences. A TOC root is not a chunk. On a real book that showed up as relevance around 1.4 with confidence 0.29–0.41: the model was unsure, and the cite score pulled the minimum under 0.6, so every `fail_closed` walk aborted. That is a framing problem, not a transport failure. Eli picks which mode the spike runs.
 
 `JevJudge::score` blocks on the current tokio runtime with `block_in_place`. The `lapis` binary uses a multi-thread runtime. A current-thread runtime panics, and calling `walk` from inside an existing `block_on` can deadlock.
 
