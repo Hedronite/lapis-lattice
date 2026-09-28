@@ -144,8 +144,8 @@ fn print_passages(passages: &[tome_tree::Passage]) {
 
 fn resolve_doc(index: &TomeIndex, vault: &Path, arg: &str) -> Result<DocId> {
     let trimmed = arg.trim();
-    if is_sha256(trimmed) {
-        return Ok(DocId::from(trimmed));
+    if let Ok(id) = DocId::try_from(trimmed) {
+        return Ok(id);
     }
     if let Ok(docs) = index.docs()
         && let Some(meta) = docs.into_iter().find(|meta| meta.path == trimmed)
@@ -173,10 +173,6 @@ fn resolve_pdf(vault: &Path, arg: &str) -> PathBuf {
 
 fn vault_rel(vault: &Path, abs: &Path) -> String {
     abs.strip_prefix(vault).unwrap_or(abs).to_string_lossy().replace('\\', "/")
-}
-
-fn is_sha256(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 impl From<tome_tree::TomeError> for LapisError {

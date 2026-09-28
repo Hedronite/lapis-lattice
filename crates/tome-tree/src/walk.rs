@@ -1,7 +1,9 @@
 //! Beam-2 walk. Roots are judged first; unavailable is an error, never a guess.
 
 use crate::error::{Result, TomeError};
-use crate::types::{BEAM, Budget, Candidate, Node, NodeId, OPEN_BYTE_CAP, OPEN_PAGE_CAP, STOP_PAGES};
+use crate::types::{
+    BEAM, Budget, Candidate, DESCENT_RESERVE, Node, NodeId, OPEN_BYTE_CAP, OPEN_PAGE_CAP, STOP_PAGES,
+};
 
 /// Score one candidate from 0 to 3.
 ///
@@ -57,11 +59,20 @@ pub(crate) fn choose(
     judge: &dyn Judge,
     budget: Budget,
     mut page_len: impl FnMut(u32) -> Result<usize>,
-) -> Result<(Vec<NodeId>, u32)> {
+) -> Result<(Vec<NodeId>, Vec<NodeId>, u32)> {
     let mut terminals: Vec<Pick> = Vec::new();
     let mut frontier: Vec<Node> = roots.to_vec();
     let mut calls = 0u32;
     while !frontier.is_empty() {
+        // A frontier wider than the calls left after `DESCENT_RESERVE` is cut
+        // in reading order, so a deep outline still has calls left to descend.
+        // When the reserve would leave nothing, the loop below errors once the
+        // budget is actually spent (a caller-set budget of 1 still fails).
+        let remaining = budget.max_judge_calls.saturating_sub(calls);
+        let room = remaining.saturating_sub(DESCENT_RESERVE);
+        if room > 0 && (frontier.len() as u32) > room {
+            frontier.truncate(room as usize);
+        }
         let mut scored: Vec<Pick> = Vec::with_capacity(frontier.len());
         for node in frontier {
             if calls >= budget.max_judge_calls {
@@ -97,8 +108,8 @@ pub(crate) fn choose(
         frontier = next;
     }
     let page_cap = budget.max_pages.min(OPEN_PAGE_CAP);
-    let ids = fit_whole_nodes(terminals, page_cap, OPEN_BYTE_CAP, &mut page_len)?;
-    Ok((ids, calls))
+    let (ids, skipped) = fit_whole_nodes(terminals, page_cap, OPEN_BYTE_CAP, &mut page_len)?;
+    Ok((ids, skipped, calls))
 }
 
 /// Keep entire nodes, best score first, that fit in both caps.
@@ -107,9 +118,10 @@ fn fit_whole_nodes(
     page_cap: u32,
     byte_cap: usize,
     page_len: &mut impl FnMut(u32) -> Result<usize>,
-) -> Result<Vec<NodeId>> {
+) -> Result<(Vec<NodeId>, Vec<NodeId>)> {
     terminals.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.node.id.cmp(&b.node.id)));
     let mut taken: Vec<Node> = Vec::new();
+    let mut skipped: Vec<NodeId> = Vec::new();
     let mut pages = 0u32;
     let mut bytes = 0usize;
     for pick in terminals {
@@ -122,6 +134,7 @@ fn fit_whole_nodes(
             node_bytes = node_bytes.saturating_add(page_len(page)?);
         }
         if pages.saturating_add(span) > page_cap || bytes.saturating_add(node_bytes) > byte_cap {
+            skipped.push(pick.node.id);
             continue;
         }
         pages += span;
@@ -134,7 +147,7 @@ fn fit_whole_nodes(
         });
     }
     taken.sort_by(|a, b| a.page_start.cmp(&b.page_start).then(a.id.cmp(&b.id)));
-    Ok(taken.into_iter().map(|node| node.id).collect())
+    Ok((taken.into_iter().map(|node| node.id).collect(), skipped))
 }
 
 fn span_pages(node: &Node) -> u32 {

@@ -1,9 +1,9 @@
-//! Split leaves that run longer than 10 pages or ~20k tokens.
+//! Split leaves that run longer than 10 pages, ~20k tokens, or the open byte cap.
 
 use crate::headings::detect;
 use crate::outline::normalize_title;
 use crate::pdf::char_count;
-use crate::types::{NodeSource, RawNode, SPLIT_PAGES, SPLIT_TOKENS};
+use crate::types::{NodeSource, OPEN_BYTE_CAP, RawNode, SPLIT_PAGES, SPLIT_TOKENS};
 
 pub(crate) fn split_all(nodes: &mut [RawNode], pages: &[String]) {
     for node in nodes {
@@ -20,7 +20,8 @@ fn split_node(node: &mut RawNode, pages: &[String]) {
     }
     let span = node.page_end.saturating_sub(node.page_start).saturating_add(1);
     let tokens = char_count(pages, node.page_start, node.page_end) / 4;
-    if span <= SPLIT_PAGES && tokens <= SPLIT_TOKENS {
+    let bytes = byte_count(pages, node.page_start, node.page_end);
+    if span <= SPLIT_PAGES && tokens <= SPLIT_TOKENS && bytes <= OPEN_BYTE_CAP {
         return;
     }
     let subs = subheadings(node, pages);
@@ -53,7 +54,10 @@ fn windows_under(node: &RawNode, pages: &[String]) -> Vec<RawNode> {
     let mut start = node.page_start;
     while start <= node.page_end {
         let mut end = (start + SPLIT_PAGES - 1).min(node.page_end);
-        while end > start && char_count(pages, start, end) / 4 > SPLIT_TOKENS {
+        while end > start
+            && (char_count(pages, start, end) / 4 > SPLIT_TOKENS
+                || byte_count(pages, start, end) > OPEN_BYTE_CAP)
+        {
             end -= 1;
         }
         children.push(RawNode {
@@ -66,6 +70,19 @@ fn windows_under(node: &RawNode, pages: &[String]) -> Vec<RawNode> {
         start = end + 1;
     }
     children
+}
+
+fn byte_count(pages: &[String], start: u32, end: u32) -> usize {
+    if start == 0 || end < start {
+        return 0;
+    }
+    let mut n = 0usize;
+    for page in start..=end {
+        if let Some(text) = pages.get((page as usize).wrapping_sub(1)) {
+            n = n.saturating_add(text.len());
+        }
+    }
+    n
 }
 
 /// Explicit page-window tree. `split_all` divides it when the span is oversized.
@@ -120,5 +137,17 @@ mod tests {
         assert!(nodes[0].children.len() >= 2);
         assert_eq!(nodes[0].children[0].page_start, 1);
         assert_eq!(nodes[0].children[0].page_end, 1);
+    }
+
+    #[test]
+    fn byte_cap_splits_a_dense_leaf() {
+        let page = "d".repeat(6_000);
+        let pages = vec![page; 10];
+        let mut nodes = vec![leaf(1, 10)];
+        split_all(&mut nodes, &pages);
+        assert!(nodes[0].children.len() >= 2, "10 dense pages must split under the open byte cap");
+        for child in &nodes[0].children {
+            assert!(byte_count(&pages, child.page_start, child.page_end) <= OPEN_BYTE_CAP);
+        }
     }
 }

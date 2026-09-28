@@ -5,6 +5,7 @@ use std::fmt;
 /// Stable `error.code` values. Do not rename them; MCP and the CLI map `code()`
 /// straight into the JSON envelope.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum TomeError {
     #[error("unknown doc {doc}")]
     UnknownDoc { doc: String },

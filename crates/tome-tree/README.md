@@ -29,7 +29,7 @@ Every method returns `Result`. An empty `Vec` means "no children", never "the do
 | `docs` | List stored `DocMeta`. Does not re-hash PDFs. |
 | `tree(doc, node, depth)` | Roots, or the one node named by `node`. `depth: None` is the full tree. `Some(0)` keeps the node and clears `children`. `child_count` stays the full count. |
 | `open(doc, nodes)` / `passages(doc, nodes)` | One [`Passage`] per physical page. Hard cap **12 pages / 48 KB**. Over the cap is `over_budget`, not a clipped result. `truncated` is always `false`. A page missing from the store is an error. |
-| `walk(doc, query, judge, budget)` | Judge the roots first, keep beam **2**, then descend the same way. Stop at a leaf or a node of **≤ 3 pages**. Open whole nodes that fit the page and byte caps (highest score first). A node is never clipped. |
+| `walk(doc, query, judge, budget)` | Judge the roots first, keep beam **2**, then descend the same way. A frontier wider than the calls left after a reserve of **8** is cut in reading order, so descent still has room. Stop at a leaf or a node of **≤ 3 pages**. Open whole nodes that fit the page and byte caps (highest score first). Nodes that do not fit are listed on `Walk.skipped` and are not clipped. |
 | `build(pdf, vault_path, opts)` | Not part of the read surface. Writes the store. |
 | `meta(doc)` | One `DocMeta`. Same staleness check as `tree`. |
 | `content_id(path)` | SHA-256 doc id of a PDF. |
@@ -57,7 +57,7 @@ DocMeta {
 }
 
 Passage { node_id, page, text, truncated }
-Walk { doc_id, query, nodes, passages, judge_calls }
+Walk { doc_id, query, nodes, passages, judge_calls, skipped }
 ```
 
 `level` is the depth in the tree. Roots are 1.
@@ -72,7 +72,7 @@ v0 `summary` is the `lead`: the first 400 characters of the node's page text. Th
 2. If there is no outline, heading detection: `CHAPTER n`, numbered `n.m Title`, and a short title-case line at the top of a page. Repeated running headers are suppressed.
 3. `llm-struct` is a stub. It returns `no_structure` and does not invent a tree. The feature is off by default.
 4. `--allow-windows` is the only way to build a page-window tree when both of the above fail. Those nodes have `source: "window"`.
-5. A leaf longer than **10 pages** or **~20k tokens** (chars / 4) is split by inner headings, otherwise into page windows titled `{parent} (pp. a–b)`.
+5. A leaf longer than **10 pages**, **~20k tokens** (chars / 4), or **48 KB** of page text is split by inner headings, otherwise into page windows titled `{parent} (pp. a–b)`. A single page longer than 48 KB cannot be split further.
 6. No outline and a failed fallback is `no_structure`. The store is not written. An empty tree is never returned.
 
 ## Store
@@ -84,7 +84,7 @@ v0 `summary` is the `lead`: the first 400 characters of the node's page text. Th
 
 `tree` / `open` / `walk` return `stale` when `builder_version` differs or the PDF at `DocMeta.path` exists and its bytes hash to something else. A missing file is not treated as a change: the doc id is the hash. After a hash matches, later calls skip the re-hash while that path's mtime and size stay the same. `lapis tome build --force` rebuilds.
 
-`DocId::parse` accepts 64 hex characters and rejects anything else, so a doc id cannot escape the index directory.
+`DocId::parse` / `TryFrom` accept 64 hex characters and reject anything else, so a doc id cannot escape the index directory. There is no `From<&str>`: an invalid id is an error, not a panic.
 
 ## Judge
 

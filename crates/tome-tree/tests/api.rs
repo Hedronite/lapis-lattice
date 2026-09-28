@@ -102,7 +102,7 @@ fn outline_tree_drops_cover_and_open_returns_pages() {
     assert!(!passages[0].truncated);
     assert!(passages[0].text.contains("beta marker"), "{}", passages[0].text);
 
-    let missing = index.tree(&DocId::from("ab".repeat(32)), None, None).unwrap_err();
+    let missing = index.tree(&DocId::try_from("ab".repeat(32)).unwrap(), None, None).unwrap_err();
     assert_eq!(code(&missing), "unknown_doc");
     let bad = index.open(&meta.doc_id, &[NodeId::from("9999")]).unwrap_err();
     assert_eq!(code(&bad), "unknown_node");
@@ -361,7 +361,7 @@ fn wide_outline_walks_inside_the_default_budget() {
         }
     }
     let walked = index.walk(&meta.doc_id, "deep section", &PreferFirstTwo, Budget::default()).unwrap();
-    assert!(walked.judge_calls <= 24, "calls {}", walked.judge_calls);
+    assert!(walked.judge_calls < 24, "calls {} used the whole judge budget", walked.judge_calls);
     assert_eq!(
         walked.nodes.iter().map(|id| id.as_str()).collect::<Vec<_>>(),
         vec!["0001.0001.0001", "0002.0001.0001"]
@@ -392,6 +392,7 @@ fn walk_opens_whole_nodes_that_fit_the_page_budget() {
     assert_eq!(walked.passages.first().unwrap().page, 11);
     assert_eq!(walked.passages.last().unwrap().page, 20);
     assert!(walked.passages.iter().all(|p| !p.truncated));
+    assert_eq!(walked.skipped.iter().map(|id| id.as_str()).collect::<Vec<_>>(), vec!["0001"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -401,6 +402,8 @@ fn doc_id_rejects_path_traversal() {
         let err = DocId::parse(raw).unwrap_err();
         assert_eq!(code(&err), "parse", "{raw}");
     }
+    assert!(DocId::try_from("../secret").is_err());
+    assert!(DocId::try_from("not-a-hash".to_string()).is_err());
     let id = DocId::parse(&"AB".repeat(32)).unwrap();
     assert_eq!(id.as_str(), "ab".repeat(32));
 
@@ -454,6 +457,32 @@ fn outline_item_without_destination_is_skipped() {
     assert!(titles.contains(&"Kept child"), "{titles:?}");
     assert!(titles.contains(&"Sibling"), "{titles:?}");
     assert!(!titles.contains(&"Ghost"), "{titles:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn dense_leaf_walk_fits_the_byte_cap() {
+    let dir = scratch("dense");
+    let pdf_path = dir.join("dense.pdf");
+    let line = "d".repeat(6_000);
+    let pages: Vec<Vec<&str>> = (0..10).map(|_| vec![line.as_str()]).collect();
+    pdf::write(&pdf_path, &pages, &[pdf::Mark { title: "Dense", page: 0, parent: None }]);
+    let meta = build_at(&dir, &pdf_path, "dense", opts("dense"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    let nodes = index.tree(&meta.doc_id, None, None).unwrap();
+    assert!(nodes[0].child_count >= 2, "dense leaf should split");
+    struct Any;
+    impl Judge for Any {
+        fn score(&self, _: &str, _: &tome_tree::Candidate) -> tome_tree::Result<u8> {
+            Ok(1)
+        }
+    }
+    let walked = index.walk(&meta.doc_id, "dense", &Any, Budget::default()).unwrap();
+    assert!(!walked.passages.is_empty());
+    let bytes: usize = walked.passages.iter().map(|p| p.text.len()).sum();
+    assert!(bytes <= OPEN_BYTE_CAP, "opened {bytes} bytes");
+    assert!(walked.passages.len() <= OPEN_PAGE_CAP as usize);
+    assert!(walked.passages.iter().all(|p| !p.truncated));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
