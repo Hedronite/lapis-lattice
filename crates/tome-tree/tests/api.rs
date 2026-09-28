@@ -735,8 +735,8 @@ fn malformed_batch_falls_back_to_lexical_ranking() {
     let judge = FakeJudge::new([("0030", 3u8)]).with_default(0).fail_batch();
     let walked = index.walk(&meta.doc_id, "brass foundry", &judge, Budget::default()).unwrap();
     assert_eq!(walked.root_path, RootPath::LexicalFallback);
-    assert_eq!(walked.root_judge_calls, 4, "the failed batch costs one of the four root calls");
-    assert_eq!(walked.judged.len(), 3, "three one-at-a-time calls remain after the failed batch");
+    assert_eq!(walked.root_judge_calls, 6, "the failed batch is not charged against root_calls");
+    assert_eq!(walked.judged.len(), 6);
     assert_eq!(walked.judged[0].node_id.as_str(), "0030");
     assert!(walked.nodes.iter().any(|id| id.as_str() == "0030"));
     assert!(!walked.passages.is_empty());
@@ -770,6 +770,51 @@ fn candidate_lead_includes_child_titles() {
     index.walk(&meta.doc_id, "q", &see, Budget::default()).unwrap();
     let lead = see.0.lock().unwrap().clone();
     assert!(lead.contains("Section A"), "{lead}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn batch_path_keeps_child_titles_past_the_page_lead() {
+    let dir = scratch("batch-children");
+    let pdf_path = dir.join("tree.pdf");
+    let long = "alpha ".repeat(80);
+    let pages = [vec![long.as_str()], vec!["Section A", "detail body."]];
+    pdf::write(
+        &pdf_path,
+        &pages,
+        &[
+            pdf::Mark { title: "Chapter", page: 0, parent: None },
+            pdf::Mark { title: "Section A", page: 1, parent: Some(0) },
+        ],
+    );
+    let meta = build_at(&dir, &pdf_path, "tree", opts("tree"));
+    let index = TomeIndex::open(&dir.join("tomes")).unwrap();
+    struct See(std::sync::Mutex<String>);
+    impl Judge for See {
+        fn score(&self, _: &str, _: &tome_tree::Candidate) -> tome_tree::Result<u8> {
+            Ok(3)
+        }
+        fn score_batch(
+            &self,
+            _: &str,
+            candidates: &[tome_tree::Candidate],
+        ) -> tome_tree::Result<Vec<tome_tree::Assessment>> {
+            if let Some(root) = candidates.iter().find(|c| c.id.as_str() == "0001") {
+                *self.0.lock().unwrap() = root.lead.clone();
+            }
+            Ok(candidates.iter().map(|_| tome_tree::Assessment { score: 3, confidence: None }).collect())
+        }
+        fn batch_cost(&self, _: &[tome_tree::Candidate]) -> u32 {
+            1
+        }
+    }
+    let see = See(std::sync::Mutex::new(String::new()));
+    let walked = index.walk(&meta.doc_id, "q", &see, Budget::default()).unwrap();
+    assert_eq!(walked.root_path, RootPath::Batch);
+    let lead = see.0.lock().unwrap().clone();
+    assert!(lead.contains("Section A"), "{lead}");
+    assert!(lead.contains("Child sections:"), "{lead}");
+    assert!(lead.chars().count() > 240, "titles are not inside a 240-char page lead: {lead}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

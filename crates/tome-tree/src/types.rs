@@ -254,8 +254,9 @@ pub enum RootPath {
     /// Batches of [`Budget::root_batch_size`] returned a score for every candidate.
     #[default]
     Batch,
-    /// A batch was malformed or partial. Roots were pre-ranked on title and lead,
-    /// then the top [`Budget::root_top_k`] were judged one at a time.
+    /// A batch was malformed. Roots were pre-ranked on title and lead, then the
+    /// top [`Budget::root_top_k`] were judged one at a time. Those calls are not
+    /// taken out of [`Budget::root_calls`].
     LexicalFallback,
 }
 

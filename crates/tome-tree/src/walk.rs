@@ -8,8 +8,10 @@
 //! Rank is the raw score. Confidence is recorded and never gates or reorders a
 //! candidate. `judge_unavailable` is a transport or model failure: a missing
 //! score, a score outside 0..=3 on a one-at-a-time call, or a dead transport.
-//! A malformed or partial batch is not that failure. On the root pass it
-//! switches to a lexical pre-rank.
+//! A malformed batch is not that failure. On the root pass it switches to a
+//! lexical pre-rank. That fallback has its own `root_top_k` allowance: the
+//! failed batch and those one-at-a-time calls are not charged against
+//! `root_calls`.
 
 use crate::error::{Result, TomeError};
 use crate::types::{
@@ -26,7 +28,9 @@ use crate::types::{
 /// [`score_batch`](Judge::score_batch) should return one assessment per
 /// candidate, in order. `Err(judge_unavailable)` aborts the walk. Any other
 /// error, or an `Ok` that does not cover every candidate with a score in
-/// 0..=3, is a malformed batch. The root pass then pre-ranks on title and lead.
+/// 0..=3, is a malformed batch. The root pass then pre-ranks on title and lead
+/// and judges `root_top_k` roots without spending `root_calls`. A judge that
+/// scored only some ids should fill the rest itself and return `Ok`.
 ///
 /// The Jev adapter blocks on a tokio runtime. That runtime must be multi-thread:
 /// `block_in_place` panics on a current-thread runtime, and calling `walk` from
@@ -180,8 +184,7 @@ pub(crate) fn choose(
     let mut frontier = beam_next(root_picks, &mut terminals);
     let mut descent_calls = 0u32;
     // Once a batched response is unusable, later sibling sets skip the batch
-    // call and pre-rank. Real System One returns one score, so retrying the
-    // batch at every level spends the descent budget before a page is opened.
+    // call and pre-rank, so a wide chapter does not spend a call per frontier.
     let mut batch_broken = false;
     while !frontier.is_empty() {
         let remaining = budget.max_judge_calls.saturating_sub(descent_calls);
@@ -249,17 +252,13 @@ fn score_roots(
                 offset += count;
             }
             _ => {
-                calls += cost;
+                // The failed call did not score a root. Do not charge it, or the
+                // one-at-a-time fallback, against `root_calls`.
                 if picks.is_empty() {
-                    let (fallback, extra, used) = lexical_fallback(
-                        roots,
-                        query,
-                        judge,
-                        limit.saturating_sub(calls),
-                        budget.root_top_k,
-                    )?;
+                    let (fallback, extra, used) =
+                        lexical_fallback(roots, query, judge, budget.root_top_k, budget.root_top_k)?;
                     judged.extend(extra);
-                    return Ok((fallback, judged, calls + used, RootPath::LexicalFallback));
+                    return Ok((fallback, judged, used, RootPath::LexicalFallback));
                 }
                 break;
             }
@@ -434,23 +433,33 @@ fn candidates_of(nodes: &[Node], lead_chars: usize) -> Vec<Candidate> {
     nodes.iter().map(|node| candidate_of(node, lead_chars)).collect()
 }
 
+fn child_titles(node: &Node) -> String {
+    if node.children.is_empty() {
+        return String::new();
+    }
+    let mut titles = String::from("Child sections:\n");
+    for child in node.children.iter().take(16) {
+        let title: String = child.title.chars().take(80).collect();
+        titles.push_str(&format!("- {title} (pp. {}–{})\n", child.page_start, child.page_end));
+    }
+    let extra = node.children.len().saturating_sub(16);
+    if extra > 0 {
+        titles.push_str(&format!("- … {extra} more\n"));
+    }
+    titles
+}
+
 fn candidate_of(node: &Node, lead_chars: usize) -> Candidate {
-    let mut lead: String = node.lead.chars().take(lead_chars.min(400)).collect();
-    if !node.children.is_empty() {
-        lead.push_str("\n\nChild sections:\n");
-        for child in node.children.iter().take(16) {
-            let title: String = child.title.chars().take(80).collect();
-            lead.push_str(&format!("- {title} (pp. {}–{})\n", child.page_start, child.page_end));
-        }
-        let extra = node.children.len().saturating_sub(16);
-        if extra > 0 {
-            lead.push_str(&format!("- … {extra} more\n"));
-        }
-    }
-    let cap = if lead_chars <= BATCH_LEAD { 800 } else { SINGLE_LEAD };
-    if lead.chars().count() > cap {
-        lead = lead.chars().take(cap).collect();
-    }
+    // Child titles are their own block, in front of the page lead. A later
+    // 240-char clip of the page text must not drop them.
+    let titles = child_titles(node);
+    let page_cap = if lead_chars <= BATCH_LEAD { lead_chars } else { lead_chars.min(400) };
+    let page_lead: String = node.lead.chars().take(page_cap).collect();
+    let lead = match (titles.is_empty(), page_lead.is_empty()) {
+        (true, _) => page_lead,
+        (false, true) => titles,
+        (false, false) => format!("{titles}\n{page_lead}"),
+    };
     Candidate {
         id: node.id.clone(),
         title: node.title.clone(),

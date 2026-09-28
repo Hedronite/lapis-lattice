@@ -98,17 +98,17 @@ pub trait Judge {
 }
 ```
 
-`score` stays the required method. `score_batch` defaults to one `assess` per candidate (`batch_cost` = that many calls). A batching judge returns one assessment per candidate and reports `batch_cost` 1. Each candidate's text is its title, a short lead, and up to 16 child titles.
+`score` stays the required method. `score_batch` defaults to one `assess` per candidate (`batch_cost` = that many calls). A batching judge returns one assessment per candidate and reports `batch_cost` 1. Each candidate's text is its title, up to 16 child titles, and then a short page lead. The child titles are capped separately from the page lead, so a 240-character lead clip does not drop them.
 
 The walk ranks on `score` only. `confidence` is recorded on `Walk.judged` and is not a gate: a low value does not abort the walk, drop the candidate, or change its rank. `judge_unavailable` is only a transport or model failure (no transport, a missing score, or a score outside 0..=3 on a one-at-a-time call).
 
-A batched response that is malformed or partial (wrong length, missing ids, or a score outside 0..=3) is not `judge_unavailable`. The walk pre-ranks that set by token overlap of the query with the title and lead, then judges the top `root_top_k` (default 6) one at a time. The root pass does this inside the calls still left on `root_calls`. A sibling set does the same inside the descent budget, and later sets skip the batch call once one has failed. `Walk.root_path` records which path the root pass ran.
+A batched response that is malformed (wrong length, no parseable scores, or a score outside 0..=3) is not `judge_unavailable`. The walk pre-ranks that set by token overlap of the query with the title and lead, then judges the top `root_top_k` (default 6) one at a time. On the root pass that fallback has its own allowance: the failed batch and those singles are not charged against `root_calls`. A sibling set does the same inside the descent budget, and later sets skip the batch call once one has failed. `Walk.root_path` records which path the root pass ran. A batch that scored some ids and left others out is the judge's job to finish: keep the ids that came back and judge only the missing ones.
 
 A page pdf-extract cannot safely read (a panic, a `/Parent` cycle, or a `Do` that is not a shallow Form) is extracted with lopdf for that page. One bad page does not fail the book. `/Kids` stored as an indirect array is still a page tree. One outline item whose destination does not resolve is skipped.
 
 `FakeJudge` scripts scores by node id for offline tests. A missing id is `judge_unavailable`.
 
-`lapis tome search` uses `jev::JevJudge`, which calls the existing transport (Facet, else `$TYPESAFE_API_KEY`, else none). One candidate reads the shipped relevance score (0–3). Several candidates are one call whose state asks for `sections: [{id, score, confidence}, ...]`. A body that only has the single relevance score is a partial batch, so the walk takes the lexical fallback and then judges those roots with the shipped questions.
+`lapis tome search` uses `jev::JevJudge`, which calls the existing transport (Facet, else `$TYPESAFE_API_KEY`, else none). One candidate reads the shipped relevance score (0–3). Several candidates are one call. The state asks for a JSON array of `{id, score, confidence}`, and the questions are one score rubric per candidate id, so the model is not locked to a single relevance score. The parser accepts that array, or the per-id score answers System One returns. Ids that came back are kept. Only missing ids are judged again, one at a time. A body with neither shape is `parse`, and the walk takes the lexical fallback.
 
 ```toml
 [tome]
