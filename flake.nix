@@ -23,19 +23,25 @@
             cargo = rust;
             rustc = rust;
           };
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+            outputHashes = {
+              "ratatui-textarea-0.9.2" = "sha256-884ZPDer6zgPQFS5S8dvQpINF1D+L0+sml4rlH+U6uU=";
+            };
+          };
           # `--bins` installs `lapis` (built with feature `tome`) and any other
           # workspace binary. `tome-eval` is picked up here once that bin exists.
           bins = rustPlatform.buildRustPackage {
             pname = "lapis";
             version = "0.4.2";
             src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
+            inherit cargoLock;
             buildFeatures = [ "tome" ];
             cargoBuildFlags = [ "--bins" ];
             doCheck = false;
           };
         in
-        f { inherit pkgs rust rustPlatform bins; }
+        f { inherit pkgs rust rustPlatform bins cargoLock; }
       );
     in
     {
@@ -44,7 +50,7 @@
           packages = [
             rust
             pkgs.pkg-config
-            pkgs.poppler_utils
+            pkgs.poppler-utils
           ];
         };
       });
@@ -55,13 +61,12 @@
         tome-eval = bins;
       });
 
-      checks = each ({ rustPlatform, ... }: {
+      checks = each ({ rustPlatform, cargoLock, ... }: {
         tome-tree = rustPlatform.buildRustPackage {
           pname = "tome-tree-check";
           version = "0.0.0";
           src = ./.;
-          cargoLock.lockFile = ./Cargo.lock;
-          buildFeatures = [ "tome" ];
+          inherit cargoLock;
           cargoBuildFlags = [ "-p" "tome-tree" "--all-targets" ];
           cargoTestFlags = [ "-p" "tome-tree" "--all-features" ];
           doCheck = true;

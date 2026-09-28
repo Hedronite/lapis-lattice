@@ -98,9 +98,7 @@ fn siblings(
             return Err(parse("outline cycle"));
         }
         let dict = deref_dict(doc, &obj)?;
-        if let Some(node) = one_item(doc, &dict, page_of, named, page_count, seen, depth)? {
-            nodes.push(node);
-        }
+        nodes.extend(one_item(doc, &dict, page_of, named, page_count, seen, depth)?);
         current = opt(&dict, b"Next").cloned();
     }
     Ok(nodes)
@@ -114,19 +112,23 @@ fn one_item(
     page_count: u32,
     seen: &mut HashSet<ObjectId>,
     depth: u32,
-) -> Result<Option<RawNode>> {
+) -> Result<Vec<RawNode>> {
     if is_remote(doc, dict)? {
-        return Ok(None);
+        return Ok(Vec::new());
     }
-    let title_obj = dict.get(b"Title").map_err(|_| parse("outline item has no title"))?;
-    let title = lopdf::decode_text_string(title_obj).map_err(parse)?;
-    let page = dest_page(doc, dict, page_of, named, page_count)?;
     let children = if let Some(first) = opt(dict, b"First") {
         siblings(doc, first, page_of, named, page_count, seen, depth + 1)?
     } else {
         Vec::new()
     };
-    Ok(Some(RawNode { title, page_start: page, page_end: page, source: NodeSource::Outline, children }))
+    // No destination: drop this item and keep its children. One broken bookmark
+    // must not fail the document.
+    let Some(page) = dest_page(doc, dict, page_of, named, page_count)? else {
+        return Ok(children);
+    };
+    let title_obj = dict.get(b"Title").map_err(|_| parse("outline item has no title"))?;
+    let title = lopdf::decode_text_string(title_obj).map_err(parse)?;
+    Ok(vec![RawNode { title, page_start: page, page_end: page, source: NodeSource::Outline, children }])
 }
 
 fn is_remote(doc: &Document, dict: &Dictionary) -> Result<bool> {
@@ -144,17 +146,17 @@ fn dest_page(
     page_of: &HashMap<ObjectId, u32>,
     named: &HashMap<Vec<u8>, Object>,
     page_count: u32,
-) -> Result<u32> {
+) -> Result<Option<u32>> {
     if let Some(dest) = opt(item, b"Dest") {
-        return resolve_dest(doc, dest, page_of, named, page_count, 0);
+        return resolve_dest(doc, dest, page_of, named, page_count, 0).map(Some);
     }
     if let Some(action) = opt(item, b"A") {
         let act = deref_dict(doc, action)?;
         if let Some(dest) = opt(&act, b"D") {
-            return resolve_dest(doc, dest, page_of, named, page_count, 0);
+            return resolve_dest(doc, dest, page_of, named, page_count, 0).map(Some);
         }
     }
-    Err(parse("outline item has no destination"))
+    Ok(None)
 }
 
 fn resolve_dest(
