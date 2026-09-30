@@ -1,0 +1,11 @@
+# Rust-TOPS drop-in. Writer gate is `cargo mutants --in-diff`. CI does not run it yet.
+exclude_re = [
+  "src/generated/",
+  "/pb\\.rs$",
+  "tests/",
+  "benches/",
+  "examples/",
+  "vendor/",
+]
+examine_re = ["src/"]
+timeout_multiplier = 2.0

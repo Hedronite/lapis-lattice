@@ -540,14 +540,15 @@ impl Workspace {
             tab.vim.reset();
             return;
         }
-        use crate::vim::{Effect, Mode};
+        use crate::vim::{Effect, Mode, View};
         let key = event.keystroke.key_char.as_deref().filter(|_| modifiers.shift).unwrap_or(key);
         let state = tab.editor.read(cx);
         let source = state.value();
         let cursor = state.cursor();
         let selection = state.selected_range();
         let old_register = self.register.generation;
-        let effect = tab.vim.key(key, modifiers.control, &source, cursor, selection, &mut self.register);
+        let effect =
+            tab.vim.key(key, modifiers.control, &View { s: &source, cursor, selection }, &mut self.register);
         if self.register.generation != old_register {
             cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(self.register.text.clone()));
         }
