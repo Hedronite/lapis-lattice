@@ -1,5 +1,6 @@
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Bias {
@@ -172,6 +173,8 @@ impl Projection {
                 style: Style { code: kind == Kind::Code, ..Style::default() },
                 exact: true,
             }]
+        } else if kind == Kind::Table {
+            table_spans(raw, range.start, options)
         } else {
             formatted(raw, range.start, options)
         };
@@ -183,7 +186,6 @@ fn formatted(raw: &str, base: usize, options: Options) -> Vec<Span> {
     let mut style = Style::default();
     let mut stack = Vec::new();
     let mut lists = Vec::new();
-    let mut table_cell = 0usize;
     for (event, range) in Parser::new_ext(raw, options).into_offset_iter() {
         let global = base + range.start..base + range.end;
         match event {
@@ -212,18 +214,6 @@ fn formatted(raw: &str, base: usize, options: Options) -> Vec<Span> {
                             exact: false,
                         });
                     }
-                    Tag::TableHead | Tag::TableRow => table_cell = 0,
-                    Tag::TableCell => {
-                        if table_cell > 0 {
-                            spans.push(Span {
-                                text: "  │  ".into(),
-                                source: global.start..global.start,
-                                style,
-                                exact: false,
-                            });
-                        }
-                        table_cell += 1;
-                    }
                     _ => {}
                 }
             }
@@ -232,12 +222,7 @@ fn formatted(raw: &str, base: usize, options: Options) -> Vec<Span> {
                     TagEnd::List(_) => {
                         lists.pop();
                     }
-                    TagEnd::Item
-                    | TagEnd::Paragraph
-                    | TagEnd::Heading(_)
-                    | TagEnd::CodeBlock
-                    | TagEnd::TableRow
-                    | TagEnd::TableHead
+                    TagEnd::Item | TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::CodeBlock
                         if !spans.last().is_some_and(|s| s.text.ends_with('\n')) =>
                     {
                         spans.push(Span {
@@ -299,6 +284,125 @@ fn push_text(spans: &mut Vec<Span>, text: &str, raw: &str, range: &Range<usize>,
         (base + range.start..base + range.end, false)
     };
     spans.push(Span { text: text.into(), source, style, exact });
+}
+/// A closed table renders as aligned columns: the whole table is buffered
+/// first, so a body cell can widen its column. Cell text stays an exact span
+/// into the source; padding, the ` │ ` separator and the header rule are
+/// non-exact spans. The open block keeps the raw source with its pipes.
+fn table_spans(raw: &str, base: usize, options: Options) -> Vec<Span> {
+    let mut aligns: Vec<Alignment> = Vec::new();
+    let mut rows: Vec<Vec<Vec<Span>>> = Vec::new();
+    let mut row: Vec<Vec<Span>> = Vec::new();
+    let mut cell: Vec<Span> = Vec::new();
+    let mut style = Style::default();
+    let mut stack: Vec<Style> = Vec::new();
+    for (event, range) in Parser::new_ext(raw, options).into_offset_iter() {
+        let global = base + range.start..base + range.end;
+        match event {
+            Event::Start(tag) => {
+                stack.push(style);
+                match tag {
+                    Tag::Table(a) => aligns = a,
+                    Tag::TableRow => row.clear(),
+                    Tag::TableCell => cell.clear(),
+                    Tag::Strong => style.strong = true,
+                    Tag::Emphasis => style.emphasis = true,
+                    Tag::Strikethrough => style.strike = true,
+                    Tag::Link { .. } => style.link = true,
+                    Tag::CodeBlock(_) => style.code = true,
+                    _ => {}
+                }
+            }
+            Event::End(tag) => {
+                match tag {
+                    TagEnd::TableCell => row.push(std::mem::take(&mut cell)),
+                    TagEnd::TableHead | TagEnd::TableRow if !row.is_empty() => {
+                        rows.push(std::mem::take(&mut row));
+                    }
+                    _ => {}
+                }
+                style = stack.pop().unwrap_or_default();
+            }
+            Event::Text(t) | Event::Html(t) | Event::InlineHtml(t) => {
+                push_text(&mut cell, &t, raw, &range, base, style)
+            }
+            Event::Code(t) => push_text(&mut cell, &t, raw, &range, base, Style { code: true, ..style }),
+            Event::SoftBreak => cell.push(Span { text: " ".into(), source: global, style, exact: false }),
+            Event::HardBreak => cell.push(Span { text: "\n".into(), source: global, style, exact: false }),
+            Event::TaskListMarker(checked) => cell.push(Span {
+                text: if checked { "☑ " } else { "☐ " }.into(),
+                source: global,
+                style,
+                exact: false,
+            }),
+            _ => {}
+        }
+    }
+    let cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    let mut widths = vec![0usize; cols];
+    for r in &rows {
+        for (j, c) in r.iter().enumerate() {
+            let w = c.iter().map(|s| s.text.width()).sum::<usize>();
+            widths[j] = widths[j].max(w);
+        }
+    }
+    let align = |j: usize| match aligns.get(j).copied() {
+        Some(a @ (Alignment::Right | Alignment::Center)) => a,
+        _ => Alignment::Left,
+    };
+    let pad_span =
+        |text: String, at: usize| Span { text, source: at..at, style: Style::default(), exact: false };
+    let last_col = cols.saturating_sub(1);
+    let mut spans: Vec<Span> = Vec::new();
+    for (i, r) in rows.iter().enumerate() {
+        let mut row_w = 0usize;
+        for (j, &w) in widths.iter().enumerate() {
+            let parts: &[Span] = r.get(j).map_or(&[], Vec::as_slice);
+            let start = parts.first().map_or(base, |s| s.source.start);
+            let end = parts.last().map_or(base + raw.len(), |s| s.source.end);
+            let text: String = parts.iter().map(|s| s.text.as_str()).collect();
+            let pad = w.saturating_sub(text.width());
+            let last = j == last_col;
+            if j > 0 {
+                spans.push(pad_span(" │ ".into(), start));
+                row_w += " │ ".width();
+            }
+            row_w += if matches!(align(j), Alignment::Left) && last { text.width() } else { w };
+            match align(j) {
+                Alignment::Right => {
+                    if pad > 0 {
+                        spans.push(pad_span(" ".repeat(pad), start));
+                    }
+                    spans.extend(parts.iter().cloned());
+                }
+                Alignment::Center => {
+                    if pad / 2 > 0 {
+                        spans.push(pad_span(" ".repeat(pad / 2), start));
+                    }
+                    spans.extend(parts.iter().cloned());
+                    if !last && pad - pad / 2 > 0 {
+                        spans.push(pad_span(" ".repeat(pad - pad / 2), end));
+                    }
+                }
+                _ => {
+                    spans.extend(parts.iter().cloned());
+                    if !last && pad > 0 {
+                        spans.push(pad_span(" ".repeat(pad), end));
+                    }
+                }
+            }
+        }
+        let nl = spans.last().map_or(base, |s| s.source.end);
+        spans.push(pad_span("\n".into(), nl));
+        if i == 0 {
+            spans.push(pad_span("─".repeat(row_w), nl));
+            spans.push(pad_span("\n".into(), nl));
+        }
+    }
+    while spans.last().is_some_and(|s| s.source.is_empty() && s.text == "\n") {
+        spans.pop();
+    }
+    spans
 }
 
 #[cfg(test)]
@@ -377,5 +481,25 @@ mod tests {
         assert_eq!(p.blocks.len(), 1);
         assert!(p.blocks[0].revealed);
         assert_eq!(p.blocks[0].source_at(0, Bias::After), 0);
+    }
+    #[test]
+    fn closed_tables_align_and_open_tables_stay_raw() {
+        let s = "| name | v |\n| --- | --- |\n| Alpha | 17 |\n";
+        let p = closed(s);
+        let b = &p.blocks[0];
+        assert!(!b.revealed);
+        let t = b.text();
+        assert!(t.contains("name  │ v"), "{t:?}");
+        assert!(t.contains(&"─".repeat(9)), "{t:?}");
+        assert!(t.contains("Alpha │ 17"), "{t:?}");
+        assert!(!t.contains("| name |"), "{t}");
+        let d = t.find("Alpha").unwrap();
+        let r = b.source_at(d, Bias::After)..b.source_at(d + 5, Bias::Before);
+        assert_eq!(&s[r.clone()], "Alpha");
+        assert_eq!(b.display_at(r.start, Bias::After), d);
+        assert_eq!(b.display_at(r.end, Bias::Before), d + 5);
+        let open = Projection::new(s, 2..2);
+        assert!(open.blocks[0].revealed);
+        assert!(open.blocks[0].text().contains("| name |"));
     }
 }
