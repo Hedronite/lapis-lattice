@@ -110,6 +110,16 @@ class Session:
                               'elapsed_ms':1000 * (time.monotonic() - started)})
         return self.note.read_text()
 
+    def conflict_copies(self, pattern, timeout=5):
+        # Leader-chord copies land after the keys are handled. Poll instead of
+        # a fixed drain; a busy runner finishes the write after that drain.
+        deadline = time.monotonic() + timeout
+        while True:
+            found = list(self.vault.glob(pattern))
+            if found or time.monotonic() >= deadline:
+                return found
+            self.drain(0.05)
+
     def close(self):
         self.send(b'\x1b')
         self.send(b'\x11')
@@ -332,8 +342,8 @@ if stayed:
     s.drain(0.2)
     s.saved()
     conflict_retained = s.note.read_text() == external
-    s.send(b' lS', 0.4)
-    copies = list(s.vault.glob('* (Lapis copy *).md'))
+    s.send(b' lS', 0)
+    copies = s.conflict_copies('* (Lapis copy *).md')
     copy_retained = bool(copies) and 'unsavedanchor' in copies[0].read_text() and 'custom: preserve-me' in copies[0].read_text()
     conflict_retained = conflict_retained and s.note.read_text() == external
 else:
@@ -357,8 +367,8 @@ s.send(b'\x1b')
 s.note.write_text('agent: replacement\n')
 s.drain(0.2)
 s.saved()
-s.send(b' lS', 0.4)
-copies = list(s.vault.glob('Settings (Lapis copy *).yml'))
+s.send(b' lS', 0)
+copies = s.conflict_copies('Settings (Lapis copy *).yml')
 results.append({'case':'yaml-raw-save', 'literal_source':after==yaml_payload+yaml_initial,
                 'undo_matches':undone==yaml_initial, 'redo_matches':redone==yaml_payload+yaml_initial,
                 'conflict_retained':s.note.read_text()=='agent: replacement\n',
