@@ -171,7 +171,9 @@ jobs:
       - name: nonempty LCOV and CRAP JSON
         run: |
           mkdir -p target/tops
-          cargo llvm-cov test --workspace --features tome --lcov --output-path target/tops/lcov.info
+          # tests/tui_input.rs already runs in the test jobs and in nextest.
+          # llvm-cov instrumentation makes those PTY smokes miss the 15s palette wait.
+          cargo llvm-cov test --workspace --features tome --lcov --output-path target/tops/lcov.info --             --skip terminal_paste_selection_undo_and_external_save_guards             --skip terminal_missing_index_offers_background_build_and_leaves_built_health             --skip terminal_workflows_outline_history_palette_states_tasks_and_notes_routes             --skip terminal_screen_decoder_handles_incremental_status_repaints
           test -s target/tops/lcov.info
           cargo crap --workspace --lcov target/tops/lcov.info --format json > target/tops/crap.json
           test -s target/tops/crap.json
