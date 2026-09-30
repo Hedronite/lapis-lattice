@@ -248,9 +248,9 @@ pub const FAIL_CLOSED_FLOOR: f64 = 0.6;
 /// - `assess`: one candidate, the shipped rerank questions, score 0..=3 plus the
 ///   minimum reported confidence.
 /// - `score_batch`: one System One call per batch (`batch::state` +
-///   `batch::questions`). Ids the reply did not score are judged again one at a
-///   time. A reply with no array and no per-id score is `parse`, and the walk
-///   pre-ranks.
+///   `batch::questions`). Ids the reply did not score come back as `None`; the
+///   walk judges those ids one at a time and charges each call. A reply with no
+///   array and no per-id score is `parse`, and the walk pre-ranks.
 /// - `batch_cost` is 1, so a 16-root batch spends one of `root_calls`.
 ///
 /// Spike policy (Eli ruling 2026-09-28): the walk ranks on score ONLY, with no
@@ -293,20 +293,17 @@ impl Judge for JevJudge {
         relevance_assessment(&body)
     }
 
-    fn score_batch(&self, query: &str, candidates: &[Candidate]) -> crate::contract::Result<Vec<Assessment>> {
+    fn score_batch(
+        &self,
+        query: &str,
+        candidates: &[Candidate],
+    ) -> crate::contract::Result<Vec<Option<Assessment>>> {
         if candidates.len() <= 1 {
-            return candidates.iter().map(|c| self.assess(query, c)).collect();
+            return candidates.iter().map(|c| self.assess(query, c).map(Some)).collect();
         }
         let body = self.decide(&batch::state(query, candidates), batch::questions(candidates))?;
-        let parsed = batch::assessments(&body, candidates)?;
-        let mut out = Vec::with_capacity(candidates.len());
-        for (c, slot) in candidates.iter().zip(parsed) {
-            out.push(match slot {
-                Some(a) => a,
-                None => self.assess(query, c)?,
-            });
-        }
-        Ok(out)
+        // Missing ids stay `None`. The walk judges them and counts each call.
+        batch::assessments(&body, candidates)
     }
 
     fn batch_cost(&self, _candidates: &[Candidate]) -> u32 {
@@ -447,19 +444,20 @@ mod tests {
     }
 
     #[test]
-    fn score_batch_is_one_call_and_fills_missing_ids() {
+    fn score_batch_is_one_call_and_leaves_missing_ids_none() {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let cs = [cand("0001"), cand("0002"), cand("0003")];
         let reply = json!({"answers":[
             {"id":"0001","score":1,"confidence":0.8},
             {"id":"0003","score":3,"confidence":0.5}
         ]});
-        let j = judge(&rt, vec![reply, rr(0.9, 2.0, 0.7)]);
+        let j = judge(&rt, vec![reply]);
         assert_eq!(j.batch_cost(&cs), 1);
-        let got = j.score_batch("q", &cs).unwrap();
-        let got: Vec<(u8, Option<f64>)> = got.iter().map(|a| (a.score, a.confidence)).collect();
-        assert_eq!(got, vec![(1, Some(0.8)), (2, Some(0.7)), (3, Some(0.5))]);
-        assert_eq!(j.calls.load(Ordering::Relaxed), 2, "one batch call plus one fill-in for 0002");
+        let slots = j.score_batch("q", &cs).unwrap();
+        let got: Vec<Option<(u8, Option<f64>)>> =
+            slots.iter().map(|a| a.as_ref().map(|a| (a.score, a.confidence))).collect();
+        assert_eq!(got, vec![Some((1, Some(0.8))), None, Some((3, Some(0.5)))], "0002 is not scored here");
+        assert_eq!(j.calls.load(Ordering::Relaxed), 1, "one batch call, no fill-in inside the judge");
 
         let full = json!([
             {"id":"0001","score":0,"confidence":0.9},
@@ -467,7 +465,9 @@ mod tests {
             {"id":"0003","score":2,"confidence":0.9}
         ]);
         let j = judge(&rt, vec![full]);
-        assert_eq!(j.score_batch("q", &cs).unwrap()[2].score, 2);
+        let slots = j.score_batch("q", &cs).unwrap();
+        assert!(slots.iter().all(Option::is_some), "a full reply scores every slot");
+        assert_eq!(slots[2].as_ref().unwrap().score, 2);
         assert_eq!(j.calls.load(Ordering::Relaxed), 1);
 
         let j = judge(&rt, vec![json!({"relevance":{"score":3,"confidence":0.9}})]);
