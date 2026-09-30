@@ -27,6 +27,11 @@ pub struct Config {
     /// TUI palette: `name` picks a built-in, `custom` overrides roles with `#RRGGBB`.
     #[serde(default)]
     pub theme: ThemeConfig,
+    /// Answer and summary model for tome-tree. Jev only scores; it is not configured here.
+    /// Parsed in every build so the config file is valid with the feature off.
+    #[serde(default)]
+    #[cfg_attr(not(feature = "tome"), allow(dead_code))]
+    pub tome: TomeModelConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -89,6 +94,78 @@ fn default_direction() -> String {
 }
 fn default_task_unscoped() -> String {
     "summary".into()
+}
+
+/// `[tome]`: which model writes answers and, later, node summaries.
+///
+/// Swap `provider` / `model` in config. The binary does not bake a model into the walk.
+/// Jev remains the judge (`LAPIS_JEV_TRANSPORT`, `LAPIS_JEV_ENDPOINT`, `$TYPESAFE_API_KEY`).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct TomeModelConfig {
+    /// Router that serves the model. Default `opencode`.
+    #[serde(default = "default_tome_provider")]
+    pub provider: String,
+    /// Model id. Default DeepSeek V4.1 Flash.
+    #[serde(default = "default_tome_model")]
+    pub model: String,
+    /// Sampling temperature. `0` and `0.0` both parse.
+    #[serde(default, deserialize_with = "de_temperature")]
+    pub temperature: f32,
+    /// Candidates in one batched judge call. Default 16.
+    #[serde(default = "default_root_batch_size")]
+    pub root_batch_size: u32,
+    /// Root-pass judge calls. Separate from the descent budget of 24. Default 4.
+    #[serde(default = "default_root_calls")]
+    pub root_calls: u32,
+    /// After a malformed batch, how many lexically pre-ranked roots are judged
+    /// one at a time. Default 6.
+    #[serde(default = "default_root_top_k")]
+    pub root_top_k: u32,
+}
+
+fn default_root_batch_size() -> u32 {
+    16
+}
+
+fn default_root_calls() -> u32 {
+    4
+}
+
+fn default_root_top_k() -> u32 {
+    6
+}
+
+fn default_tome_provider() -> String {
+    "opencode".into()
+}
+
+fn default_tome_model() -> String {
+    "deepseek-v4.1-flash".into()
+}
+
+fn de_temperature<'de, D>(deserializer: D) -> std::result::Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = toml::Value::deserialize(deserializer)?;
+    match value {
+        toml::Value::Float(n) => Ok(n as f32),
+        toml::Value::Integer(n) => Ok(n as f32),
+        _ => Err(serde::de::Error::custom("temperature must be a number")),
+    }
+}
+
+impl Default for TomeModelConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_tome_provider(),
+            model: default_tome_model(),
+            temperature: 0.0,
+            root_batch_size: default_root_batch_size(),
+            root_calls: default_root_calls(),
+            root_top_k: default_root_top_k(),
+        }
+    }
 }
 
 impl Default for AgentConfig {
@@ -434,6 +511,30 @@ mod tests {
         // mode is independent of name: pinning brand palettes opts out of Omarchy
         let pinned: Config = toml::from_str("[theme]\nmode = \"lapis\"\n").unwrap();
         assert!(!pinned.theme.is_omarchy());
+    }
+
+    #[test]
+    fn tome_model_defaults_and_can_be_swapped_in_config() {
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.tome.provider, "opencode");
+        assert_eq!(c.tome.model, "deepseek-v4.1-flash");
+        assert_eq!(c.tome.temperature, 0.0);
+        assert_eq!(c.tome.root_batch_size, 16);
+        assert_eq!(c.tome.root_calls, 4);
+        assert_eq!(c.tome.root_top_k, 6);
+        let c: Config =
+            toml::from_str("[tome]\nprovider = \"opencode\"\nmodel = \"other-model\"\ntemperature = 0\n")
+                .unwrap();
+        assert_eq!(c.tome.model, "other-model");
+        assert_eq!(c.tome.temperature, 0.0);
+        let c: Config = toml::from_str("[tome]\ntemperature = 0.2\n").unwrap();
+        assert_eq!(c.tome.provider, "opencode");
+        assert_eq!(c.tome.temperature, 0.2);
+        let c: Config =
+            toml::from_str("[tome]\nroot_batch_size = 8\nroot_calls = 2\nroot_top_k = 3\n").unwrap();
+        assert_eq!(c.tome.root_batch_size, 8);
+        assert_eq!(c.tome.root_calls, 2);
+        assert_eq!(c.tome.root_top_k, 3);
     }
 
     #[test]

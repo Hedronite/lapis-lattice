@@ -4208,6 +4208,8 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tome-eval",
+ "tome-tree",
  "toml 1.1.5+spec-1.1.0",
  "yaml_serde",
 ]
@@ -8211,6 +8213,37 @@ dependencies = [
  "libc",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "tome-eval"
+version = "0.0.1"
+dependencies = [
+ "clap",
+ "jiff",
+ "lapis-lattice",
+ "lopdf",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "tokio",
+ "tome-tree",
+ "toml 1.1.5+spec-1.1.0",
+]
+
+[[package]]
+name = "tome-tree"
+version = "0.1.0"
+dependencies = [
+ "lopdf",
+ "pdf-extract",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

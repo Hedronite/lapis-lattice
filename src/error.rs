@@ -17,12 +17,20 @@ pub enum LapisError {
     Internal(String),
     /// Embedded index does not implement this op. `kind` is `http_only` (B11).
     HttpOnly { op: &'static str },
+    /// Tome-tree failure. `kind` and `code` are the stable tome error code.
+    /// Constructed only when the `tome` feature is on; the variant stays in the
+    /// enum so every match compiles in the default build.
+    #[cfg_attr(not(feature = "tome"), allow(dead_code))]
+    Tome { code: &'static str, message: String },
 }
 
 impl LapisError {
     pub fn exit_code(&self) -> i32 {
         match self {
-            LapisError::Usage(_) | LapisError::Internal(_) | LapisError::HttpOnly { .. } => 1,
+            LapisError::Usage(_)
+            | LapisError::Internal(_)
+            | LapisError::HttpOnly { .. }
+            | LapisError::Tome { .. } => 1,
             LapisError::LatticeDown(_) => 2,
             LapisError::Path(_) => 3,
         }
@@ -35,6 +43,7 @@ impl LapisError {
             LapisError::Path(_) => "path",
             LapisError::Internal(_) => "internal",
             LapisError::HttpOnly { .. } => "http_only",
+            LapisError::Tome { code, .. } => code,
         }
     }
 
@@ -48,6 +57,7 @@ impl LapisError {
                 "{op} is not implemented by the embedded index; it requires `lattice.mode = \"http\"` \
                  (set it in ~/.config/lapis/config.toml or pass --lattice <url>)"
             ),
+            LapisError::Tome { message, .. } => message.clone(),
         }
     }
 }

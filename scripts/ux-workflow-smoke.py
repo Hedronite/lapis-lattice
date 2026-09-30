@@ -266,7 +266,14 @@ def click(x, y):
 def r_mouse_parity():
     open_note(s, 'Alpha')
     # Keyboard: Shift+Tab cycles focus back to the sidebar; mouse reaches the same panes by click.
-    s.send(b'\x1b[Z', 0.3); s.wait('backtab-to-sidebar', lambda t: s.status().lstrip().startswith('FILES'))
+    # A split PTY read can take the escape sequence as Escape and leave NORMAL in place.
+    # Send it once more only after the first attempt has already timed out.
+    s.send(b'\x1b[Z', 0.3)
+    try:
+        s.wait('backtab-to-sidebar', lambda t: s.status().lstrip().startswith('FILES'))
+    except TimeoutError:
+        s.send(b'\x1b[Z', 0.3)
+        s.wait('backtab-to-sidebar-retry', lambda t: s.status().lstrip().startswith('FILES'))
     # Sidebar rows (list starts under the border): notes, Alpha, Beta, Gamma once expanded.
     rows = s.screen().splitlines()
     beta_row = next(i for i, line in enumerate(rows) if line[:28].strip().endswith('Beta.md'))

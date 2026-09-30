@@ -6,6 +6,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CallToolResult, ContentBlock, ErrorData, Implementation, ListResourceTemplatesResult,
@@ -44,11 +45,15 @@ Lapis: a local Markdown notes vault with Lapis Lattice retrieval.
 
 pub const NOTE_URI_PREFIX: &str = "lapis://note/";
 
-/// `#[tool_handler]` in rmcp 3.x routes through `Self::tool_router()`, so the
-/// server holds only its context.
+/// The server holds its context and its tool router. The router is the base
+/// `tool_router()` plus, only with the `tome` cargo feature AND `LAPIS_TOME=1`,
+/// the spike's `tome_tree` / `tome_open` tools (see `mcp_tome`).
 #[derive(Clone)]
 pub struct LapisServer {
     ctx: Arc<Ctx>,
+    router: ToolRouter<LapisServer>,
+    #[cfg(feature = "tome")]
+    pub(crate) tome: Option<Arc<dyn tome_eval::contract::TomeApi>>,
 }
 
 fn fail(e: LapisError) -> ErrorData {
@@ -57,7 +62,23 @@ fn fail(e: LapisError) -> ErrorData {
         LapisError::Usage(_) | LapisError::Path(_) | LapisError::HttpOnly { .. } => {
             ErrorData::invalid_params(msg, None)
         }
+        LapisError::Tome { code, .. } => tome_error(code, msg),
         LapisError::LatticeDown(_) | LapisError::Internal(_) => ErrorData::internal_error(msg, None),
+    }
+}
+
+/// Tome codes that mean the caller sent something wrong. Every other tome code
+/// (`parse`, `io`, `judge_unavailable`, `stale`, `no_structure`, …) is a backend
+/// failure and maps to an internal error.
+pub(crate) const TOME_CALLER_CODES: &[&str] = &["unknown_doc", "unknown_node", "over_budget", "bad_input"];
+
+/// Tome failure → MCP error, always with an explicit `data.code`.
+pub(crate) fn tome_error(code: &str, msg: String) -> ErrorData {
+    let data = Some(serde_json::json!({ "code": code }));
+    if TOME_CALLER_CODES.contains(&code) {
+        ErrorData::invalid_params(msg, data)
+    } else {
+        ErrorData::internal_error(msg, data)
     }
 }
 
@@ -366,10 +387,18 @@ fn hit_meta(h: &Hit) -> Value {
     })
 }
 
-#[tool_router]
+#[tool_router(vis = "pub(crate)")]
 impl LapisServer {
     pub fn new(ctx: Ctx) -> Self {
-        Self { ctx: Arc::new(ctx) }
+        let router = Self::tool_router();
+        #[cfg(feature = "tome")]
+        let (router, tome) = crate::mcp_tome::extend(router, &ctx.vault.root);
+        Self {
+            ctx: Arc::new(ctx),
+            router,
+            #[cfg(feature = "tome")]
+            tome,
+        }
     }
 
     #[tool(description = "Vault root, overlay buckets, and lattice health. Call once per session.")]
@@ -675,7 +704,7 @@ impl LapisServer {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.router)]
 impl ServerHandler for LapisServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().enable_resources().build())
@@ -735,6 +764,7 @@ pub async fn serve(ctx: Ctx) -> crate::error::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmcp::model::ErrorCode;
 
     fn arg(json: &str) -> SearchArg {
         serde_json::from_str(json).unwrap()
@@ -775,6 +805,34 @@ mod tests {
         assert!(!tasks::wants_summary(t.path.as_deref(), t.full.unwrap_or(false)));
         let g = guard(Some(true), Some(5), None);
         assert!(g.dry_run && g.if_mtime == Some(5) && g.if_hash.is_none());
+    }
+
+    /// tome-tree spike: the base router never carries the tome tools.
+    #[test]
+    fn tome_errors_split_caller_from_backend_with_a_code() {
+        for (code, caller) in [
+            ("unknown_doc", true),
+            ("unknown_node", true),
+            ("over_budget", true),
+            ("bad_input", true),
+            ("parse", false),
+            ("io", false),
+            ("judge_unavailable", false),
+            ("stale", false),
+            ("no_structure", false),
+        ] {
+            let e = fail(LapisError::Tome { code, message: format!("{code} happened") });
+            let want = if caller { ErrorCode::INVALID_PARAMS } else { ErrorCode::INTERNAL_ERROR };
+            assert_eq!(e.code, want, "{code}");
+            assert_eq!(e.data.as_ref().and_then(|d| d["code"].as_str()), Some(code), "{code}");
+        }
+    }
+
+    #[test]
+    fn base_router_has_no_tome_tools() {
+        let r = LapisServer::tool_router();
+        assert!(!r.has_route("tome_tree") && !r.has_route("tome_open"));
+        assert!(r.has_route("search"));
     }
 
     /// N17: hop arg validation.

@@ -1,0 +1,1126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Hedronite/lapis-lattice/evals/tome/schema/tome-eval-result.schema.json",
+  "title": "tome-eval-result",
+  "description": "tome-tree spike A/B records written by the tome-eval bin. One `result` record per (question, arm) in results.jsonl; one `summary` record per run in summary.json. Sibling of, and independent from, the frozen rag-gate GateResult schema. Pages are 1-based PHYSICAL PDF page indices (inclusive).",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/result"
+    },
+    {
+      "$ref": "#/$defs/summary"
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "gitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$"
+    },
+    "page": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "arm": {
+      "type": "string",
+      "enum": [
+        "baseline",
+        "tome"
+      ]
+    },
+    "correctness": {
+      "description": "exact = matches expected_answer; partial = some required facts missing or imprecise; wrong = answered but incorrect or unsupported; error = the arm failed explicitly (see error.kind). null only when the grader was unavailable (grade.status != graded).",
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "exact",
+        "partial",
+        "wrong",
+        "error",
+        null
+      ]
+    },
+    "errorKind": {
+      "description": "Explicit failure kinds. The first eight mirror tome_tree::TomeError codes (io reserved for the library's planned io code); the rest are harness/baseline failures. `empty` is a silent empty (no passages, no error) and always counts against the win rule. `stub` is kept for pre-freeze records.",
+      "type": "string",
+      "enum": [
+        "unknown_doc",
+        "unknown_node",
+        "stale",
+        "no_structure",
+        "parse",
+        "over_budget",
+        "judge_unavailable",
+        "io",
+        "lattice_down",
+        "no_hits_for_doc",
+        "chunk_join_miss",
+        "answer_model",
+        "answer_parse",
+        "timeout",
+        "stub",
+        "empty",
+        "internal",
+        "bad_input"
+      ]
+    },
+    "modelInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model_id",
+        "provider",
+        "temperature",
+        "max_output_tokens",
+        "context_budget_tokens"
+      ],
+      "properties": {
+        "model_id": {
+          "type": "string",
+          "description": "As passed to the provider, e.g. opencode-go/deepseek-v4.1-flash. From evals/tome/config.toml, never hard-coded."
+        },
+        "provider": {
+          "type": "string",
+          "description": "e.g. opencode"
+        },
+        "agent": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "OpenCode agent that pins temperature and disables tools."
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "context_budget_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Same passage budget for both arms."
+        }
+      }
+    },
+    "baselineSettings": {
+      "description": "Provenance of the baseline index (Python tome_indexer.py via the lattice HTTP backend). Required on every record so a result can never float free of the index it was scored against.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "indexer",
+        "indexer_git_commit",
+        "indexer_sha256",
+        "chunk_target_chars",
+        "chunk_max_chars",
+        "chunk_overlap_chars",
+        "embedding_model",
+        "lattice_url",
+        "search",
+        "rerank_jev"
+      ],
+      "properties": {
+        "indexer": {
+          "type": "string",
+          "description": "e.g. atrium-lattice/tome_indexer.py"
+        },
+        "indexer_git_commit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "null when the indexer tree has no commits (record indexer_sha256 instead)."
+        },
+        "indexer_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "chunk_target_chars": {
+          "type": "integer"
+        },
+        "chunk_max_chars": {
+          "type": "integer"
+        },
+        "chunk_overlap_chars": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "0 = paragraph packing with no overlap."
+        },
+        "embedding_model": {
+          "type": "string"
+        },
+        "embedding_dim": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lattice_url": {
+          "type": "string"
+        },
+        "lattice_db_fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Chunk-map provenance: db path + max(indexed_at) of the joined docs."
+        },
+        "search": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "top_k",
+            "retrieve_limit",
+            "per_doc",
+            "doc_filter"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "hybrid",
+                "bm25",
+                "vector"
+              ]
+            },
+            "top_k": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Hits kept for the answerer after the same-PDF filter."
+            },
+            "retrieve_limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "description": "Lattice top_k (final list before the same-PDF filter); lattice caps at 50."
+            },
+            "per_doc": {
+              "type": "boolean"
+            },
+            "doc_filter": {
+              "type": "string",
+              "enum": [
+                "same_pdf_post_filter"
+              ]
+            },
+            "transport": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "http",
+                "lapis",
+                null
+              ],
+              "description": "http = lattice GET /search; lapis = lapis --json search."
+            },
+            "retrieve_k": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 10,
+              "maximum": 200,
+              "description": "Lattice per-modality candidate pool (http only)."
+            },
+            "domain": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Lattice domain filter used for this PDF."
+            }
+          }
+        },
+        "rerank_jev": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "transport"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "transport": {
+              "type": "string",
+              "description": "facet | http | none, as resolved by lapis jev::Transport::resolve"
+            },
+            "status": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "judged | uncertain | unavailable (from the search envelope's jev meta)"
+            },
+            "confidence_floor": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "tomeSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backend",
+        "builder_version",
+        "beam",
+        "max_judge_calls",
+        "max_open_pages",
+        "max_open_bytes"
+      ],
+      "properties": {
+        "backend": {
+          "type": "string",
+          "description": "tome_tree | fake | stub (stub only in pre-freeze records)"
+        },
+        "builder_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "beam": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "tome_tree::BEAM (fixed in the library; config must match)"
+        },
+        "max_judge_calls": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_open_pages": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_open_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "judge_transport": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "walk_cache": {
+          "type": "boolean",
+          "const": false,
+          "description": "Walk cache is off during eval so latency is honest."
+        },
+        "index_dir": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "tome.index_dir as configured (<vault>/.lapis/tomes; vault-relative when relative)."
+        },
+        "summary_model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "DocMeta.summary_model of the walked doc ({provider}/{model}); null when the walk failed before meta was read."
+        },
+        "summary_temperature": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "DocMeta.summary_temperature of the walked doc."
+        },
+        "root_calls": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "[tome] root_calls passed as Budget::root_calls (0.3.0)."
+        },
+        "root_batch_size": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "[tome] root_batch_size passed as Budget::root_batch_size (0.3.0)."
+        },
+        "root_top_k": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "[tome] root_top_k passed as Budget::root_top_k (0.3.0)."
+        }
+      }
+    },
+    "candidateScore": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "One judged tree node, from Walk.judged (0.2.0): the score the walk ranked on and the confidence it no longer gates on.",
+      "required": [
+        "node_id",
+        "title",
+        "page_start",
+        "page_end",
+        "score",
+        "confidence"
+      ],
+      "properties": {
+        "node_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "page_start": {
+          "$ref": "#/$defs/page"
+        },
+        "page_end": {
+          "$ref": "#/$defs/page"
+        },
+        "score": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 3,
+          "description": "0..=3 score the walk ranked on. Always an integer from 0.3.0; null only in 0.2.0 records."
+        },
+        "confidence": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "walkScores": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "description": "Tome-arm walk judging (0.2.0; root provenance 0.3.0), from the walk's own Walk.judged / root_path / root_judge_calls. Spike policy: rank on score only, no confidence gate; null on baseline records and on walks that returned an error.",
+      "required": [
+        "policy",
+        "confidence_floor",
+        "would_fail_closed",
+        "candidates"
+      ],
+      "properties": {
+        "policy": {
+          "enum": [
+            "score_only"
+          ]
+        },
+        "confidence_floor": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "would_fail_closed": {
+          "type": "boolean",
+          "description": "Some candidate had confidence < confidence_floor, so the pre-ruling judge would have returned judge_unavailable."
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/candidateScore"
+          }
+        },
+        "root_path": {
+          "enum": [
+            "batch",
+            "lexical_fallback"
+          ],
+          "description": "Root-pass path (0.3.0): batch = batched calls scored every root; lexical_fallback = a malformed batch, then the top root_top_k roots by title/lead overlap judged one at a time."
+        },
+        "root_judge_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Walk.root_judge_calls (0.3.0): calls the root pass spent. A Jev batch is one call."
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record",
+        "schema_version",
+        "run_id",
+        "question_id",
+        "doc",
+        "doc_sha256",
+        "arm",
+        "scored",
+        "answer",
+        "correctness",
+        "grade",
+        "cited_pages",
+        "gold_pages",
+        "page_metrics",
+        "latency_ms",
+        "tokens",
+        "opened",
+        "error",
+        "model",
+        "baseline",
+        "tome",
+        "git_sha",
+        "timestamp"
+      ],
+      "properties": {
+        "record": {
+          "const": "result"
+        },
+        "schema_version": {
+          "const": "0.3.0"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "question_id": {
+          "type": "string"
+        },
+        "doc": {
+          "type": "string",
+          "description": "Vault-relative PDF path."
+        },
+        "doc_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "arm": {
+          "$ref": "#/$defs/arm"
+        },
+        "scored": {
+          "type": "boolean",
+          "description": "false for fail-closed probes (e.g. rtg-fc-01)."
+        },
+        "answer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Answer text from the shared answerer; null on error."
+        },
+        "correctness": {
+          "$ref": "#/$defs/correctness"
+        },
+        "grade": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "grader"
+          ],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "graded",
+                "unavailable",
+                "uncertain",
+                "not_applicable"
+              ]
+            },
+            "grader": {
+              "type": "string",
+              "description": "jev-systemone (scorer only; never answers) | human:<name>"
+            },
+            "score": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 2,
+              "description": "0 wrong / 1 partial / 2 exact (Marci plan scale)."
+            },
+            "confidence": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "blind_label": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "X or Y when graded blind."
+            }
+          }
+        },
+        "cited_pages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/page"
+          },
+          "uniqueItems": true
+        },
+        "gold_pages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/page"
+          },
+          "uniqueItems": true,
+          "description": "Expanded from the question's inclusive ranges."
+        },
+        "page_metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "precision",
+            "recall",
+            "hit",
+            "precision_tol1"
+          ],
+          "properties": {
+            "precision": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 1,
+              "description": "|cited ∩ gold| / |cited|; null when nothing was cited."
+            },
+            "recall": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 1,
+              "description": "|cited ∩ gold| / |gold|; null when gold is empty."
+            },
+            "hit": {
+              "type": "boolean",
+              "description": "Any cited page in gold."
+            },
+            "precision_tol1": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Marci plan citation precision: cited pages within gold ±1 / cited."
+            }
+          }
+        },
+        "latency_ms": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "retrieve",
+            "answer",
+            "total"
+          ],
+          "properties": {
+            "retrieve": {
+              "type": "number",
+              "minimum": 0,
+              "description": "search+rerank (baseline) or walk incl. judge calls + open (tome)."
+            },
+            "answer": {
+              "type": "number",
+              "minimum": 0
+            },
+            "grade": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0,
+              "description": "Excluded from total."
+            },
+            "total": {
+              "type": "number",
+              "minimum": 0,
+              "description": "retrieve + answer (end to end)."
+            }
+          }
+        },
+        "tokens": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "prompt_tokens",
+            "completion_tokens"
+          ],
+          "properties": {
+            "prompt_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "completion_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "judge_calls": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "judge_prompt_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "estimated": {
+              "type": "boolean",
+              "description": "true when counts are chars/4 estimates (provider gave no usage)."
+            }
+          }
+        },
+        "opened": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "count",
+            "ids",
+            "pages"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "chunks",
+                "nodes"
+              ]
+            },
+            "count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "chunk_id (baseline) or dotted node id like 0003.0002 (tome)."
+            },
+            "pages": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/page"
+              },
+              "description": "Pages of everything handed to the answerer (baseline: joined via chunk_id)."
+            },
+            "bytes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        },
+        "error": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "message"
+          ],
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/errorKind"
+            },
+            "message": {
+              "type": "string"
+            }
+          }
+        },
+        "model": {
+          "$ref": "#/$defs/modelInfo"
+        },
+        "baseline": {
+          "$ref": "#/$defs/baselineSettings"
+        },
+        "tome": {
+          "$ref": "#/$defs/tomeSettings"
+        },
+        "walk_scores": {
+          "$ref": "#/$defs/walkScores"
+        },
+        "git_sha": {
+          "$ref": "#/$defs/gitSha"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "correctness": {
+                "const": "error"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "error": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "armSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "n",
+        "n_errors",
+        "silent_empties",
+        "mean_correctness",
+        "correctness_counts",
+        "citation_hit_rate",
+        "mean_page_precision",
+        "mean_page_recall",
+        "latency_p50_ms",
+        "latency_p95_ms",
+        "mean_prompt_tokens",
+        "mean_completion_tokens",
+        "mean_opened"
+      ],
+      "properties": {
+        "n": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "n_errors": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "errors_by_kind": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer"
+          }
+        },
+        "silent_empties": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "n_graded": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mean_correctness": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Mean of 0/1/2 over graded questions (errors count 0)."
+        },
+        "correctness_counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "exact": {
+              "type": "integer"
+            },
+            "partial": {
+              "type": "integer"
+            },
+            "wrong": {
+              "type": "integer"
+            },
+            "error": {
+              "type": "integer"
+            },
+            "ungraded": {
+              "type": "integer"
+            }
+          }
+        },
+        "citation_hit_rate": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "mean_page_precision": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "mean_page_recall": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "latency_p50_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "latency_p95_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "mean_prompt_tokens": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "mean_completion_tokens": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "mean_opened": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "per_doc": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "integer"
+              },
+              "exact_or_partial": {
+                "type": "integer"
+              },
+              "mean_correctness": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record",
+        "schema_version",
+        "run_id",
+        "questions_file",
+        "questions_sha256",
+        "n_questions",
+        "arms",
+        "verdict",
+        "model",
+        "baseline",
+        "tome",
+        "git_sha",
+        "started_at",
+        "finished_at"
+      ],
+      "properties": {
+        "record": {
+          "const": "summary"
+        },
+        "schema_version": {
+          "const": "0.3.0"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "questions_file": {
+          "type": "string"
+        },
+        "questions_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "n_questions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "smoke": {
+          "type": "boolean",
+          "description": "true for a partial/smoke run (--limit); verdict is then always incomplete."
+        },
+        "arms": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "baseline",
+            "tome"
+          ],
+          "properties": {
+            "baseline": {
+              "$ref": "#/$defs/armSummary"
+            },
+            "tome": {
+              "$ref": "#/$defs/armSummary"
+            }
+          }
+        },
+        "per_question": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "question_id",
+              "outcome"
+            ],
+            "properties": {
+              "question_id": {
+                "type": "string"
+              },
+              "baseline": {
+                "$ref": "#/$defs/correctness"
+              },
+              "tome": {
+                "$ref": "#/$defs/correctness"
+              },
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "tome_win",
+                  "baseline_win",
+                  "tie",
+                  "ungraded"
+                ]
+              }
+            }
+          }
+        },
+        "verdict": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "decision",
+            "wins",
+            "losses",
+            "ties",
+            "rules"
+          ],
+          "properties": {
+            "decision": {
+              "type": "string",
+              "enum": [
+                "keep",
+                "shelve",
+                "incomplete"
+              ],
+              "description": "keep only if every win rule holds; incomplete when grading/arms are missing or smoke=true."
+            },
+            "wins": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "losses": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "ties": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "rules": {
+              "type": "array",
+              "description": "Marci plan §4 win rule, evaluated one by one.",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "pass",
+                  "detail"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "enum": [
+                      "correctness_delta",
+                      "citation_hit_delta",
+                      "per_pdf_regression",
+                      "latency_ratio",
+                      "token_ratio",
+                      "silent_empties"
+                    ]
+                  },
+                  "pass": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "detail": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "model": {
+          "$ref": "#/$defs/modelInfo"
+        },
+        "baseline": {
+          "$ref": "#/$defs/baselineSettings"
+        },
+        "tome": {
+          "$ref": "#/$defs/tomeSettings"
+        },
+        "walks_judged": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Scored tome walks that judged at least one candidate (0.2.0)."
+        },
+        "would_fail_closed_at_0_6": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Of walks_judged, walks that would have failed closed at the fixed 0.6 confidence floor (0.2.0)."
+        },
+        "git_sha": {
+          "$ref": "#/$defs/gitSha"
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "finished_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}
