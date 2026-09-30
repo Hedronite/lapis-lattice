@@ -51,6 +51,7 @@ thiserror = "2"
 tome-tree = { path = "crates/tome-tree", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "time"] }
 toml = "1"
+unicode-width = "0.2"
 yaml_serde = "0.10"
 
 [profile.release]

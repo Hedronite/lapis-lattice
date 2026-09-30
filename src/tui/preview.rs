@@ -1,9 +1,10 @@
 //! Markdown preview: pulldown-cmark events → styled ratatui `Line`s.
 //! Wrapping is left to `Paragraph::wrap`, so each logical block is one Line.
 
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
 use super::theme;
 
@@ -59,8 +60,10 @@ struct State {
     in_code: bool,
     quote: usize,
     in_table: bool,
-    row: Vec<String>,
     cell: String,
+    row: Vec<String>,
+    table: Vec<Vec<String>>,
+    align: Vec<Alignment>,
     link: Option<String>,
     heading: Option<u8>,
 }
@@ -190,10 +193,12 @@ fn render_blocks(md: &str, preserve_lines: bool) -> Vec<Line<'static>> {
                 Tag::Image { dest_url, .. } => {
                     st.cur.push(Span::styled(format!("🖼 {dest_url}"), theme::dim()));
                 }
-                Tag::Table(_) => {
+                Tag::Table(align) => {
                     st.flush();
                     st.blank();
                     st.in_table = true;
+                    st.align = align;
+                    st.table.clear();
                 }
                 Tag::TableHead | Tag::TableRow => st.row.clear(),
                 Tag::TableCell => st.cell.clear(),
@@ -248,17 +253,17 @@ fn render_blocks(md: &str, preserve_lines: bool) -> Vec<Line<'static>> {
                     let c = std::mem::take(&mut st.cell);
                     st.row.push(c);
                 }
-                TagEnd::TableHead => {
-                    let row = st.row.join(" │ ");
-                    st.lines.push(Line::from(Span::styled(row, theme::accent())));
-                    st.lines.push(Line::from(Span::styled("─".repeat(40), theme::dim())));
-                }
-                TagEnd::TableRow => {
-                    let row = st.row.join(" │ ");
-                    st.lines.push(Line::from(Span::styled(row, base)));
-                }
+                TagEnd::TableHead | TagEnd::TableRow => st.table.push(std::mem::take(&mut st.row)),
                 TagEnd::Table => {
                     st.in_table = false;
+                    let lines = table_lines(&std::mem::take(&mut st.table), &std::mem::take(&mut st.align));
+                    for (i, line) in lines.iter().enumerate() {
+                        let style = if i == 0 { theme::accent() } else { base };
+                        st.lines.push(Line::from(Span::styled(line.clone(), style)));
+                        if i == 0 {
+                            st.lines.push(Line::from(Span::styled("─".repeat(line.width()), theme::dim())));
+                        }
+                    }
                     st.blank();
                 }
                 TagEnd::HtmlBlock => st.style = base,
@@ -308,6 +313,47 @@ fn render_blocks(md: &str, preserve_lines: bool) -> Vec<Line<'static>> {
     st.lines
 }
 
+/// Buffer the whole table, then rebuild its rows: every column is as wide as
+/// its widest cell (display columns, `unicode-width`), aligned per the
+/// separator, joined with ` │ `. The header line never pads on the right.
+fn table_lines(rows: &[Vec<String>], align: &[Alignment]) -> Vec<String> {
+    let cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    let mut widths = vec![0usize; cols];
+    for row in rows {
+        for (j, cell) in row.iter().enumerate() {
+            widths[j] = widths[j].max(cell.width());
+        }
+    }
+    rows.iter()
+        .map(|row| {
+            let mut out = String::new();
+            for (j, &w) in widths.iter().enumerate() {
+                if j > 0 {
+                    out.push_str(" │ ");
+                }
+                let cell = row.get(j).map(String::as_str).unwrap_or("");
+                let pad = w.saturating_sub(cell.width());
+                let last = j + 1 == widths.len();
+                match align.get(j).copied() {
+                    Some(Alignment::Right) => out.push_str(&" ".repeat(pad)),
+                    Some(Alignment::Center) => out.push_str(&" ".repeat(pad / 2)),
+                    _ => {}
+                }
+                out.push_str(cell);
+                if !last {
+                    let after = match align.get(j).copied() {
+                        Some(Alignment::Right) => 0,
+                        Some(Alignment::Center) => pad - pad / 2,
+                        _ => pad,
+                    };
+                    out.push_str(&" ".repeat(after));
+                }
+            }
+            out
+        })
+        .collect()
+}
+
 /// Heading outline: (line index in the rendered preview, level, text).
 pub fn outline(md: &str) -> Vec<(usize, u8, String)> {
     let mut out = Vec::new();
@@ -349,6 +395,19 @@ mod tests {
         assert!(t.iter().any(|l| l == "a │ b"), "{t:?}");
         assert!(t.iter().any(|l| l == "1 │ 2"), "{t:?}");
         assert!(lines[0].spans.iter().any(|s| s.style.fg == Some(theme::gold())), "h1 is gold");
+    }
+
+    #[test]
+    fn pipe_tables_align_under_a_header_width_rule() {
+        let t = text(&render("| name | v |\n| --- | --- |\n| Alpha | 17 |\n"));
+        assert_eq!(t.len(), 3, "{t:?}");
+        assert_eq!(t[0], "name  │ v");
+        assert_eq!(t[1], "─".repeat(t[0].width()));
+        assert_eq!(t[2], "Alpha │ 17");
+        assert!(!t.iter().any(|l| l.contains("|---")), "{t:?}");
+        let right = text(&render("| go | stop |\n| ---: | --- |\n| 1 | 2 |\n"));
+        assert_eq!(right[0], "go │ stop");
+        assert_eq!(right[2], " 1 │ 2");
     }
 
     #[test]

@@ -4211,6 +4211,7 @@ dependencies = [
  "tome-eval",
  "tome-tree",
  "toml 1.1.5+spec-1.1.0",
+ "unicode-width",
  "yaml_serde",
 ]
 
@@ -4226,6 +4227,7 @@ dependencies = [
  "serde",
  "serde_json",
  "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]
