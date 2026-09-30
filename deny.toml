@@ -1,0 +1,32 @@
+# Rust-TOPS drop-in. The allow list is what this tree already uses.
+
+[advisories]
+yanked = "deny"
+unmaintained = "none"
+# RUSTSEC-2026-0192 ttf-parser via lopdf/pdf-extract has no upgrade. Unmaintained checks are off; vulnerabilities still fail.
+
+[licenses]
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+  "CDLA-Permissive-2.0",
+  "CC0-1.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+# The path member lapis-desktop and the ratatui-textarea git rev have no version requirement.
+wildcards = "warn"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/ratatui/ratatui-textarea"]

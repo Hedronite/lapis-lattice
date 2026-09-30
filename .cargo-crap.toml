@@ -1,0 +1,9 @@
+# Rust-TOPS drop-in. `fail = true` is not a field. CI checks the JSON is nonempty.
+threshold = 6.0
+exclude = [
+  "src/generated/**",
+  "tests/**",
+  "benches/**",
+  "examples/**",
+  "vendor/**",
+]

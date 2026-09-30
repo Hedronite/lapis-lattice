@@ -1,0 +1,23 @@
+# Rust-TOPS drop-in.
+
+[profile.default]
+slow-timeout = { period = "10s", terminate-after = 3 }
+
+[profile.ci]
+retries = 0
+fail-fast = false
+slow-timeout = { period = "10s", terminate-after = 2 }
+status-level = "fail"
+
+[profile.ci.junit]
+path = "junit.xml"
+
+[test-groups]
+exclusive-fs = { max-threads = 1 }
+
+# PTY smokes spawn the lapis binary. They pass under cargo test and
+# outlive the 20s workspace kill (period 10s, terminate-after 2).
+[[profile.ci.overrides]]
+filter = "binary(tui_input)"
+slow-timeout = { period = "90s", terminate-after = 2 }
+

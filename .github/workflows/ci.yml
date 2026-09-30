@@ -143,3 +143,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash scripts/scrub-gate.sh
+
+  tops:
+    name: rust-tops record
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest,cargo-llvm-cov,cargo-deny
+      - name: cargo-crap 0.5.0
+        run: cargo install cargo-crap --locked --version 0.5.0
+      - name: cargo deny
+        run: cargo deny check
+      - name: nextest
+        run: cargo nextest run --workspace --profile ci
+      - name: doc tests
+        run: cargo test --workspace --doc
+      - name: nextest with tome
+        run: cargo nextest run --workspace --features tome --profile ci
+      - name: doc tests with tome
+        run: cargo test --workspace --doc --features tome
+      - name: nonempty LCOV and CRAP JSON
+        run: |
+          mkdir -p target/tops
+          cargo llvm-cov test --workspace --features tome --lcov --output-path target/tops/lcov.info
+          test -s target/tops/lcov.info
+          cargo crap --workspace --lcov target/tops/lcov.info --format json > target/tops/crap.json
+          test -s target/tops/crap.json
