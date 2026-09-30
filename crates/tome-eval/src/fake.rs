@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 
 use crate::contract::{
-    BEAM, Budget, Candidate, DocId, DocMeta, Judge, Node, NodeId, NodeSource, OPEN_BYTE_CAP, OPEN_PAGE_CAP,
-    Passage, Result, TomeApi, TomeError, Walk,
+    BEAM, Budget, Candidate, DocId, DocMeta, Judge, Judged, Node, NodeId, NodeSource, OPEN_BYTE_CAP,
+    OPEN_PAGE_CAP, Passage, Result, TomeApi, TomeError, Walk,
 };
 
 /// Doc id of the sample book (a fake sha256).
@@ -183,12 +183,16 @@ impl TomeApi for FakeTome {
     }
 
     /// Same contract as the library walk: beam `BEAM`, stop at a leaf or ≤ 3 pages,
-    /// judge errors stop the walk, over the page budget is `over_budget`.
+    /// judge errors stop the walk, over the page budget is `over_budget`, and every
+    /// assessed child is in `judged`. Roots are not scored (no root pass), so
+    /// `root_judge_calls` is 0. The real root pass is covered by the harness test
+    /// over a built `TomeIndex`.
     fn walk(&self, doc: &DocId, query: &str, judge: &dyn Judge, budget: Budget) -> Result<Walk> {
         let d = self.doc(doc)?;
         let mut frontier: Vec<&Node> = d.roots.iter().collect();
         let mut chosen: Vec<&Node> = Vec::new();
         let mut calls = 0u32;
+        let mut judged = Vec::new();
         loop {
             let mut pool: Vec<(u8, &Node)> = Vec::new();
             let mut expandable = false;
@@ -211,9 +215,18 @@ impl TomeApi for FakeTome {
                         page_end: c.page_end,
                         level: c.level,
                     };
-                    let s = judge.score(query, &cand)?;
+                    let a = judge.assess(query, &cand)?;
                     calls += 1;
-                    pool.push((s, c));
+                    judged.push(Judged {
+                        node_id: c.id.clone(),
+                        title: c.title.clone(),
+                        page_start: c.page_start,
+                        page_end: c.page_end,
+                        score: a.score,
+                        confidence: a.confidence,
+                        rank: a.score,
+                    });
+                    pool.push((a.score, c));
                 }
             }
             if !expandable || pool.is_empty() {
@@ -237,7 +250,7 @@ impl TomeApi for FakeTome {
             passages,
             judge_calls: calls,
             skipped: vec![],
-            judged: vec![],
+            judged,
             root_judge_calls: 0,
             root_path: tome_tree::RootPath::Batch,
             roots_skipped: vec![],

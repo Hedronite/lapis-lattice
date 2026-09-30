@@ -98,6 +98,15 @@ pub struct TomeCfg {
     pub max_judge_calls: u32,
     pub max_open_pages: u32,
     pub max_open_bytes: u32,
+    /// `Budget::root_calls`: calls the root pass may spend (a batch costs 1).
+    #[serde(default = "default_root_calls")]
+    pub root_calls: u32,
+    /// `Budget::root_batch_size`: candidates per batched call.
+    #[serde(default = "default_root_batch_size")]
+    pub root_batch_size: u32,
+    /// `Budget::root_top_k`: roots judged one at a time after a malformed batch.
+    #[serde(default = "default_root_top_k")]
+    pub root_top_k: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -117,6 +126,15 @@ fn default_agent() -> String {
 }
 fn default_opencode() -> String {
     "opencode".into()
+}
+fn default_root_calls() -> u32 {
+    crate::contract::DEFAULT_ROOT_CALLS
+}
+fn default_root_batch_size() -> u32 {
+    crate::contract::DEFAULT_ROOT_BATCH
+}
+fn default_root_top_k() -> u32 {
+    crate::contract::DEFAULT_ROOT_TOP_K
 }
 fn default_timeout() -> u64 {
     120
@@ -169,6 +187,9 @@ impl EvalConfig {
                 crate::contract::BEAM
             ));
         }
+        if self.tome.root_calls == 0 || self.tome.root_batch_size == 0 || self.tome.root_top_k == 0 {
+            return Err("tome.root_calls, root_batch_size and root_top_k must be ≥ 1".into());
+        }
         if !matches!(self.jev.transport.as_str(), "http" | "none") {
             return Err(format!("jev.transport must be http|none, got {}", self.jev.transport));
         }
@@ -189,6 +210,15 @@ mod tests {
         assert!(c.baseline.chunk_map.ends_with("data/chunk-pages.jsonl"));
         assert_eq!((c.baseline.transport.as_str(), c.baseline.retrieve_k), ("http", 200));
         assert_eq!(c.jev.confidence_floor, crate::jev::FAIL_CLOSED_FLOOR, "floor stays 0.6; never tuned");
+        assert_eq!(
+            (c.tome.root_calls, c.tome.root_batch_size, c.tome.root_top_k),
+            (
+                crate::contract::DEFAULT_ROOT_CALLS,
+                crate::contract::DEFAULT_ROOT_BATCH,
+                crate::contract::DEFAULT_ROOT_TOP_K
+            ),
+            "[tome] root settings match the library defaults"
+        );
         let qs = crate::questions::load(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/tome/questions.jsonl"),
         )
