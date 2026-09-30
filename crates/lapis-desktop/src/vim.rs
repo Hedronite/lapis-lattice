@@ -39,6 +39,19 @@ pub enum Effect {
     SaveClose,
     Status(String),
 }
+/// Editor state the view hands to `Vim::key`: text, caret, selection.
+pub struct View<'a> {
+    pub s: &'a str,
+    pub cursor: usize,
+    pub selection: Range<usize>,
+}
+/// Motion endpoints and the operator span shape.
+struct Span {
+    p: usize,
+    q: usize,
+    inclusive: bool,
+    linewise: bool,
+}
 #[derive(Default)]
 pub struct Vim {
     pub mode: Mode,
@@ -125,17 +138,10 @@ impl Vim {
             Self::edit(range, String::new())
         }
     }
-    pub fn key(
-        &mut self,
-        key: &str,
-        control: bool,
-        s: &str,
-        cursor: usize,
-        selection: Range<usize>,
-        register: &mut Register,
-    ) -> Effect {
-        let cursor = m::clip(s, cursor);
-        let selection = m::clip(s, selection.start)..m::clip(s, selection.end);
+    pub fn key(&mut self, key: &str, control: bool, view: &View<'_>, register: &mut Register) -> Effect {
+        let s = view.s;
+        let cursor = m::clip(s, view.cursor);
+        let selection = m::clip(s, view.selection.start)..m::clip(s, view.selection.end);
         self.anchor = m::clip(s, self.anchor);
         self.head = m::clip(s, self.head);
         if key == "escape" {
@@ -214,7 +220,11 @@ impl Vim {
         if key == "g" {
             if self.pending == Some('g') {
                 self.pending = None;
-                return self.motion(s, p, m::vertical(s, 0, true, n - 1), false, true, register);
+                return self.motion(
+                    s,
+                    &Span { p, q: m::vertical(s, 0, true, n - 1), inclusive: false, linewise: true },
+                    register,
+                );
             }
             self.pending = Some('g');
             self.count = n;
@@ -263,17 +273,12 @@ impl Vim {
             _ => None,
         };
         if let Some(target) = target {
-            return self.motion(
-                s,
-                p,
-                target,
-                matches!(key, "e" | "E")
-                    || (matches!(key, "w" | "W")
-                        && self.operator.is_some_and(|(op, _)| op == 'c')
-                        && !s[p..].starts_with(char::is_whitespace)),
-                matches!(key, "j" | "k" | "G"),
-                register,
-            );
+            let inclusive = matches!(key, "e" | "E")
+                || (matches!(key, "w" | "W")
+                    && self.operator.is_some_and(|(op, _)| op == 'c')
+                    && !s[p..].starts_with(char::is_whitespace));
+            let span = Span { p, q: target, inclusive, linewise: matches!(key, "j" | "k" | "G") };
+            return self.motion(s, &span, register);
         }
         self.operator = None;
         match key {
@@ -370,15 +375,8 @@ impl Vim {
             _ => Effect::Status(format!("Unmapped normal-mode key: {key}")),
         }
     }
-    fn motion(
-        &mut self,
-        s: &str,
-        p: usize,
-        q: usize,
-        inclusive: bool,
-        linewise: bool,
-        register: &mut Register,
-    ) -> Effect {
+    fn motion(&mut self, s: &str, span: &Span, register: &mut Register) -> Effect {
+        let &Span { p, q, inclusive, linewise } = span;
         if let Some((op, _)) = self.operator.take() {
             let (a, b) = (p.min(q), p.max(q));
             let r = if linewise {
@@ -439,8 +437,12 @@ mod tests {
             }
         }
         fn key(&mut self, key: &str) -> Effect {
-            let effect =
-                self.vim.key(key, false, &self.text, self.cursor, self.selected.clone(), &mut self.register);
+            let effect = self.vim.key(
+                key,
+                false,
+                &View { s: &self.text, cursor: self.cursor, selection: self.selected.clone() },
+                &mut self.register,
+            );
             match &effect {
                 Effect::Select(r) => {
                     self.selected = r.clone();
