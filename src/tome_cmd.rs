@@ -187,3 +187,94 @@ impl From<tome_tree::TomeError> for LapisError {
         LapisError::Tome { code: err.code(), message: err.to_string() }
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::vault::Vault;
+    #[test]
+    fn build_needs_pdfs_and_reports_a_missing_path() {
+        let dir = temp_vault("usage");
+        let ctx = make_ctx(&dir, false);
+        let err = run(&ctx, build(vec![])).expect_err("no pdfs is usage");
+        assert_eq!(err.kind(), "usage");
+        let err = run(&ctx, build(vec!["no-such-file.pdf".into()])).expect_err("missing pdf is a path error");
+        assert_eq!(err.kind(), "path");
+        assert!(err.message().contains("pdf not found"), "{}", err.message());
+        cleanup(&dir);
+    }
+    #[test]
+    fn build_tree_and_open_round_trip() {
+        let dir = temp_vault("roundtrip");
+        let ctx = make_ctx(&dir, false);
+        let pdf_str = fixture_pdf();
+        run(&ctx, build(vec![pdf_str.clone()])).expect("build reference.pdf");
+        let json_ctx = make_ctx(&dir, true);
+        run(&json_ctx, build(vec![pdf_str.clone()])).expect("json build of the same doc");
+        run(&ctx, tree_cmd(pdf_str.clone())).expect("tree ok");
+        let index = index(&ctx).expect("open index");
+        let doc = resolve_doc(&index, &ctx.vault.root, &pdf_str).expect("doc resolves");
+        let nodes = index.tree(&doc, None, Some(1)).expect("roots");
+        assert!(!nodes.is_empty(), "reference.pdf has at least one root");
+        let first = nodes[0].id.as_str().to_string();
+        let err = run(&ctx, open_cmd(pdf_str.clone(), vec![])).expect_err("no node ids is usage");
+        assert_eq!(err.kind(), "usage");
+        run(&ctx, open_cmd(pdf_str.clone(), vec![first])).expect("open first root");
+        cleanup(&dir);
+    }
+    #[test]
+    fn search_without_a_transport_is_judge_unavailable() {
+        let dir = temp_vault("search-none");
+        let ctx = make_ctx(&dir, false);
+        let pdf_str = fixture_pdf();
+        run(&ctx, build(vec![pdf_str.clone()])).expect("build before search");
+        // Search must not reach the network: LAPIS_JEV_TRANSPORT=none makes
+        // Transport::resolve fail closed and the walk surfaces judge_unavailable.
+        let old = std::env::var_os("LAPIS_JEV_TRANSPORT");
+        unsafe { std::env::set_var("LAPIS_JEV_TRANSPORT", "none") };
+        let res = run(&ctx, search_cmd(pdf_str, "what is this document about?".into()));
+        match old {
+            Some(v) => unsafe { std::env::set_var("LAPIS_JEV_TRANSPORT", v) },
+            None => unsafe { std::env::remove_var("LAPIS_JEV_TRANSPORT") },
+        }
+        let err = res.expect_err("no transport: the walk cannot judge");
+        assert_eq!(err.kind(), "judge_unavailable");
+        cleanup(&dir);
+    }
+    fn fixture_pdf() -> String {
+        let pdf =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/ux-reference/reference.pdf");
+        assert!(pdf.is_file(), "fixture pdf {pdf:?}");
+        pdf.to_str().unwrap().to_string()
+    }
+    fn temp_vault(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lapis-tome-cmd-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+    fn cleanup(dir: &Path) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    fn make_ctx(root: &Path, json: bool) -> Ctx {
+        Ctx {
+            json,
+            vault: Vault { root: root.to_path_buf(), source: "flag" },
+            cfg: Config::default(),
+            lattice_url: String::new(),
+            force_http: false,
+        }
+    }
+    fn build(pdfs: Vec<String>) -> TomeCommand {
+        TomeCommand::Build(TomeBuildArgs { pdfs, force: false, allow_windows: true, llm_struct: false })
+    }
+    fn tree_cmd(doc: String) -> TomeCommand {
+        TomeCommand::Tree(TomeTreeArgs { doc, node: None, depth: None })
+    }
+    fn open_cmd(doc: String, nodes: Vec<String>) -> TomeCommand {
+        TomeCommand::Open(TomeOpenArgs { doc, nodes })
+    }
+    fn search_cmd(doc: String, query: String) -> TomeCommand {
+        TomeCommand::Search(TomeSearchArgs { doc, query, max_judge_calls: 24, max_pages: 12 })
+    }
+}
