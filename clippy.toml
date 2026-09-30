@@ -1,0 +1,11 @@
+# Rust-TOPS drop-in.
+cognitive-complexity-threshold = 12
+too-many-lines-threshold = 40
+too-many-arguments-threshold = 6
+type-complexity-threshold = 250
+avoid-breaking-exported-api = true
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true
+allow-dbg-in-tests = true
+allow-print-in-tests = true
+check-private-items = true

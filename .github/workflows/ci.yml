@@ -143,3 +143,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash scripts/scrub-gate.sh
+
+  tops:
+    name: rust-tops record
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest,cargo-llvm-cov,cargo-deny
+      - name: cargo-crap 0.5.0
+        run: cargo install cargo-crap --locked --version 0.5.0
+      - name: cargo deny
+        run: cargo deny check
+      - name: nextest
+        run: cargo nextest run --workspace --profile ci
+      - name: doc tests
+        run: cargo test --workspace --doc
+      - name: nextest with tome
+        run: cargo nextest run --workspace --features tome --profile ci
+      - name: doc tests with tome
+        run: cargo test --workspace --doc --features tome
+      - name: nonempty LCOV and CRAP JSON
+        run: |
+          mkdir -p target/tops
+          # tests/tui_input.rs already runs in the test jobs and in nextest.
+          # llvm-cov instrumentation makes those PTY smokes miss the 15s palette wait.
+          cargo llvm-cov test --workspace --features tome --lcov --output-path target/tops/lcov.info --             --skip terminal_paste_selection_undo_and_external_save_guards             --skip terminal_missing_index_offers_background_build_and_leaves_built_health             --skip terminal_workflows_outline_history_palette_states_tasks_and_notes_routes             --skip terminal_screen_decoder_handles_incremental_status_repaints
+          test -s target/tops/lcov.info
+          cargo crap --workspace --lcov target/tops/lcov.info --format json > target/tops/crap.json
+          test -s target/tops/crap.json

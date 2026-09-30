@@ -24,8 +24,8 @@ pub(crate) fn extract(doc: &Document) -> Result<Option<Vec<RawNode>>> {
         return Err(parse("pdf has no pages"));
     }
     let named = named_destinations(doc)?;
-    let mut seen = HashSet::new();
-    let nodes = siblings(doc, &first, &page_of, &named, page_count, &mut seen, 0)?;
+    let mut walk = Walk { doc, page_of: &page_of, named: &named, page_count, seen: HashSet::new() };
+    let nodes = siblings(&mut walk, &first, 0)?;
     if nodes.is_empty() { Ok(None) } else { Ok(Some(nodes)) }
 }
 
@@ -88,15 +88,17 @@ fn assign_ends_at(nodes: &mut [RawNode], parent_end: u32, depth: u32) {
     }
 }
 
-fn siblings(
-    doc: &Document,
-    first: &Object,
-    page_of: &HashMap<ObjectId, u32>,
-    named: &HashMap<Vec<u8>, Object>,
+/// One walk's shared read side. `seen` stays mutable so cycle marking survives
+/// the whole recursion.
+struct Walk<'a> {
+    doc: &'a Document,
+    page_of: &'a HashMap<ObjectId, u32>,
+    named: &'a HashMap<Vec<u8>, Object>,
     page_count: u32,
-    seen: &mut HashSet<ObjectId>,
-    depth: u32,
-) -> Result<Vec<RawNode>> {
+    seen: HashSet<ObjectId>,
+}
+
+fn siblings(walk: &mut Walk, first: &Object, depth: u32) -> Result<Vec<RawNode>> {
     if depth > 256 {
         return Ok(Vec::new());
     }
@@ -109,37 +111,26 @@ fn siblings(
             return Err(parse("outline longer than 10000 items"));
         }
         if let Object::Reference(id) = obj
-            && !seen.insert(id)
+            && !walk.seen.insert(id)
         {
             return Err(parse("outline cycle"));
         }
-        let dict = deref_dict(doc, &obj)?;
-        nodes.extend(one_item(doc, &dict, page_of, named, page_count, seen, depth)?);
+        let dict = deref_dict(walk.doc, &obj)?;
+        nodes.extend(one_item(walk, &dict, depth)?);
         current = opt(&dict, b"Next").cloned();
     }
     Ok(nodes)
 }
 
-fn one_item(
-    doc: &Document,
-    dict: &Dictionary,
-    page_of: &HashMap<ObjectId, u32>,
-    named: &HashMap<Vec<u8>, Object>,
-    page_count: u32,
-    seen: &mut HashSet<ObjectId>,
-    depth: u32,
-) -> Result<Vec<RawNode>> {
-    if is_remote(doc, dict)? {
+fn one_item(walk: &mut Walk, dict: &Dictionary, depth: u32) -> Result<Vec<RawNode>> {
+    if is_remote(walk.doc, dict)? {
         return Ok(Vec::new());
     }
-    let children = if let Some(first) = opt(dict, b"First") {
-        siblings(doc, first, page_of, named, page_count, seen, depth + 1)?
-    } else {
-        Vec::new()
-    };
+    let children =
+        if let Some(first) = opt(dict, b"First") { siblings(walk, first, depth + 1)? } else { Vec::new() };
     // No destination, or one we cannot resolve: drop this item and keep its
     // children. One broken bookmark must not fail the document.
-    let page = match dest_page(doc, dict, page_of, named, page_count) {
+    let page = match dest_page(walk.doc, dict, walk.page_of, walk.named, walk.page_count) {
         Ok(Some(page)) => page,
         Ok(None) | Err(_) => return Ok(children),
     };

@@ -1,0 +1,94 @@
+protocol:
+  id: rust-tops
+  version: "1.0.0"
+  spec_uri: "./RUST_TOPS.md" # This repo does not vendor that file.
+  adopted: "2026-09-30"
+
+crate:
+  name: lapis-lattice
+  class: library-core
+  edition: "2024"
+  unsafe_policy: allow-documented
+  hot_paths: []
+
+goals:
+  correctness: behavior matches specified invariants under all applicable layers
+  density: fewest necessary production lines that preserve clarity and performance
+  performance: no unexplained regression on gated hot paths; prefer algorithmic then codegen then micro
+  notes: >-
+    sqlite.rs is the documented unsafe. A slice that claims a search or FTS invariant adds a property. Miri runs when sqlite.rs changes. Class line floor is not this CI job.
+
+layers:
+  - { id: static-lint,       enabled: true,  tier: 0, runner: "cargo clippy/fmt/deny", scope: workspace }
+  - { id: unit,              enabled: true,  tier: 0, runner: "cargo nextest",         scope: lib }
+  - { id: doc,               enabled: true,  tier: 0, runner: "cargo test --doc",      scope: lib }
+  - { id: integration,       enabled: true,  tier: 1, runner: "cargo nextest",         scope: tests }
+  - { id: acceptance,        enabled: false, tier: 1, runner: "cargo test",            scope: bins }
+  - { id: snapshot,          enabled: false, tier: 2, runner: insta,                   scope: tests }
+  - { id: compile-fail,      enabled: false, tier: 2, runner: trybuild,                scope: tests }
+  - { id: coverage,          enabled: true,  tier: 0, runner: cargo-llvm-cov,          scope: lib }
+  - { id: crap,              enabled: true,  tier: 0, runner: cargo-crap,              scope: lib }
+  - { id: mutation,          enabled: true,  tier: 1, runner: cargo-mutants,           scope: diff }
+  - { id: property,          enabled: false, tier: 1, runner: proptest,                scope: lib }
+  - { id: fuzz,              enabled: false, tier: 3, runner: cargo-fuzz,              scope: lib }
+  - { id: concurrency,       enabled: false, tier: 3, runner: loom,                    scope: lib }
+  - { id: miri,              enabled: false, tier: 3, runner: "cargo +nightly miri",   scope: unsafe }
+  - { id: sanitizer,         enabled: false, tier: 3, runner: "asan/tsan nightly",     scope: unsafe }
+  - { id: formal-kani,       enabled: false, tier: 4, runner: cargo-kani,              scope: hot-paths }
+  - { id: bench-criterion,   enabled: false, tier: 5, runner: criterion,               scope: hot-paths }
+  - { id: bench-callgrind,   enabled: false, tier: 4, runner: gungraun,                scope: hot-paths }
+  - { id: security-advisory, enabled: true,  tier: 0, runner: cargo-deny,              scope: workspace }
+  - { id: density-audit,     enabled: true,  tier: 5, runner: "review+clippy",         scope: workspace }
+
+gates:
+  lint:
+    clippy_deny:
+      - warnings
+    fmt_check: true
+    cognitive_complexity_max: 12
+    too_many_lines_max: 40
+    too_many_arguments_max: 6
+  unit:
+    must_pass: true
+    allow_ignored: false
+    nextest_profile: ci
+  coverage:
+    tool: cargo-llvm-cov
+    branch_min_pct: null
+    exclude_globs:
+      - tests/**
+      - benches/**
+      - examples/**
+      - vendor/**
+  crap:
+    tool: cargo-crap
+    formula: "CC^2 * (1 - cov)^3 + CC"
+    threshold_production: 6
+    threshold_agent: 6
+    threshold_human: 30
+    classic_crappy: 30
+    fail_on: delta-regression
+    scar_guard: true
+  mutation:
+    tool: cargo-mutants
+    scope: diff
+    unexplained_survivors_max: 0
+    timeout_multiplier: 2
+
+density:
+  production_sloc_policy: minimum necessary lines that preserve named invariants, performance, and reviewability
+  max_fn_sloc: 40
+  max_fn_cc: 8
+  allow_long_table_functions: true
+  rules:
+    - one function, one named job
+    - enum+match over boolean modes
+    - no clone on hot_paths without a why-comment
+    - no trait or builder with a single impl
+    - unwrap only for programmer-invariant bugs
+    - tests may be table-driven; production may not be copy-pasted
+
+performance:
+  hot_path_requirements: []
+
+exemptions: []
