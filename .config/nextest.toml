@@ -14,10 +14,17 @@ path = "junit.xml"
 
 [test-groups]
 exclusive-fs = { max-threads = 1 }
+# One PTY smoke at a time, and only when the rest of the suite is idle.
+pty = { max-threads = 1 }
 
 # PTY smokes spawn the lapis binary. They pass under cargo test and
 # outlive the 20s workspace kill (period 10s, terminate-after 2).
+# On a loaded ubuntu runner the workflow smoke reads a split backtab as
+# Escape and stays in NORMAL. Reserving every test thread keeps the
+# other tests off the cores while this binary runs.
 [[profile.ci.overrides]]
 filter = "binary(tui_input)"
+test-group = "pty"
+threads-required = "num-test-threads"
 slow-timeout = { period = "90s", terminate-after = 2 }
 
