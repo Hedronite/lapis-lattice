@@ -331,6 +331,149 @@ pub(crate) fn char_count(pages: &[String], start: u32, end: u32) -> usize {
     n
 }
 
+/// One reconstructed text line and the font size in effect when it was shown.
+pub(crate) struct StyledLine {
+    pub text: String,
+    pub size: f32,
+}
+
+/// Lines from the page content stream, in paint order. Empty when the stream
+/// cannot be read; heading detection then has no font-size signal.
+pub(crate) fn all_styled_lines(doc: &Document) -> Vec<Vec<(String, f32)>> {
+    let Ok(ids) = page_ids(doc) else {
+        return Vec::new();
+    };
+    ids.into_iter()
+        .map(|id| styled_lines(doc, id).into_iter().map(|line| (line.text, line.size)).collect())
+        .collect()
+}
+
+fn styled_lines(doc: &Document, page_id: ObjectId) -> Vec<StyledLine> {
+    let Ok(bytes) = doc.get_page_content(page_id) else {
+        return Vec::new();
+    };
+    let Ok(content) = Content::decode(&bytes) else {
+        return Vec::new();
+    };
+    lines_from_ops(&content.operations)
+}
+
+struct Pen {
+    y: f32,
+    size: f32,
+    leading: f32,
+    in_text: bool,
+}
+
+fn lines_from_ops(ops: &[lopdf::content::Operation]) -> Vec<StyledLine> {
+    let mut pen = Pen { y: 0.0, size: 12.0, leading: 0.0, in_text: false };
+    let mut lines: Vec<StyledLine> = Vec::new();
+    let mut buf = String::new();
+    let mut buf_size = 12.0f32;
+    let flush = |lines: &mut Vec<StyledLine>, buf: &mut String, buf_size: f32| {
+        let text = buf.trim().to_string();
+        buf.clear();
+        if !text.is_empty() {
+            lines.push(StyledLine { text, size: buf_size });
+        }
+    };
+    for op in ops {
+        match op.operator.as_str() {
+            "BT" => {
+                flush(&mut lines, &mut buf, buf_size);
+                pen.in_text = true;
+                pen.y = 0.0;
+            }
+            "ET" => {
+                flush(&mut lines, &mut buf, buf_size);
+                pen.in_text = false;
+            }
+            "Tf" => {
+                if let Some(size) = op.operands.get(1).and_then(operand_f32)
+                    && size.is_finite()
+                    && size.abs() > 0.1
+                {
+                    pen.size = size.abs();
+                }
+            }
+            "Td" | "TD" => {
+                let ty = op.operands.get(1).and_then(operand_f32).unwrap_or(0.0);
+                if pen.in_text && ty.abs() > 0.5 {
+                    flush(&mut lines, &mut buf, buf_size);
+                }
+                pen.y += ty;
+                if op.operator == "TD" {
+                    pen.leading = -ty;
+                }
+            }
+            "Tm" => {
+                if pen.in_text {
+                    flush(&mut lines, &mut buf, buf_size);
+                }
+                if let Some(y) = op.operands.get(5).and_then(operand_f32) {
+                    pen.y = y;
+                }
+            }
+            "TL" => {
+                if let Some(leading) = op.operands.first().and_then(operand_f32) {
+                    pen.leading = leading;
+                }
+            }
+            "Tj" | "'" | "\"" => {
+                if op.operator != "Tj" {
+                    flush(&mut lines, &mut buf, buf_size);
+                    pen.y -= pen.leading;
+                }
+                let operand = if op.operator == "\"" { op.operands.get(2) } else { op.operands.first() };
+                if pen.in_text
+                    && let Some(text) = operand.and_then(operand_text)
+                {
+                    push_run(&mut buf, &mut buf_size, &pen, &text);
+                }
+            }
+            "TJ" => {
+                if pen.in_text
+                    && let Some(array) = op.operands.first().and_then(|obj| obj.as_array().ok())
+                {
+                    for item in array {
+                        if let Some(text) = operand_text(item) {
+                            push_run(&mut buf, &mut buf_size, &pen, &text);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    flush(&mut lines, &mut buf, buf_size);
+    lines
+}
+
+fn push_run(buf: &mut String, buf_size: &mut f32, pen: &Pen, text: &str) {
+    if buf.is_empty() {
+        *buf_size = pen.size;
+    }
+    buf.push_str(text);
+}
+
+fn operand_f32(obj: &Object) -> Option<f32> {
+    obj.as_float().ok()
+}
+
+fn operand_text(obj: &Object) -> Option<String> {
+    let bytes = obj.as_str().ok()?;
+    Some(decode_pdf_text(bytes))
+}
+
+fn decode_pdf_text(bytes: &[u8]) -> String {
+    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+        let units: Vec<u16> =
+            bytes[2..].chunks(2).filter(|c| c.len() == 2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        return String::from_utf16_lossy(&units);
+    }
+    bytes.iter().map(|b| *b as char).collect()
+}
+
 /// UTC timestamp with second precision, no extra crates.
 pub(crate) fn now_rfc3339() -> String {
     let secs =

@@ -251,8 +251,8 @@ pub const FAIL_CLOSED_FLOOR: f64 = 0.6;
 ///   `batch::questions`). Ids the reply did not score come back `None`; the
 ///   walk judges those one at a time and charges each call. A reply with no
 ///   array and no per-id score is `parse`, and the walk pre-ranks.
-/// - `batch_cost` is 1 (the batch request only), so a 16-root batch spends one
-///   of `root_calls`.
+/// - `batch_cost` is 1 (the batch request only). The walk's root allowance is
+///   the root count, capped at 512, not `root_calls`.
 ///
 /// Spike policy (Eli ruling 2026-09-28): the walk ranks on score ONLY, with no
 /// confidence gate. Per-candidate score and confidence come from `Walk::judged`.

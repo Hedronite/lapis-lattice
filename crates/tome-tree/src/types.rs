@@ -224,8 +224,14 @@ pub const SPLIT_TOKENS: usize = 20_000;
 /// Descent budget. The root pass does not spend these calls.
 pub const DEFAULT_JUDGE_CALLS: u32 = 24;
 
-/// Root-pass call budget. Separate from [`DEFAULT_JUDGE_CALLS`].
+/// Root-pass call budget kept on [`Budget`] for callers. The walk does not
+/// stop at this value: it scores every root up to [`ROOT_SCORE_CAP`].
 pub const DEFAULT_ROOT_CALLS: u32 = 4;
+
+/// Most roots the root pass will score. At the default batch size of 16 that
+/// is 32 batches. Later roots are listed on [`Walk::roots_skipped`]. The
+/// descent budget stays [`DEFAULT_JUDGE_CALLS`].
+pub const ROOT_SCORE_CAP: usize = 512;
 
 /// Candidates in one batched judge call.
 pub const DEFAULT_ROOT_BATCH: u32 = 16;
@@ -237,7 +243,7 @@ pub const DEFAULT_ROOT_TOP_K: u32 = 6;
 pub const DESCENT_RESERVE: u32 = 8;
 
 /// Builder stamp stored on every tree. A mismatch is `stale`.
-pub const BUILDER_VERSION: &str = "0.4.0";
+pub const BUILDER_VERSION: &str = "0.5.0";
 
 /// One judge result. `score` is the model's 0..=3. `confidence` is recorded
 /// and is not a gate: a low value does not drop the candidate.
@@ -263,15 +269,20 @@ pub enum RootPath {
 
 /// Judge-call and open-page budget for one walk. The 48 KB cap always applies.
 ///
-/// `max_judge_calls` is the descent budget. `root_calls` caps successful root
-/// batches and the one-at-a-time fill-ins for ids a batch left out. A malformed
-/// root batch is not taken out of that cap: it is reported as one call, then
-/// the lexical fallback may spend up to `root_top_k` more (`1 + root_top_k`
-/// on [`Walk::root_judge_calls`]).
+/// `max_judge_calls` is the descent budget and is not raised to cover more
+/// roots. The root pass scores every root up to [`ROOT_SCORE_CAP`] (512), in
+/// batches of `root_batch_size`. Its call allowance is that many roots, and
+/// at least `root_calls`, so a configured `root_calls` of 4 does not stop the
+/// pass after 64 roots. A complete batch still costs one call. Ids a batch
+/// left out cost one fill-in each, taken from the same allowance. A malformed
+/// root batch is reported as one call, then the lexical fallback may spend up
+/// to `root_top_k` more (`1 + root_top_k` on [`Walk::root_judge_calls`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
     pub max_judge_calls: u32,
     pub max_pages: u32,
+    /// Passed through from config. The walk sizes the root allowance from the
+    /// root count instead of stopping at this value. See [`ROOT_SCORE_CAP`].
     pub root_calls: u32,
     pub root_batch_size: u32,
     pub root_top_k: u32,
@@ -307,19 +318,21 @@ pub struct Walk {
     pub judged: Vec<Judged>,
     /// Judge calls spent on the root pass, counted in [`Self::judge_calls`].
     ///
-    /// On [`RootPath::Batch`] this is at most [`Budget::root_calls`]: every
-    /// batch request, plus one call for each id that batch did not score.
+    /// On [`RootPath::Batch`] this counts every batch request and every fill-in.
+    /// The allowance is the number of roots scored, at most [`ROOT_SCORE_CAP`],
+    /// so the field does not grow past that cap on this path. A complete batch
+    /// of 16 costs one call, not 16.
     /// On [`RootPath::LexicalFallback`] it is the failed batch plus at most
-    /// [`Budget::root_top_k`] singles. That cap is `1 + root_top_k`, separate
-    /// from `root_calls`, and this field does not go past it.
+    /// [`Budget::root_top_k`] singles. That cap is `1 + root_top_k`.
     #[serde(default)]
     pub root_judge_calls: u32,
     /// `batch` or `lexical_fallback`.
     #[serde(default)]
     pub root_path: RootPath,
     /// Root ids the root pass did not score, in tree order. Empty when every
-    /// root was judged. A stop partway through `root_calls`, and a lexical cut
-    /// that judges only `root_top_k`, both list the roots that got no score.
+    /// root was judged. Roots past [`ROOT_SCORE_CAP`], holes a partial batch
+    /// could not fill, and a lexical cut that judges only `root_top_k` are
+    /// listed here. Nothing is dropped without an entry.
     #[serde(default)]
     pub roots_skipped: Vec<NodeId>,
 }

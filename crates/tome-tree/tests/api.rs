@@ -361,7 +361,13 @@ fn wide_outline_walks_inside_the_default_budget() {
         }
     }
     let walked = index.walk(&meta.doc_id, "deep section", &PreferFirstTwo, Budget::default()).unwrap();
-    assert!(walked.judge_calls < 24, "calls {} used the whole judge budget", walked.judge_calls);
+    let descent = walked.judge_calls - walked.root_judge_calls;
+    assert!(descent <= 24, "descent spent {descent}");
+    let root_ids: std::collections::BTreeSet<_> = roots.iter().map(|node| node.id.as_str()).collect();
+    let mut covered: std::collections::BTreeSet<_> =
+        walked.judged.iter().map(|j| j.node_id.as_str()).filter(|id| root_ids.contains(id)).collect();
+    covered.extend(walked.roots_skipped.iter().map(|id| id.as_str()).filter(|id| root_ids.contains(id)));
+    assert_eq!(covered, root_ids, "every root is judged or listed");
     assert_eq!(
         walked.nodes.iter().map(|id| id.as_str()).collect::<Vec<_>>(),
         vec!["0001.0001.0001", "0002.0001.0001"]
@@ -719,7 +725,7 @@ fn thirty_roots_finish_inside_the_root_budget() {
     assert_eq!(walked.root_path, RootPath::Batch);
     assert_eq!(walked.root_judge_calls, 2, "30 roots at batch 16 are two calls");
     assert!(walked.root_judge_calls <= walked.judge_calls);
-    assert!(walked.root_judge_calls <= 4);
+    assert!(walked.root_judge_calls <= 30, "the allowance is the root count, not 4 batches");
     assert_eq!(walked.judged.len(), 30);
     assert!(walked.roots_skipped.is_empty(), "every root was scored");
     assert!(walked.nodes.iter().any(|id| id.as_str() == "0010"));
@@ -858,18 +864,15 @@ fn partial_batch_fill_ins_count_against_the_root_budget() {
     let judge = Partial(std::sync::atomic::AtomicU32::new(0));
     let walked = index.walk(&meta.doc_id, "chapter", &judge, Budget::default()).unwrap();
     let fills = judge.0.load(std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(fills, 3, "fifteen holes do not become fifteen free calls");
-    assert_eq!(walked.root_judge_calls, 4, "one batch request plus the three fill-ins");
-    assert_eq!(walked.judge_calls, 4);
-    assert_eq!(walked.judged.len(), 4);
-    assert_eq!(walked.roots_skipped.len(), 26, "unscored holes and the next batch are recorded");
-    assert!(disjoint(&walked.judged, &walked.roots_skipped));
+    assert_eq!(fills, 28, "each missing id is a counted call, and later roots are still scored");
+    assert_eq!(walked.root_judge_calls, 30, "two batch requests plus every fill-in");
+    assert_eq!(walked.judge_calls, 30);
+    assert_eq!(walked.judged.len(), 30);
+    assert!(walked.roots_skipped.is_empty(), "the allowance covers every root");
     let roots = index.tree(&meta.doc_id, None, Some(0)).unwrap();
-    let skipped: Vec<_> = walked.roots_skipped.iter().map(|id| id.as_str()).collect();
     let judged: std::collections::BTreeSet<_> = walked.judged.iter().map(|j| j.node_id.as_str()).collect();
-    let expected: Vec<_> =
-        roots.iter().filter(|node| !judged.contains(node.id.as_str())).map(|node| node.id.as_str()).collect();
-    assert_eq!(skipped, expected, "skipped roots stay in tree order");
+    let expected: std::collections::BTreeSet<_> = roots.iter().map(|node| node.id.as_str()).collect();
+    assert_eq!(judged, expected);
     assert_eq!(walked.root_path, RootPath::Batch);
     let _ = std::fs::remove_dir_all(&dir);
 }

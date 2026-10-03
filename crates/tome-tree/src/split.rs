@@ -30,7 +30,7 @@ fn split_node(node: &mut RawNode, pages: &[String], depth: u32) -> crate::error:
     if span <= SPLIT_PAGES && tokens <= SPLIT_TOKENS && bytes <= OPEN_BYTE_CAP {
         return Ok(());
     }
-    let subs = subheadings(node, pages);
+    let subs = subheadings(node, pages)?;
     if !subs.is_empty() {
         node.children = subs;
         for child in &mut node.children {
@@ -46,18 +46,18 @@ fn split_node(node: &mut RawNode, pages: &[String], depth: u32) -> crate::error:
     Ok(())
 }
 
-fn subheadings(node: &RawNode, pages: &[String]) -> Vec<RawNode> {
-    let mut found = detect(pages, node.page_start, node.page_end);
+fn subheadings(node: &RawNode, pages: &[String]) -> crate::error::Result<Vec<RawNode>> {
+    let mut found = detect(pages, &[], node.page_start, node.page_end)?;
     let own = normalize_title(&node.title);
     found.retain(|h| !(h.page_start == node.page_start && normalize_title(&h.title) == own));
     if found.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     // A heading that only restates the start of the node does not divide it.
     if found.len() == 1 && found[0].page_start == node.page_start {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    found
+    Ok(found)
 }
 
 fn windows_under(node: &RawNode, pages: &[String]) -> Vec<RawNode> {

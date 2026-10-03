@@ -37,8 +37,8 @@ pub use store::{BuildOptions, TomeIndex};
 pub use types::{
     Assessment, BEAM, BUILDER_VERSION, Budget, Candidate, ChildTitle, DEFAULT_JUDGE_CALLS,
     DEFAULT_ROOT_BATCH, DEFAULT_ROOT_CALLS, DEFAULT_ROOT_TOP_K, DESCENT_RESERVE, DocId, DocMeta, Judged,
-    LEAD_CHARS, Node, NodeId, NodeSource, OPEN_BYTE_CAP, OPEN_PAGE_CAP, Passage, RootPath, SPLIT_PAGES,
-    SPLIT_TOKENS, STOP_PAGES, SummaryModel, Walk,
+    LEAD_CHARS, Node, NodeId, NodeSource, OPEN_BYTE_CAP, OPEN_PAGE_CAP, Passage, ROOT_SCORE_CAP, RootPath,
+    SPLIT_PAGES, SPLIT_TOKENS, STOP_PAGES, SummaryModel, Walk,
 };
 pub use walk::{FakeJudge, Judge};
 

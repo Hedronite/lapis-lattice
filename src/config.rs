@@ -114,7 +114,9 @@ pub struct TomeModelConfig {
     /// Candidates in one batched judge call. Default 16.
     #[serde(default = "default_root_batch_size")]
     pub root_batch_size: u32,
-    /// Root-pass judge calls. Separate from the descent budget of 24. Default 4.
+    /// Passed through as `Budget::root_calls`. The walk scores every root up to
+    /// 512 and does not stop at this value. Default 4. Separate from the
+    /// descent budget of 24.
     #[serde(default = "default_root_calls")]
     pub root_calls: u32,
     /// After a malformed batch, how many lexically pre-ranked roots are judged

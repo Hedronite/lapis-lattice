@@ -12,6 +12,13 @@ pub struct Mark {
 }
 
 pub fn write(path: &Path, pages: &[Vec<&str>], marks: &[Mark]) {
+    let sized: Vec<Vec<(&str, f32)>> =
+        pages.iter().map(|lines| lines.iter().copied().map(|line| (line, 12.0)).collect()).collect();
+    write_sized(path, &sized, marks);
+}
+
+/// Same as [`write`], with a font size per line. No outline when `marks` is empty.
+pub fn write_sized(path: &Path, pages: &[Vec<(&str, f32)>], marks: &[Mark]) {
     let mut doc = Document::with_version("1.5");
     let pages_id = doc.new_object_id();
     let font_id = doc.add_object(dictionary! {
@@ -24,7 +31,7 @@ pub fn write(path: &Path, pages: &[Vec<&str>], marks: &[Mark]) {
     });
     let mut page_ids = Vec::new();
     for lines in pages {
-        let content_id = doc.add_object(page_stream(lines));
+        let content_id = doc.add_object(page_stream_sized(lines));
         let page_id = doc.add_object(dictionary! {
             "Type" => "Page",
             "Parent" => pages_id,
@@ -62,6 +69,21 @@ pub fn write(path: &Path, pages: &[Vec<&str>], marks: &[Mark]) {
     let catalog_id = doc.add_object(catalog);
     doc.trailer.set("Root", catalog_id);
     doc.save(path).unwrap();
+}
+
+fn page_stream_sized(lines: &[(&str, f32)]) -> Stream {
+    let mut ops = vec![Operation::new("BT", vec![])];
+    for (i, (line, size)) in lines.iter().enumerate() {
+        ops.push(Operation::new("Tf", vec!["F1".into(), (*size as i64).into()]));
+        if i == 0 {
+            ops.push(Operation::new("Td", vec![72.into(), 720.into()]));
+        } else {
+            ops.push(Operation::new("Td", vec![0.into(), (-18).into()]));
+        }
+        ops.push(Operation::new("Tj", vec![Object::string_literal(line.as_bytes().to_vec())]));
+    }
+    ops.push(Operation::new("ET", vec![]));
+    Stream::new(dictionary! {}, Content { operations: ops }.encode().unwrap())
 }
 
 fn page_stream(lines: &[&str]) -> Stream {

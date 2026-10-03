@@ -1,7 +1,9 @@
 //! Beam-2 walk.
 //!
-//! The root pass has its own call budget and scores roots in batches. Descent
-//! spends `Budget::max_judge_calls` and batches sibling sets the same way.
+//! The root pass scores every root, in batches. Its call allowance is the
+//! root count (capped at [`ROOT_SCORE_CAP`](crate::ROOT_SCORE_CAP)), not a
+//! fixed four batches. Descent spends `Budget::max_judge_calls` and batches
+//! sibling sets the same way.
 //! [`DESCENT_RESERVE`](crate::types::DESCENT_RESERVE) stays exported; frontiers
 //! are no longer cut to it.
 //!
@@ -169,8 +171,8 @@ const BATCH_LEAD: usize = 240;
 /// One-at-a-time candidate text, including child titles.
 const SINGLE_LEAD: usize = 2_000;
 
-/// Judge the roots under `budget.root_calls`, then descend under
-/// `budget.max_judge_calls`. Keep the top [`BEAM`] at each frontier.
+/// Judge every root up to [`ROOT_SCORE_CAP`](crate::ROOT_SCORE_CAP), then
+/// descend under `budget.max_judge_calls`. Keep the top [`BEAM`] at each frontier.
 ///
 /// A leaf, or a node of at most [`STOP_PAGES`] pages, is a terminal. Terminals
 /// are then chosen whole, highest score first, until the page and byte caps
@@ -249,7 +251,13 @@ fn score_roots(
     budget: Budget,
     batch_size: usize,
 ) -> Result<RootScore> {
-    let limit = budget.root_calls;
+    let eligible = roots.len().min(crate::ROOT_SCORE_CAP);
+    // One call per eligible root, so a partial batch can fill every hole and
+    // later batches still run. `root_calls` cannot shrink this. A complete
+    // batch of 16 still costs 1. Roots past the cap are listed, not dropped.
+    let limit = (eligible as u32).max(budget.root_calls);
+    let mut past_cap: Vec<NodeId> = roots[eligible..].iter().map(|node| node.id.clone()).collect();
+    let roots = &roots[..eligible];
     let mut calls = 0u32;
     let mut judged = Vec::new();
     let mut picks = Vec::new();
@@ -271,8 +279,10 @@ fn score_roots(
                 let (fallback, extra, used) =
                     lexical_fallback(roots, query, judge, budget.root_top_k, budget.root_top_k)?;
                 judged.extend(extra);
+                let mut skipped = unscored_roots(roots, &fallback);
+                skipped.append(&mut past_cap);
                 return Ok(RootScore {
-                    skipped: unscored_roots(roots, &fallback),
+                    skipped,
                     picks: fallback,
                     judged,
                     calls: calls + used,
@@ -289,7 +299,9 @@ fn score_roots(
             detail: format!("root pass scored nothing within {limit} calls"),
         });
     }
-    Ok(RootScore { skipped: unscored_roots(roots, &picks), picks, judged, calls, path: RootPath::Batch })
+    let mut skipped = unscored_roots(roots, &picks);
+    skipped.append(&mut past_cap);
+    Ok(RootScore { skipped, picks, judged, calls, path: RootPath::Batch })
 }
 
 /// Roots that received no score, in tree order.

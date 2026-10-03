@@ -98,7 +98,8 @@ pub struct TomeCfg {
     pub max_judge_calls: u32,
     pub max_open_pages: u32,
     pub max_open_bytes: u32,
-    /// `Budget::root_calls`: calls the root pass may spend (a batch costs 1).
+    /// `Budget::root_calls`. The walk scores every root up to 512; this value
+    /// does not stop the pass after 64 roots. A batch still costs 1.
     #[serde(default = "default_root_calls")]
     pub root_calls: u32,
     /// `Budget::root_batch_size`: candidates per batched call.

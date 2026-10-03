@@ -340,7 +340,8 @@ fn structure(
             return Ok((cleaned, NodeSource::Outline, true));
         }
     }
-    let headings = crate::headings::detect(&loaded.pages, 1, loaded.pages.len() as u32);
+    let sizes = crate::pdf::all_styled_lines(&loaded.doc);
+    let headings = crate::headings::detect(&loaded.pages, &sizes, 1, loaded.pages.len() as u32)?;
     if !headings.is_empty() {
         return Ok((headings, NodeSource::Heading, false));
     }
