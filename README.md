@@ -22,7 +22,7 @@
 > **Status:** In production use as daily-driver / dogfood Markdown vault (TUI/CLI/MCP + embedded FTS5). Hardening: beta. Latest GitHub Release and crates.io `lapis-lattice` are `0.4.1`. `0.4.2` (this tree, including `--rerank-jev`) is the next tag. Not a toy reference.
 
 
-Lapis is a notes vault for people who work with agents. Notes stay ordinary Markdown files in a folder you own. A TUI, a JSON CLI, and an MCP server share those files. Search and hop-1 neighbors use an **embedded SQLite + FTS5** index at `<vault>/.lapis/lattice.sqlite` (`meta.producer = lapis-lattice`). An HTTP lattice is opt-in (`lattice.mode = http`).
+Lapis is a notes vault for people who work with agents. Notes stay ordinary Markdown files in a folder you own. A TUI, a JSON CLI, a skill, and an MCP server share those files. Search and hop-1 neighbors use an **embedded SQLite + FTS5** index at `<vault>/.lapis/lattice.sqlite` (`meta.producer = lapis-lattice`). An HTTP lattice is opt-in (`lattice.mode = http`).
 
 No hosted notes service. Files are the source of truth.
 
@@ -32,8 +32,35 @@ No hosted notes service. Files are the source of truth.
 |---|---|---|
 | **TUI** | you | Vim, preview, tasks, Kanban, dailies, templates, hop-1 graph pane |
 | **CLI** | scripts and agents | `lapis --json` |
-| **MCP** | coding agents | `lapis mcp` over stdio |
+| **Skill** | coding agents (default) | `skills/lapis/` over `lapis --json` |
+| **MCP** | harnesses that defer tool schemas, or have no shell | `lapis mcp` over stdio |
 | **Desktop** | Linux / Omarchy | `lapis desktop` — off in the default CLI asset. The Linux desktop asset paints hop-1/hop-2 (gpui-omarchy). |
+
+## Agent use: skills + CLI first, MCP still shipped
+
+The default way for an agent to use Lapis is the bundled skill in
+`skills/lapis/`: a short `SKILL.md` the harness reads to decide when to use
+it, plus a Nushell body (`lapis.nu`) that calls `lapis --json`. The body needs
+`nu` and `lapis` on `PATH`. The MCP server (`lapis mcp`) is still built and
+shipped, and works the same as before.
+
+Why the skill is the default:
+
+- **Context.** An MCP server adds every tool's name, description and input
+  schema to the model's context, often on every request, whether or not the
+  tools are used. Many harnesses can only turn a whole server on or off. A
+  skill costs a few dozen tokens of description until it is used.
+- **Determinism.** The skill body is fixed code over a versioned JSON
+  contract, so results are the same each time.
+- **Small models.** Local models with short context windows feel the schema
+  cost most.
+
+Use the MCP server when your harness defers or filters MCP tool schemas
+(loading them only on demand, or letting you enable single tools), or when
+the client has no shell.
+
+Install the skill by copying or linking `skills/lapis/` into your harness's
+skills directory (for example `~/.agents/skills/` or `~/.claude/skills/`).
 
 ## Install
 
@@ -95,6 +122,8 @@ lapis --vault ~/Notes --json list
 lapis --vault ~/Notes doctor
 ```
 
+Coding agents with a shell should use the skill in `skills/lapis/` (see Agent use, above). This stdio config is for harnesses that talk MCP:
+
 ```json
 { "mcpServers": { "lapis": { "command": "lapis", "args": ["mcp"] } } }
 ```
@@ -103,7 +132,7 @@ lapis --vault ~/Notes doctor
 
 | Works today | Not yet |
 |---|---|
-| TUI (files / editor / tasks), JSON CLI envelope, MCP | Windows |
+| TUI (files / editor / tasks), JSON CLI envelope, skill (`skills/lapis/`), MCP | Windows |
 | Embedded CLI search / list / hop-1 / doctor (no `:8080`) | Homebrew tap / formula; macOS Developer ID + notarization |
 | `lapis search … --rerank-jev` (shadow Jev gate; Facet TypeSafe) | TUI palette Jev rerank |
 | Tasks, dailies, templates (`note`, `daily`, `weekly`, `monthly`, `adr`) | Hop-2 ego and `tree-retrieve` on the embedded default (honest HTTP-required) |

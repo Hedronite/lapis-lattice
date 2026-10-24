@@ -751,6 +751,26 @@ impl ServerHandler for LapisServer {
     }
 }
 
+/// Names `LapisServer::tool_router` registers. The CLI help text lists these
+/// and only these; tome tools join later, behind the feature and `LAPIS_TOME`.
+#[cfg(test)]
+pub(crate) const BASE_TOOL_NAMES: [&str; 14] = [
+    "vault_info",
+    "health",
+    "read_note",
+    "search",
+    "search_and_read",
+    "list_notes",
+    "neighbors",
+    "analytics",
+    "tree_retrieve",
+    "resolve_link",
+    "create_note",
+    "append_to_note",
+    "list_tasks",
+    "toggle_task",
+];
+
 pub async fn serve(ctx: Ctx) -> crate::error::Result<()> {
     let server = LapisServer::new(ctx);
     let running = server
@@ -829,10 +849,15 @@ mod tests {
     }
 
     #[test]
-    fn base_router_has_no_tome_tools() {
+    fn base_router_lists_the_published_tools() {
         let r = LapisServer::tool_router();
+        let mut got: Vec<String> =
+            r.map.keys().filter(|name| r.has_route(name)).map(|name| name.to_string()).collect();
+        got.sort();
+        let mut want: Vec<String> = BASE_TOOL_NAMES.iter().map(|s| (*s).to_string()).collect();
+        want.sort();
+        assert_eq!(got, want);
         assert!(!r.has_route("tome_tree") && !r.has_route("tome_open"));
-        assert!(r.has_route("search"));
     }
 
     /// N17: hop arg validation.
