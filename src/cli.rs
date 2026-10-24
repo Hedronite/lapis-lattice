@@ -150,7 +150,7 @@ pub enum Command {
         command: TomeCommand,
     },
 
-    /// MCP server over stdio (tools: vault_info, search, read_note, list_notes, neighbors, create_note, append_to_note, list_tasks, toggle_task).
+    /// MCP server over stdio (14 tools: vault_info, health, read_note, search, search_and_read, list_notes, neighbors, analytics, tree_retrieve, resolve_link, create_note, append_to_note, list_tasks, toggle_task). `tome_tree` and `tome_open` register only when built with `--features tome` and `LAPIS_TOME=1`.
     Mcp,
 }
 
@@ -938,6 +938,33 @@ mod tests {
         );
         assert!(list(&["lapis", "task", "list", "--full"]).full);
         assert!(Cli::try_parse_from(["lapis", "task", "list", "a", "--path", "b"]).is_err());
+    }
+
+    /// Help text names the tools the default server registers, including the count.
+    #[test]
+    fn mcp_help_lists_the_base_tools() {
+        let about = <Cli as clap::CommandFactory>::command()
+            .find_subcommand("mcp")
+            .expect("mcp")
+            .get_about()
+            .expect("about")
+            .to_string();
+        let n = crate::mcp::BASE_TOOL_NAMES.len();
+        assert!(about.contains(&format!("{n} tools")), "{about}");
+        assert_eq!(listed_mcp_tools(&about), sorted_base_tools());
+    }
+
+    fn listed_mcp_tools(about: &str) -> Vec<&str> {
+        let list = about.split("tools:").nth(1).and_then(|rest| rest.split(')').next()).unwrap_or("");
+        let mut names: Vec<&str> = list.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+        names.sort_unstable();
+        names
+    }
+
+    fn sorted_base_tools() -> Vec<&'static str> {
+        let mut names = crate::mcp::BASE_TOOL_NAMES.to_vec();
+        names.sort_unstable();
+        names
     }
 }
 
