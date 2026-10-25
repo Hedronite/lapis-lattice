@@ -1,12 +1,15 @@
 //! Run `lapis.nu` against the built binary. Nushell is not installed on CI,
 //! so the test downloads Nushell 0.108.0 into `target/` (gitignored) and
 //! checks the tarball sha256 before it extracts or runs anything.
+//! The tarball is verified and unpacked once per process. The binary hash
+//! is checked again before every use.
 
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -50,86 +53,129 @@ fn member_name(pin: &NuPin) -> String {
     format!("nu-{NU_VERSION}-{}/nu", pin.triple)
 }
 
+#[derive(Debug)]
+struct ReadyNu {
+    bin: PathBuf,
+    sha256: String,
+}
+
 fn nu_bin() -> PathBuf {
-    prepare_official_cache().unwrap_or_else(|err| panic!("nushell cache: {err}"))
-}
-
-/// Hash the tarball, then the cached `nu`, on every call. A mismatch is an
-/// error: the planted file is not executed.
-fn prepare_official_cache() -> Result<PathBuf, String> {
-    let pin = nu_pin();
-    let dir = cache_dir(&pin);
-    fs::create_dir_all(&dir).map_err(|err| format!("{}: {err}", dir.display()))?;
-    let tar_path = dir.join("nu.tar.gz");
-    if !tar_path.is_file() {
-        download_tarball(&dir, &pin)?;
+    static READY: OnceLock<ReadyNu> = OnceLock::new();
+    let ready = READY.get_or_init(|| {
+        let pin = nu_pin();
+        load_ready(&cache_dir(&pin), &pin, &tarball_url(&pin))
+            .unwrap_or_else(|err| panic!("nushell cache: {err}"))
+    });
+    // The tarball was hashed once. Re-hash the binary before it runs.
+    let got = sha256_file(&ready.bin).unwrap_or_else(|err| panic!("nushell cache: {err}"));
+    if got != ready.sha256 {
+        panic!("cached nu binary sha256 {got} != {}", ready.sha256);
     }
-    verify_cache(&dir, pin.sha256, &member_name(&pin))
+    ready.bin.clone()
 }
 
-fn verify_cache(dir: &Path, expected_tar_sha: &str, member: &str) -> Result<PathBuf, String> {
+fn tarball_url(pin: &NuPin) -> String {
+    format!(
+        "https://github.com/nushell/nushell/releases/download/{NU_VERSION}/nu-{NU_VERSION}-{}.tar.gz",
+        pin.triple
+    )
+}
+
+/// Verify the pinned tarball, unpack `nu` once, and return its hash.
+/// A tarball whose sha256 does not match is deleted and downloaded once.
+/// A second mismatch is an error. Nothing is executed.
+fn load_ready(dir: &Path, pin: &NuPin, url: &str) -> Result<ReadyNu, String> {
+    fs::create_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+    let _guard = lock_dir(dir)?;
+    ensure_tarball(dir, pin, url)?;
     let tar_path = dir.join("nu.tar.gz");
     let bin = dir.join("nu");
     if !bin.is_file() {
-        let _guard = lock_dir(dir)?;
-        match_tar_sha(&tar_path, expected_tar_sha)?;
-        if !bin.is_file() {
-            extract_nu(dir, &tar_path)?;
-        }
+        match_tar_sha(&tar_path, pin.sha256)?;
+        extract_nu(dir, &tar_path)?;
     }
-    match_tar_sha(&tar_path, expected_tar_sha)?;
+    match_tar_sha(&tar_path, pin.sha256)?;
     if !bin.is_file() {
         return Err(format!("nu missing after extract in {}", dir.display()));
     }
     let on_disk = sha256_file(&bin)?;
-    let inside = sha256_tar_member(&tar_path, member)?;
+    let inside = sha256_tar_member(&tar_path, &member_name(pin))?;
     if on_disk != inside {
         return Err(format!("cached nu binary sha256 {on_disk} != tarball member {inside}"));
     }
-    Ok(bin)
+    Ok(ReadyNu { bin, sha256: on_disk })
 }
 
-struct DownloadLock(PathBuf);
+fn ensure_tarball(dir: &Path, pin: &NuPin, url: &str) -> Result<(), String> {
+    let path = dir.join("nu.tar.gz");
+    if path.is_file() && sha256_file(&path)? == pin.sha256 {
+        return Ok(());
+    }
+    if path.is_file() {
+        fs::remove_file(&path).map_err(|err| format!("remove {}: {err}", path.display()))?;
+        let _ = fs::remove_file(dir.join("nu"));
+    }
+    download_locked(dir, pin, url)?;
+    if !path.is_file() {
+        return Err(format!("sha256 mismatch after re-download of {url}"));
+    }
+    let got = sha256_file(&path)?;
+    if got != pin.sha256 {
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(dir.join("nu"));
+        return Err(format!("sha256 mismatch after re-download: {got} != {}", pin.sha256));
+    }
+    Ok(())
+}
+
+struct DownloadLock(File);
 
 impl Drop for DownloadLock {
     fn drop(&mut self) {
-        let _ = fs::remove_dir(&self.0);
+        let _ = self.0.unlock();
     }
 }
 
+/// Exclusive advisory lock. The kernel drops it when the holder is killed,
+/// so the next caller does not wait out a stale directory lock. Partials
+/// from that holder are removed once the lock is held.
 fn lock_dir(dir: &Path) -> Result<DownloadLock, String> {
-    let path = dir.join(".download-lock");
-    let started = Instant::now();
-    loop {
-        match fs::create_dir(&path) {
-            Ok(()) => return Ok(DownloadLock(path)),
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                if started.elapsed() > Duration::from_secs(90) {
-                    let _ = fs::remove_dir(&path);
-                } else {
-                    thread::sleep(Duration::from_millis(200));
-                }
-            }
-            Err(err) => return Err(format!("{}: {err}", path.display())),
+    let path = dir.join(".download.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|err| format!("{}: {err}", path.display()))?;
+    file.lock().map_err(|err| format!("lock {}: {err}", path.display()))?;
+    cleanup_partials(dir)?;
+    Ok(DownloadLock(file))
+}
+
+fn cleanup_partials(dir: &Path) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("{}: {err}", dir.display()))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("partial-") && name.ends_with(".tar.gz") {
+            let _ = fs::remove_file(entry.path());
         }
     }
+    Ok(())
 }
 
-fn download_tarball(dir: &Path, pin: &NuPin) -> Result<(), String> {
-    let _guard = lock_dir(dir)?;
+fn download_locked(dir: &Path, pin: &NuPin, url: &str) -> Result<(), String> {
     let final_path = dir.join("nu.tar.gz");
     if final_path.is_file() && sha256_file(&final_path)? == pin.sha256 {
         return Ok(());
     }
     let partial = dir.join(format!("partial-{}.tar.gz", std::process::id()));
-    let url = format!(
-        "https://github.com/nushell/nushell/releases/download/{NU_VERSION}/nu-{NU_VERSION}-{}.tar.gz",
-        pin.triple
-    );
     let status = Command::new("curl")
         .args(["--retry", "3", "--retry-delay", "2", "-fsSL", "-o"])
         .arg(&partial)
-        .arg(&url)
+        .arg(url)
         .status()
         .map_err(|err| format!("curl {url}: {err}"))?;
     if !status.success() {
@@ -177,21 +223,51 @@ fn extract_nu(dir: &Path, tar_path: &Path) -> Result<(), String> {
 }
 
 fn sha256_tar_member(tar_path: &Path, member: &str) -> Result<String, String> {
-    let output = Command::new("tar")
+    let mut tar = Command::new("tar")
         .args(["-xOzf"])
         .arg(tar_path)
         .arg(member)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|err| format!("tar: {err}"))?;
-    if !output.status.success() {
-        return Err(format!("tar member {member}: {}", String::from_utf8_lossy(&output.stderr)));
+    let mut sum = hash_command();
+    sum.stdin(tar.stdout.take().unwrap());
+    let output = sum.output().map_err(|err| format!("sha256: {err}"))?;
+    let tar_status = tar.wait().map_err(|err| format!("tar: {err}"))?;
+    if !tar_status.success() {
+        return Err(format!("tar member {member} failed"));
     }
-    Ok(hex(&sha256(&output.stdout)))
+    digest_from(&output)
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
-    let bytes = fs::read(path).map_err(|err| format!("{}: {err}", path.display()))?;
-    Ok(hex(&sha256(&bytes)))
+    let output =
+        hash_command().arg(path).output().map_err(|err| format!("sha256 {}: {err}", path.display()))?;
+    digest_from(&output)
+}
+
+fn hash_command() -> Command {
+    if cfg!(target_os = "macos") {
+        let mut cmd = Command::new("shasum");
+        cmd.arg("-a").arg("256");
+        cmd
+    } else {
+        Command::new("sha256sum")
+    }
+}
+
+fn digest_from(output: &Output) -> Result<String, String> {
+    if !output.status.success() {
+        return Err(format!("sha256 failed: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let hex = text.split_whitespace().next().unwrap_or("");
+    if hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        Ok(hex.to_string())
+    } else {
+        Err(format!("sha256 output was not a digest: {text}"))
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -593,21 +669,32 @@ fn skill_nu_rejects_tampered_cache() {
     let src = cache_dir(&pin);
     fs::copy(src.join("nu.tar.gz"), dir.join("nu.tar.gz")).unwrap();
     fs::copy(src.join("nu"), dir.join("nu")).unwrap();
-    let member = member_name(&pin);
-    assert!(verify_cache(&dir, pin.sha256, &member).is_ok());
+    let poison = home.join("poison.tar.gz");
+    fs::write(&poison, b"not a nushell tarball").unwrap();
+    let poison_url = file_url(&poison);
 
-    let mut planted = OpenOptions::new().append(true).open(dir.join("nu")).unwrap();
+    let ready = load_ready(&dir, &pin, &poison_url).unwrap();
+    assert_eq!(ready.bin, dir.join("nu"));
+    assert_eq!(ready.sha256, sha256_file(&src.join("nu")).unwrap());
+
+    let mut planted = OpenOptions::new().append(true).open(&ready.bin).unwrap();
     planted.write_all(b"\n").unwrap();
     drop(planted);
-    let binary_err = verify_cache(&dir, pin.sha256, &member).unwrap_err();
+    let binary_err = load_ready(&dir, &pin, &poison_url).unwrap_err();
     assert!(binary_err.contains("binary"), "{binary_err}");
+    assert!(fs::read(&ready.bin).unwrap().ends_with(b"\n"), "tampered nu was executed or replaced");
 
-    fs::copy(src.join("nu"), dir.join("nu")).unwrap();
     let mut tampered = OpenOptions::new().append(true).open(dir.join("nu.tar.gz")).unwrap();
     tampered.write_all(b"x").unwrap();
     drop(tampered);
-    let tar_err = verify_cache(&dir, pin.sha256, &member).unwrap_err();
+    let tar_err = load_ready(&dir, &pin, &poison_url).unwrap_err();
     assert!(tar_err.contains("sha256"), "{tar_err}");
+    assert!(!dir.join("nu.tar.gz").exists(), "a mismatched re-download was kept");
+    assert!(!dir.join("nu").exists(), "a binary from an unverified archive was left in place");
+
+    let repaired = load_ready(&dir, &pin, &file_url(&src.join("nu.tar.gz"))).unwrap();
+    assert_eq!(sha256_file(&dir.join("nu.tar.gz")).unwrap(), pin.sha256);
+    assert_eq!(repaired.sha256, sha256_file(&src.join("nu")).unwrap());
 
     let decoy = PathBuf::from(format!("/tmp/nu-{NU_VERSION}-{}", pin.triple));
     let _ = fs::remove_dir_all(&decoy);
@@ -629,13 +716,63 @@ fn skill_nu_rejects_tampered_cache() {
     let _ = fs::remove_dir_all(&home);
 }
 
+fn file_url(path: &Path) -> String {
+    format!("file://{}", path.display())
+}
+
 #[test]
 fn download_lock_releases_when_dropped() {
     let home = scratch();
     let guard = lock_dir(&home).unwrap();
-    assert!(home.join(".download-lock").is_dir());
+    assert!(home.join(".download.lock").is_file());
     drop(guard);
-    assert!(!home.join(".download-lock").exists(), "a dropped download lock was left behind");
+    let started = Instant::now();
+    let again = lock_dir(&home).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(2), "relock waited {:?}", started.elapsed());
+    drop(again);
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn download_lock_takes_over_from_a_dead_holder() {
+    let home = scratch();
+    let lock_path = home.join(".download.lock");
+    let partial = home.join("partial-dead.tar.gz");
+    let script = r#"
+import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644)
+fcntl.flock(fd, fcntl.LOCK_EX)
+with open(sys.argv[2], "wb") as out:
+    out.write(b"partial")
+time.sleep(300)
+"#;
+    let mut holder = Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(&lock_path)
+        .arg(&partial)
+        .spawn()
+        .unwrap_or_else(|err| panic!("python3: {err}"));
+    let started = Instant::now();
+    while !partial.is_file() {
+        assert!(started.elapsed() < Duration::from_secs(5), "holder never locked");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let probe = OpenOptions::new().read(true).write(true).open(&lock_path).unwrap();
+    match probe.try_lock() {
+        Err(std::fs::TryLockError::WouldBlock) => {}
+        other => panic!("live holder was not visible to the advisory lock: {other:?}"),
+    }
+    drop(probe);
+    holder.kill().unwrap_or_else(|err| panic!("kill holder: {err}"));
+    let _ = holder.wait();
+
+    let takeover = Instant::now();
+    let guard = lock_dir(&home).unwrap();
+    let waited = takeover.elapsed();
+    assert!(waited < Duration::from_secs(2), "dead holder blocked the lock for {waited:?}");
+    assert!(!partial.exists(), "partial from the dead holder was kept");
+    drop(guard);
     let _ = fs::remove_dir_all(&home);
 }
 

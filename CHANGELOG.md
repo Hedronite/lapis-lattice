@@ -27,6 +27,10 @@ Crate `repository` and `homepage` are
   `exit` code. Flags go before `--`. Text that starts with `-` follows
   `--`. Text that starts with `--` uses `--body=` or `--stdin`. A flag
   after `--` is a usage error and writes nothing. `tome build` is wrapped.
+- `append`, `task toggle`, and `tome build` reject a flag after a
+  positional or after `--`. `append X.md hello --vault V` is a usage
+  error and writes nothing. `read`, `search`, and `create` still accept
+  a flag after their positionals.
 
 ### Jev rerank
 
