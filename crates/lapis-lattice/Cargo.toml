@@ -14,7 +14,7 @@ exclude = []
 
 [dependencies]
 regex = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 # Vector KNN inside the same SQLite file. Linked into the binary and registered
 # as an auto-extension, so there is no `.so` to find on PATH and
 # `load_extension` never has to be enabled. Pre-1.0 upstream, pinned exactly.
