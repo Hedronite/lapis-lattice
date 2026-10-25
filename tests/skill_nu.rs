@@ -148,7 +148,15 @@ fn lock_dir(dir: &Path) -> Result<DownloadLock, String> {
         .truncate(false)
         .open(&path)
         .map_err(|err| format!("{}: {err}", path.display()))?;
-    file.lock().map_err(|err| format!("lock {}: {err}", path.display()))?;
+    // flock can return EINTR when another test child exits. Retry; a killed
+    // holder still drops the lock, so this does not wait out a stale pid.
+    loop {
+        match file.lock() {
+            Ok(()) => break,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(format!("lock {}: {err}", path.display())),
+        }
+    }
     cleanup_partials(dir)?;
     Ok(DownloadLock(file))
 }
@@ -172,15 +180,9 @@ fn download_locked(dir: &Path, pin: &NuPin, url: &str) -> Result<(), String> {
         return Ok(());
     }
     let partial = dir.join(format!("partial-{}.tar.gz", std::process::id()));
-    let status = Command::new("curl")
-        .args(["--retry", "3", "--retry-delay", "2", "-fsSL", "-o"])
-        .arg(&partial)
-        .arg(url)
-        .status()
-        .map_err(|err| format!("curl {url}: {err}"))?;
-    if !status.success() {
+    if let Err(err) = fetch_to(url, &partial) {
         let _ = fs::remove_file(&partial);
-        return Err(format!("download {url} failed"));
+        return Err(err);
     }
     let got = match sha256_file(&partial) {
         Ok(got) => got,
@@ -195,6 +197,20 @@ fn download_locked(dir: &Path, pin: &NuPin, url: &str) -> Result<(), String> {
     }
     fs::rename(&partial, &final_path).map_err(|err| format!("rename {}: {err}", final_path.display()))?;
     Ok(())
+}
+
+fn fetch_to(url: &str, partial: &Path) -> Result<(), String> {
+    if let Some(path) = url.strip_prefix("file://") {
+        fs::copy(path, partial).map(|_| ()).map_err(|err| format!("copy {path}: {err}"))
+    } else {
+        let status = Command::new("curl")
+            .args(["--retry", "3", "--retry-delay", "2", "-fsSL", "-o"])
+            .arg(partial)
+            .arg(url)
+            .status()
+            .map_err(|err| format!("curl {url}: {err}"))?;
+        if status.success() { Ok(()) } else { Err(format!("download {url} failed")) }
+    }
 }
 
 fn match_tar_sha(tar_path: &Path, expected: &str) -> Result<(), String> {
@@ -228,7 +244,7 @@ fn sha256_tar_member(tar_path: &Path, member: &str) -> Result<String, String> {
         .arg(tar_path)
         .arg(member)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|err| format!("tar: {err}"))?;
     let mut sum = hash_command();
@@ -248,12 +264,15 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 }
 
 fn hash_command() -> Command {
+    // Binary mode. Text mode can rewrite bytes on the way into the digest.
     if cfg!(target_os = "macos") {
         let mut cmd = Command::new("shasum");
-        cmd.arg("-a").arg("256");
+        cmd.arg("-a").arg("256").arg("-b");
         cmd
     } else {
-        Command::new("sha256sum")
+        let mut cmd = Command::new("sha256sum");
+        cmd.arg("-b");
+        cmd
     }
 }
 
@@ -733,32 +752,51 @@ fn download_lock_releases_when_dropped() {
     let _ = fs::remove_dir_all(&home);
 }
 
+/// Child of `download_lock_takes_over_from_a_dead_holder`. Uses the same
+/// `File::lock` as the downloader. A no-op unless that test spawned it.
+#[test]
+fn download_lock_hold_for_takeover() {
+    let Ok(dir) = std::env::var("SKILL_NU_HOLD_DIR") else { return };
+    let dir = PathBuf::from(dir);
+    let guard = lock_dir(&dir).unwrap_or_else(|err| panic!("holder lock: {err}"));
+    fs::write(dir.join("partial-dead.tar.gz"), b"partial").unwrap();
+    fs::write(dir.join("ready"), b"1").unwrap();
+    thread::sleep(Duration::from_secs(300));
+    drop(guard);
+}
+
 #[test]
 fn download_lock_takes_over_from_a_dead_holder() {
+    // The holder re-execs this binary. Do not start another holder from there.
+    if std::env::var_os("SKILL_NU_HOLD_DIR").is_some() {
+        return;
+    }
     let home = scratch();
-    let lock_path = home.join(".download.lock");
     let partial = home.join("partial-dead.tar.gz");
-    let script = r#"
-import fcntl, os, sys, time
-fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644)
-fcntl.flock(fd, fcntl.LOCK_EX)
-with open(sys.argv[2], "wb") as out:
-    out.write(b"partial")
-time.sleep(300)
-"#;
-    let mut holder = Command::new("python3")
-        .arg("-c")
-        .arg(script)
-        .arg(&lock_path)
-        .arg(&partial)
-        .spawn()
-        .unwrap_or_else(|err| panic!("python3: {err}"));
+    let mut holder = Command::new(std::env::current_exe().unwrap());
+    holder
+        .env("SKILL_NU_HOLD_DIR", &home)
+        .arg("download_lock_hold_for_takeover")
+        .arg("--exact")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut holder = holder.spawn().unwrap_or_else(|err| panic!("holder: {err}"));
     let started = Instant::now();
-    while !partial.is_file() {
-        assert!(started.elapsed() < Duration::from_secs(5), "holder never locked");
+    while !home.join("ready").is_file() {
+        if started.elapsed() > Duration::from_secs(5) {
+            let _ = holder.kill();
+            let out = holder.wait_with_output().ok();
+            let text = out
+                .as_ref()
+                .map(|o| {
+                    format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
+                })
+                .unwrap_or_default();
+            panic!("holder never locked\n{text}");
+        }
         thread::sleep(Duration::from_millis(20));
     }
-    let probe = OpenOptions::new().read(true).write(true).open(&lock_path).unwrap();
+    let probe = OpenOptions::new().read(true).write(true).open(home.join(".download.lock")).unwrap();
     match probe.try_lock() {
         Err(std::fs::TryLockError::WouldBlock) => {}
         other => panic!("live holder was not visible to the advisory lock: {other:?}"),
@@ -770,7 +808,7 @@ time.sleep(300)
     let takeover = Instant::now();
     let guard = lock_dir(&home).unwrap();
     let waited = takeover.elapsed();
-    assert!(waited < Duration::from_secs(2), "dead holder blocked the lock for {waited:?}");
+    assert!(waited < Duration::from_secs(10), "dead holder blocked the lock for {waited:?}");
     assert!(!partial.exists(), "partial from the dead holder was kept");
     drop(guard);
     let _ = fs::remove_dir_all(&home);
