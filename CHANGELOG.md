@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Dependencies
+
+- `lapis-lattice` moved to rusqlite 0.40, and its behavior is unchanged.
+
 ### In-place edit
 
 - `lapis replace PATH --old TEXT --new TEXT` and `lapis insert PATH (--after|--before) ANCHOR (--text|--stdin)` edit one note by an exact raw-byte match. Zero or many matches, including overlaps, exit 1, leave the file unchanged, and report the hit count as JSON `error.matches`.
