@@ -9,6 +9,8 @@ mod cli;
 mod config;
 mod desktop_services;
 mod desktop_session;
+mod edit;
+mod edit_args;
 mod envelope;
 mod error;
 mod hal;
@@ -43,9 +45,9 @@ use serde_json::json;
 
 use cli::{AnalyticsArgs, ResolveArgs, TreeArgs};
 use cli::{
-    AppendArgs, CaptureArgs, Cli, Command, CreateArgs, DailyArgs, ListArgs, NeighborsArgs, ReadArgs,
-    ReindexArgs, SearchArgs, TaskCommand, TaskListArgs, TaskToggleArgs, TemplateCommand, TrashArgs,
-    VaultCommand,
+    AppendArgs, CaptureArgs, Cli, Command, CreateArgs, DailyArgs, InsertArgs, ListArgs, NeighborsArgs,
+    ReadArgs, ReindexArgs, ReplaceArgs, SearchArgs, TaskCommand, TaskListArgs, TaskToggleArgs,
+    TemplateCommand, TrashArgs, VaultCommand,
 };
 use envelope::Meta;
 use error::{LapisError, Result};
@@ -135,6 +137,8 @@ async fn dispatch(ctx: Ctx, cmd: Command) -> Result<()> {
         Command::Reindex(args) => reindex(&ctx, args).await,
         Command::Create(args) => create(&ctx, args).await,
         Command::Append(args) => append(&ctx, args).await,
+        Command::Replace(args) => replace_note(&ctx, args).await,
+        Command::Insert(args) => insert_note(&ctx, args).await,
         Command::Capture(args) => capture(&ctx, args).await,
         Command::Task { command: TaskCommand::List(args) } => task_list(&ctx, args),
         Command::Task { command: TaskCommand::Toggle(args) } => task_toggle(&ctx, args).await,
@@ -402,6 +406,11 @@ fn print_write(ctx: &Ctx, report: &ops::WriteReport) -> Result<()> {
             (None, Some(_)) => "  (index kick failed)".into(),
             (None, None) => String::new(),
         };
+        if report.written.dry_run
+            && let Some(diff) = &report.written.diff
+        {
+            println!("{diff}");
+        }
         println!("{}{idx}{}", report.written.path, if report.written.dry_run { "  (dry run)" } else { "" });
     }
     if let Some(e) = &report.reindex_error {
@@ -428,6 +437,42 @@ async fn create(ctx: &Ctx, args: CreateArgs) -> Result<()> {
     };
     let w = write::create(&ctx.vault.root, &opts)?;
     print_write(ctx, &ops::kick(ctx, w, args.no_reindex).await?)
+}
+
+async fn replace_note(ctx: &Ctx, args: ReplaceArgs) -> Result<()> {
+    let new = if args.stdin {
+        read_stdin()?
+    } else {
+        args.new.ok_or_else(|| LapisError::Usage("pass --new or --stdin".into()))?
+    };
+    let op = edit::EditOp::Replace { old: args.old, new };
+    commit_edit(ctx, &args.path, &op, &args.guard.guard(), args.no_reindex).await
+}
+
+async fn insert_note(ctx: &Ctx, args: InsertArgs) -> Result<()> {
+    let text = if args.stdin {
+        read_stdin()?
+    } else {
+        args.text.ok_or_else(|| LapisError::Usage("pass --text or --stdin".into()))?
+    };
+    let (anchor, before) = match (args.after, args.before) {
+        (Some(anchor), None) => (anchor, false),
+        (None, Some(anchor)) => (anchor, true),
+        _ => return Err(LapisError::Usage("pass exactly one of --after or --before".into())),
+    };
+    let op = edit::EditOp::Insert { anchor, text, before };
+    commit_edit(ctx, &args.path, &op, &args.guard.guard(), args.no_reindex).await
+}
+
+async fn commit_edit(
+    ctx: &Ctx,
+    path: &str,
+    op: &edit::EditOp,
+    guard: &write::Guard,
+    no_reindex: bool,
+) -> Result<()> {
+    let w = edit::edit(&ctx.vault.root, path, op, guard)?;
+    print_write(ctx, &ops::kick(ctx, w, no_reindex).await?)
 }
 
 async fn append(ctx: &Ctx, args: AppendArgs) -> Result<()> {

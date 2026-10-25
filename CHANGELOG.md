@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### In-place edit
+
+- `lapis replace PATH --old TEXT --new TEXT` and `lapis insert PATH (--after|--before) ANCHOR (--text|--stdin)` edit one note by an exact raw-byte match. Zero or many matches, including overlaps, exit 1, leave the file unchanged, and report the hit count as JSON `error.matches`.
+- `--json` errors and MCP error `data` carry `kind` and `exit`: `not_found` and `sandbox` (both exit 3), `stale_guard`, `match_count` (also `matches`), and `bad_args` (exit 1). The hash stays FNV-1a 64.
+- `--if-hash`, `--if-mtime`, and `--dry-run` match `append`. The hash is FNV-1a 64 over the exact on-disk bytes (`hashAlgo: fnv1a64`, `oldHash`, `newHash`). A stale guard writes nothing. Dry-run returns a unified diff and does not bump `updated:` on disk, write, or reindex. `newHash` is that preview and excludes the bump. The dry-run still runs the frontmatter and wikilink gate on the bumped text, so it fails when the write would refuse.
+- A real write bumps `updated:` and, when that key is missing, inserts it before the closing `---`. Every other frontmatter byte stays, including CRLF. A file with no frontmatter block does not gain one. The body is the only search region.
+- The write is a same-directory temp file plus rename and keeps the file mode. `..`, an absolute path, and a symlink that leaves the vault exit 3 (`sandbox`). A missing note is exit 3 (`not_found`).
+- MCP adds one tool, `lapis_edit`. `mode` is an enum: `replace` | `insert_after` | `insert_before`. The base tool count is 15.
+
 ## 0.4.2 — 2026-09-21
 
 The cut that ships `--rerank-jev`. Tag `v0.4.1` (2026-09-11) is already

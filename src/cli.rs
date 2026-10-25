@@ -4,6 +4,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::http::Mode;
 
+pub use crate::edit_args::{GuardArgs, InsertArgs, ReplaceArgs};
 pub use crate::tome_args::TomeCommand;
 
 const AFTER_HELP: &str = "\
@@ -102,6 +103,12 @@ pub enum Command {
     /// Append text to a note; bumps `updated:` and keeps every other frontmatter line.
     Append(AppendArgs),
 
+    /// Replace one raw-byte literal in the note body. 0 or >1 matches exit 1.
+    Replace(ReplaceArgs),
+
+    /// Insert text at one raw-byte anchor (`--after` or `--before`).
+    Insert(InsertArgs),
+
     /// Quick capture: timestamped note under the inbox bucket with doc_type=capture.
     Capture(CaptureArgs),
 
@@ -150,7 +157,7 @@ pub enum Command {
         command: TomeCommand,
     },
 
-    /// MCP server over stdio (14 tools: vault_info, health, read_note, search, search_and_read, list_notes, neighbors, analytics, tree_retrieve, resolve_link, create_note, append_to_note, list_tasks, toggle_task). `tome_tree` and `tome_open` register only when built with `--features tome` and `LAPIS_TOME=1`.
+    /// MCP server over stdio (15 tools: vault_info, health, read_note, search, search_and_read, list_notes, neighbors, analytics, tree_retrieve, resolve_link, create_note, append_to_note, lapis_edit, list_tasks, toggle_task). `tome_tree` and `tome_open` register only when built with `--features tome` and `LAPIS_TOME=1`.
     Mcp,
 }
 
@@ -245,28 +252,6 @@ pub struct TaskToggleArgs {
 
     #[command(flatten)]
     pub guard: GuardArgs,
-}
-
-/// `--dry-run` / stale guards shared by append and task toggle.
-#[derive(Debug, Args, Clone, Default)]
-pub struct GuardArgs {
-    /// Compute and report the result without writing.
-    #[arg(long)]
-    pub dry_run: bool,
-
-    /// Refuse if the note's mtime (ms, `updatedAt` from `read`) no longer matches.
-    #[arg(long, value_name = "MS")]
-    pub if_mtime: Option<u64>,
-
-    /// Refuse if the note's content hash (`hash` from `read`) no longer matches.
-    #[arg(long, value_name = "HASH")]
-    pub if_hash: Option<String>,
-}
-
-impl GuardArgs {
-    pub fn guard(&self) -> crate::write::Guard {
-        crate::write::Guard { dry_run: self.dry_run, if_mtime: self.if_mtime, if_hash: self.if_hash.clone() }
-    }
 }
 
 #[derive(Debug, Args)]
