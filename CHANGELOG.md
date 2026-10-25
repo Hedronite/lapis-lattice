@@ -21,6 +21,33 @@ notes for the next tag. The tag, GitHub Release, and `cargo publish` of
 Crate `repository` and `homepage` are
 `https://github.com/Hedronite/lapis-lattice`.
 
+### Agent skill
+
+- The vault skill is `.agents/skills/lapis/` (`SKILL.md` plus `lapis.nu`).
+  The same bytes are regular files under `.claude/skills/lapis/`,
+  `.grok/skills/lapis/`, and `.cursor/skills/lapis/`. `scripts/sync-skills`
+  rewrites the copies. There is no root `skills/` tree.
+- The skill maps 15 of the 17 MCP tools. The default server exposes 15;
+  `tome_tree` and `tome_open` register only with `--features tome` and
+  `LAPIS_TOME=1`. `health` and `search_and_read` have no CLI command.
+  `lapis_edit` is the `replace` and `insert` wrappers.
+- The skill wraps the existing CLI for `analytics`, `tree-retrieve`,
+  `create`, `append`, `replace`, `insert`, `task list`, `task toggle`,
+  `tome tree`, and `tome open` (`--features tome`). Search rows keep
+  `path`, `title`, `score`, and `snippet`. A failing command exits with
+  the envelope's `exit` code. Flags go before `--`. Text that starts
+  with `-` follows `--`. Text that starts with `--` uses `--flag=value`
+  or `--stdin`. A flag after `--` is a usage error and writes nothing.
+  `tome build` is wrapped. A CLI error's `kind` and `matches` are copied
+  onto the skill envelope unchanged.
+- `append`, `task toggle`, `tome build`, `replace`, and `insert` reject
+  a flag after a positional or after `--`. `append X.md hello --vault V`
+  is a usage error and writes nothing. `read`, `search`, and `create`
+  still accept a flag after their positionals. `replace` and `insert`
+  forward `--dry-run`, `--if-mtime`, `--if-hash`, `--no-reindex`, and
+  `--stdin`. They are the agent edit path. `create`, `append`, and
+  `task toggle` run only when a human has asked.
+
 ### Jev rerank
 
 - `lapis search … --rerank-jev` (MCP `search.rerank_jev`): post-retrieve
