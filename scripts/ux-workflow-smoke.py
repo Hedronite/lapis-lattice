@@ -131,10 +131,20 @@ class Session:
 
 def open_note(s, name):
     s.keys(b'\x10')
-    s.send(name.encode(), 0.4)
-    s.wait(f'palette-{name}', lambda t: f'notes/{name}.md' in t)
-    s.send(b'\r', 0.3)
-    s.wait(f'open-{name}', lambda t: f'notes/{name}.md' in s.status() and 'NORMAL' in s.status())
+    s.send(name.encode())
+    # The status line already contains the path once this note is open, so that
+    # text is not evidence the palette has answered. Enter before the hit row
+    # exists leaves the palette modal up; the next key, including Shift+Tab, is
+    # delivered to the palette and never moves editor focus.
+    hit = f'{name}  notes/{name}.md'
+    s.wait(f'palette-{name}', lambda t: f'> {name}' in t and hit in t)
+    s.send(b'\r')
+    s.wait(
+        f'open-{name}',
+        lambda t: s.status().lstrip().startswith('NORMAL')
+        and f'notes/{name}.md' in s.status()
+        and 'lattice search' not in t,
+    )
 
 
 s = Session('workflows', editor=True)
@@ -265,15 +275,10 @@ def click(x, y):
 
 def r_mouse_parity():
     open_note(s, 'Alpha')
-    # Keyboard: Shift+Tab cycles focus back to the sidebar; mouse reaches the same panes by click.
-    # A split PTY read can take the escape sequence as Escape and leave NORMAL in place.
-    # Send it once more only after the first attempt has already timed out.
-    s.send(b'\x1b[Z', 0.3)
-    try:
-        s.wait('backtab-to-sidebar', lambda t: s.status().lstrip().startswith('FILES'))
-    except TimeoutError:
-        s.send(b'\x1b[Z', 0.3)
-        s.wait('backtab-to-sidebar-retry', lambda t: s.status().lstrip().startswith('FILES'))
+    # Shift+Tab (xterm CSI Z) cycles focus from the editor back to the sidebar.
+    # open_note waits until that editor is actually focused and the palette is gone.
+    s.send(b'\x1b[Z')
+    s.wait('backtab-to-sidebar', lambda t: s.status().lstrip().startswith('FILES'))
     # Sidebar rows (list starts under the border): notes, Alpha, Beta, Gamma once expanded.
     rows = s.screen().splitlines()
     beta_row = next(i for i, line in enumerate(rows) if line[:28].strip().endswith('Beta.md'))
