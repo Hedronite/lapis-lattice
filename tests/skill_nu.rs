@@ -2,7 +2,8 @@
 //! so the test downloads Nushell 0.108.0 into `target/` (gitignored) and
 //! checks the tarball sha256 before it extracts or runs anything.
 //! The tarball is verified and unpacked once per process. The binary hash
-//! is checked again before every use.
+//! is checked again before every use. A binary that does not match the
+//! verified tarball is extracted again from that tarball.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -67,9 +68,16 @@ fn nu_bin() -> PathBuf {
             .unwrap_or_else(|err| panic!("nushell cache: {err}"))
     });
     // The tarball was hashed once. Re-hash the binary before it runs.
+    // A mismatch is re-extracted from the verified tarball before this fails.
     let got = sha256_file(&ready.bin).unwrap_or_else(|err| panic!("nushell cache: {err}"));
     if got != ready.sha256 {
-        panic!("cached nu binary sha256 {got} != {}", ready.sha256);
+        let pin = nu_pin();
+        let repaired = load_ready(&cache_dir(&pin), &pin, &tarball_url(&pin))
+            .unwrap_or_else(|err| panic!("nushell cache: {err}"));
+        let got = sha256_file(&repaired.bin).unwrap_or_else(|err| panic!("nushell cache: {err}"));
+        if got != ready.sha256 {
+            panic!("cached nu binary sha256 {got} != {}", ready.sha256);
+        }
     }
     ready.bin.clone()
 }
@@ -83,7 +91,8 @@ fn tarball_url(pin: &NuPin) -> String {
 
 /// Verify the pinned tarball, unpack `nu` once, and return its hash.
 /// A tarball whose sha256 does not match is deleted and downloaded once.
-/// A second mismatch is an error. Nothing is executed.
+/// A cached `nu` that does not match that tarball is extracted again.
+/// A second mismatch is an error. Nothing unverified is executed.
 fn load_ready(dir: &Path, pin: &NuPin, url: &str) -> Result<ReadyNu, String> {
     fs::create_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
     let _guard = lock_dir(dir)?;
@@ -98,12 +107,23 @@ fn load_ready(dir: &Path, pin: &NuPin, url: &str) -> Result<ReadyNu, String> {
     if !bin.is_file() {
         return Err(format!("nu missing after extract in {}", dir.display()));
     }
-    let on_disk = sha256_file(&bin)?;
     let inside = sha256_tar_member(&tar_path, &member_name(pin))?;
-    if on_disk != inside {
-        return Err(format!("cached nu binary sha256 {on_disk} != tarball member {inside}"));
+    let on_disk = sha256_file(&bin)?;
+    if on_disk == inside {
+        return Ok(ReadyNu { bin, sha256: on_disk });
     }
-    Ok(ReadyNu { bin, sha256: on_disk })
+    // The tarball matched its pin. Replace the bad binary from that archive.
+    let _ = fs::remove_file(&bin);
+    extract_nu(dir, &tar_path)?;
+    if !bin.is_file() {
+        return Err(format!("nu missing after re-extract in {}", dir.display()));
+    }
+    let again = sha256_file(&bin)?;
+    if again != inside {
+        let _ = fs::remove_file(&bin);
+        return Err(format!("cached nu binary sha256 {again} != tarball member {inside}"));
+    }
+    Ok(ReadyNu { bin, sha256: again })
 }
 
 fn ensure_tarball(dir: &Path, pin: &NuPin, url: &str) -> Result<(), String> {
@@ -148,6 +168,7 @@ fn lock_dir(dir: &Path) -> Result<DownloadLock, String> {
         .truncate(false)
         .open(&path)
         .map_err(|err| format!("{}: {err}", path.display()))?;
+    // File::lock needs Rust 1.89+.
     // flock can return EINTR when another test child exits. Retry; a killed
     // holder still drops the lock, so this does not wait out a stale pid.
     loop {
@@ -696,12 +717,18 @@ fn skill_nu_rejects_tampered_cache() {
     assert_eq!(ready.bin, dir.join("nu"));
     assert_eq!(ready.sha256, sha256_file(&src.join("nu")).unwrap());
 
+    let official_nu = fs::read(src.join("nu")).unwrap();
     let mut planted = OpenOptions::new().append(true).open(&ready.bin).unwrap();
     planted.write_all(b"\n").unwrap();
     drop(planted);
-    let binary_err = load_ready(&dir, &pin, &poison_url).unwrap_err();
-    assert!(binary_err.contains("binary"), "{binary_err}");
-    assert!(fs::read(&ready.bin).unwrap().ends_with(b"\n"), "tampered nu was executed or replaced");
+    let repaired_bin = load_ready(&dir, &pin, &poison_url).unwrap();
+    assert_eq!(repaired_bin.sha256, sha256_file(&src.join("nu")).unwrap());
+    assert_eq!(
+        fs::read(dir.join("nu")).unwrap(),
+        official_nu,
+        "tampered nu was not restored from the verified tarball"
+    );
+    assert_eq!(sha256_file(&dir.join("nu.tar.gz")).unwrap(), pin.sha256);
 
     let mut tampered = OpenOptions::new().append(true).open(dir.join("nu.tar.gz")).unwrap();
     tampered.write_all(b"x").unwrap();
@@ -760,7 +787,9 @@ fn download_lock_hold_for_takeover() {
     let dir = PathBuf::from(dir);
     let guard = lock_dir(&dir).unwrap_or_else(|err| panic!("holder lock: {err}"));
     fs::write(dir.join("partial-dead.tar.gz"), b"partial").unwrap();
-    fs::write(dir.join("ready"), b"1").unwrap();
+    let mut ready = File::create(dir.join("ready")).unwrap();
+    ready.write_all(b"1").unwrap();
+    ready.sync_all().unwrap();
     thread::sleep(Duration::from_secs(300));
     drop(guard);
 }
@@ -783,7 +812,7 @@ fn download_lock_takes_over_from_a_dead_holder() {
     let mut holder = holder.spawn().unwrap_or_else(|err| panic!("holder: {err}"));
     let started = Instant::now();
     while !home.join("ready").is_file() {
-        if started.elapsed() > Duration::from_secs(5) {
+        if holder.try_wait().ok().flatten().is_some() || started.elapsed() > Duration::from_secs(30) {
             let _ = holder.kill();
             let out = holder.wait_with_output().ok();
             let text = out
