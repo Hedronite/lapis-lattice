@@ -91,6 +91,7 @@ struct Workspace {
     indexing: bool,
     register: crate::vim::Register,
     command: Option<command::Prompt>,
+    code_graph: crate::CodeGraphOverlay,
 }
 
 impl Workspace {
@@ -133,6 +134,7 @@ impl Workspace {
             indexing: false,
             register: crate::vim::Register::default(),
             command: None,
+            code_graph: crate::CodeGraphOverlay::Absent,
         };
         workspace.focus.focus(window, cx);
         workspace
@@ -607,6 +609,7 @@ impl Workspace {
 }
 
 pub fn open(opts: Options, services: Arc<dyn WorkspaceServices>) -> Result<(), DesktopError> {
+    let code_graph = crate::CodeGraphOverlay::from_options(&opts);
     gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx: &mut App| {
         gpui_omarchy::init(cx);
         init_workspace(cx);
@@ -627,7 +630,10 @@ pub fn open(opts: Options, services: Arc<dyn WorkspaceServices>) -> Result<(), D
         let seed = opts.seed;
         let opened = cx.open_window(options, move |window, cx| {
             let entity = cx.new(|cx| Workspace::new(services, window, cx));
-            entity.update(cx, |this, cx| this.start(window, cx));
+            entity.update(cx, |this, cx| {
+                this.code_graph = code_graph;
+                this.start(window, cx);
+            });
             let weak = entity.downgrade();
             window.on_window_should_close(cx, move |_, cx| {
                 weak.update(cx, |this, cx| this.may_close(cx)).unwrap_or(true)

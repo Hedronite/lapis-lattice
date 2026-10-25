@@ -23,6 +23,7 @@ mod notes;
 mod ops;
 mod overlay;
 mod pdf_render;
+mod phantom;
 mod rag_gate;
 mod resolve;
 mod safe_file;
@@ -875,18 +876,27 @@ async fn doctor(ctx: &Ctx) -> Result<()> {
 /// `lapis desktop`: the GPUI shell (N23). Built without the `desktop` feature
 /// this reports exactly that instead of pretending.
 fn desktop(ctx: &Ctx, args: cli::DesktopArgs) -> Result<()> {
+    // D1: `phantom-fractal` only. Absent is not an error; the overlay stays empty.
+    let phantom_binary = phantom::discover::from_env();
     let opts = lapis_desktop::Options {
         vault_root: ctx.vault.root.clone(),
         lattice_url: ctx.lattice_url.clone(),
         seed: args.path,
         title: "Lapis".into(),
+        phantom_binary,
     };
     if args.check {
         let report = lapis_desktop::preflight(&opts);
         if ctx.json {
-            return emit_json(&report);
+            let mut v = serde_json::to_value(&report)?;
+            v["phantomBinary"] = json!(opts.phantom_binary);
+            return emit_json(&v);
         }
         println!("desktop: gpui={}", report.gpui_available);
+        match &opts.phantom_binary {
+            Some(p) => println!("phantom: {}", p.display()),
+            None => println!("{}", lapis_desktop::PHANTOM_NOT_FOUND),
+        }
         return Ok(());
     }
     lapis_desktop::run_workspace(opts, desktop_services::service(ctx)).map_err(|e| match e {

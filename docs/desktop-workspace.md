@@ -78,6 +78,8 @@ Graph in the sidebar, or Ctrl/Cmd+Shift+G, opens the graph inside the workspace.
 
 Global and Local share one snapshot; Local follows the active note at depth 1–8. Hover shows a bounded text preview. Tab/Shift+Tab selects visible nodes and Enter opens the selection. Arrow keys pan; wheel or +/- zoom; 0 fits. Drag a node to pin it, right-click to release it, or use Unpin. Query, domain, unresolved-link and orphan filters, query color groups, Refresh graph and Reset filters are available above the canvas. A hidden graph stops animation and discards outdated load/preview callbacks; returning to it reuses the snapshot and camera. Successful saves invalidate its snapshot after reindexing.
 
+Code-graph overlays come from Phantom: discovery looks up `phantom-fractal` only, never `fract`, and when it is absent `lapis desktop --check` prints `Phantom not found` and exits 0 while the desktop shows an empty overlay.
+
 This remains a development checkpoint. Graph state is retained while the workspace runs, but is not yet persisted across launches. Native Linux, dense graph readability, full mouse/keyboard accessibility and measured frame/memory budgets remain acceptance work.
 
 
