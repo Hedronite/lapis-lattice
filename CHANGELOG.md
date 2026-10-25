@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Desktop
+
+- The window opens in a Lapis palette (night navy, cream, gold) unless an Omarchy theme is present. `LAPIS_THEME=lapis` or `LAPIS_THEME=omarchy` overrides the choice.
+- The sidebar, toolbar, tabs, document views, search palette, command menu, context panel, PDF reader and status bar are restyled, with icons and shortcut hints.
+- Live and Reading keep text in a centred column of about 72 characters. Live sets H1/H2 in a serif, colours `[[wikilinks]]`, dims HTML comments, shows strikethrough and inline code, and draws a scroll thumb.
+- The sidebar file list scrolls. Before this, entries past the window height could not be reached.
+- Arrow keys keep the palette and menu selection in view. A new PDF page opens at its top.
+- The `Phantom not found` notice moved from a banner above every document to the status bar.
+- Tabs with the same file name show their parent folder, not the full path. Opening a note scrolls its tab into view.
+
 ### Phantom client
 
 - Lapis parses the JSON envelope that `phantom-fractal` prints and does not read Phantom's database.

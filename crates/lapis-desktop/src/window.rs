@@ -508,7 +508,7 @@ fn dot(at: Point<Pixels>, r: f32, color: Hsla) -> PaintQuad {
 /// derived by a tessellator that is built for curves we do not draw. The
 /// `st` coordinates are the ones gpui's own `line_to` uses for a solid
 /// triangle, and every quad is wound the same way.
-fn segments_path(segs: &[[f32; 4]], width: f32, origin: Point<Pixels>) -> Option<Path<Pixels>> {
+pub(crate) fn segments_path(segs: &[[f32; 4]], width: f32, origin: Point<Pixels>) -> Option<Path<Pixels>> {
     let first = segs.first()?;
     let at = |x: f32, y: f32| Point { x: origin.x + px(x), y: origin.y + px(y) };
     let solid = (point(0., 1.), point(0., 1.), point(0., 1.));
@@ -938,6 +938,7 @@ impl Render for Root {
 pub fn open(opts: Options) -> Result<(), DesktopError> {
     gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx: &mut App| {
         gpui_omarchy::init(cx);
+        crate::theme::init(cx);
         let opened = cx.open_window(WindowOptions::default(), |window, cx| {
             cx.new(|cx| {
                 let mut root = Root::new(opts.vault_root.clone(), None, opts.seed.clone(), cx);

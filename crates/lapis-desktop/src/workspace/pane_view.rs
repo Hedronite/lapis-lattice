@@ -22,16 +22,17 @@ impl Workspace {
             let source = editor.read(cx).value();
             let kind = tab.document.kind;
             let view = tab.view;
-            let mut toolbar = div()
+            let dirty = Self::dirty(tab, cx);
+            let mut views = div()
                 .flex()
-                .flex_wrap()
+                .flex_none()
                 .items_center()
-                .gap_3()
-                .px_5()
-                .py_2()
-                .border_b_1()
+                .gap_0p5()
+                .p_0p5()
+                .rounded(px(7.))
+                .border_1()
                 .border_color(theme.border)
-                .text_sm();
+                .bg(theme.inset);
             for (label, choice) in [
                 ("Live", View::Live),
                 ("Source", View::Source),
@@ -41,43 +42,73 @@ impl Workspace {
                 if choice == View::Live && kind != FileKind::Markdown {
                     continue;
                 }
-                toolbar = toolbar.child(
-                    div()
-                        .id(label)
-                        .role(Role::Button)
-                        .aria_label(format!("{label} view"))
-                        .cursor_pointer()
-                        .text_color(if view == choice { theme.accent } else { theme.secondary })
-                        .child(label)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.select_document(index, window, cx);
-                            this.set_view(index, choice, cx);
-                            this.focus_active(window, cx);
-                            cx.notify();
-                        })),
-                );
+                let selected = view == choice;
+                let mut segment = div()
+                    .id(label)
+                    .role(Role::Button)
+                    .aria_label(format!("{label} view"))
+                    .px_2p5()
+                    .h(px(22.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(5.))
+                    .cursor_pointer()
+                    .child(label);
+                segment = if selected {
+                    segment.bg(theme.surface).text_color(theme.bright)
+                } else {
+                    segment.text_color(theme.secondary).hover(|s| s.text_color(theme.foreground))
+                };
+                views = views.child(segment.on_click(cx.listener(move |this, _, window, cx| {
+                    this.select_document(index, window, cx);
+                    this.set_view(index, choice, cx);
+                    this.focus_active(window, cx);
+                    cx.notify();
+                })));
             }
-            toolbar = toolbar
+            let mut save = div()
+                .id("save")
+                .role(Role::Button)
+                .aria_label("Save document")
+                .flex()
+                .items_center()
+                .h(px(24.))
+                .px_2p5()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .child(if tab.saving {
+                    "Saving…"
+                } else if dirty {
+                    "Save"
+                } else {
+                    "Saved"
+                });
+            save = if dirty && !tab.document.readonly {
+                save.bg(theme.accent).text_color(theme.on_accent).hover(|s| s.bg(theme.accent.opacity(0.85)))
+            } else {
+                save.text_color(theme.secondary).hover(|s| s.bg(theme.hover_fill()))
+            };
+            let toolbar = div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_2()
+                .px_4()
+                .h(px(40.))
+                .border_b_1()
+                .border_color(theme.border)
+                .text_sm()
+                .child(views)
                 .child(div().flex_1())
+                .child(save.on_click(cx.listener(move |this, _, w, cx| {
+                    this.select_document(index, w, cx);
+                    this.save(w, cx);
+                })))
                 .child(
-                    div()
-                        .id("save")
-                        .role(Role::Button)
-                        .aria_label("Save document")
-                        .cursor_pointer()
-                        .child(if tab.saving { "Saving…" } else { "Save" })
-                        .on_click(cx.listener(move |this, _, w, cx| {
-                            this.select_document(index, w, cx);
-                            this.save(w, cx);
-                        })),
-                )
-                .child(
-                    div()
-                        .id("save-copy")
-                        .role(Role::Button)
+                    super::chrome::text_button("save-copy", None, "Save copy", &theme)
                         .aria_label("Save a copy")
-                        .cursor_pointer()
-                        .child("Save copy")
+                        .h(px(24.))
+                        .text_color(theme.secondary)
                         .on_click(cx.listener(move |this, _, w, cx| {
                             this.select_document(index, w, cx);
                             this.save_to(true, w, cx);
@@ -87,11 +118,11 @@ impl Workspace {
             let mut working = div().flex().flex_1().min_h_0().min_w_0();
             let mut split = h_resizable(("source-reading-split", index)).with_state(&tab.split);
             if view == View::Live {
-                editor.update(cx, |s, _| s.set_editor_style(theme.input_style()));
+                editor.update(cx, |s, _| s.set_editor_style(crate::theme::source_style(&theme)));
                 working = working.child(div().flex_1().min_w_0().h_full().child(tab.live.clone()));
             }
             if matches!(view, View::Source | View::Split) {
-                editor.update(cx, |s, _| s.set_editor_style(theme.input_style()));
+                editor.update(cx, |s, _| s.set_editor_style(crate::theme::source_style(&theme)));
                 let pane =
                     div().flex_1().min_w_0().h_full().p_5().child(gpui_kit::base::Textarea::new(&editor));
                 if view == View::Split {
@@ -111,6 +142,7 @@ impl Workspace {
                 } else {
                     gpui_omarchy::markdown("reading", source.clone(), window, cx)
                 };
+                // A measure of about 72 characters, centred, however wide the pane is.
                 let pane = div()
                     .id(("reading-scroll", index))
                     .track_scroll(&tab.reading_scroll)
@@ -118,8 +150,14 @@ impl Workspace {
                     .min_w_0()
                     .h_full()
                     .overflow_y_scroll()
-                    .p_6()
-                    .child(reader.text_size(px(16.)));
+                    .px_8()
+                    .py_8()
+                    .child(
+                        div()
+                            .flex()
+                            .justify_center()
+                            .child(div().w_full().max_w(px(720.)).child(reader.text_size(px(16.)))),
+                    );
                 if view == View::Split {
                     split = split.child(resizable_panel().child(pane));
                 } else {

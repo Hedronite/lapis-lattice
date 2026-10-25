@@ -193,10 +193,12 @@ impl Workspace {
                 && let Some(m) = this.menu.as_mut()
             {
                 m.selected = 0;
+                this.list_scroll.scroll_to_item(0);
                 cx.notify();
             }
         });
         input.update(cx, |s, cx| s.focus(window, cx));
+        self.list_scroll = gpui_kit::ScrollHandle::new();
         let mut menu = Menu {
             kind: kind.clone(),
             entries: vec![],
@@ -366,10 +368,12 @@ impl Workspace {
                 let n = m.visible(cx).len();
                 let m = self.menu.as_mut().unwrap();
                 m.selected = (m.selected + 1).min(n.saturating_sub(1));
+                self.list_scroll.scroll_to_item(m.selected);
             }
             "up" => {
                 let m = self.menu.as_mut().unwrap();
                 m.selected = m.selected.saturating_sub(1);
+                self.list_scroll.scroll_to_item(m.selected);
             }
             _ => return false,
         }
@@ -631,37 +635,56 @@ impl Workspace {
             .id("menu-entries")
             .role(Role::ListBox)
             .aria_label(m.title())
+            .track_scroll(&self.list_scroll)
             .max_h(px(420.))
             .overflow_y_scroll()
+            .px_2()
+            .pb_2()
             .flex()
             .flex_col()
-            .gap_1();
+            .gap_0p5();
         for (position, &index) in visible.iter().enumerate() {
             let entry = &m.entries[index];
             let id = entry.id.clone();
-            list = list.child(
-                div()
-                    .id(("menu-entry", position))
-                    .role(Role::ListBoxOption)
-                    .aria_label(format!("{} · {}", entry.label, entry.detail))
-                    .aria_selected(position == m.selected)
-                    .p_3()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .bg(if position == m.selected { theme.normal_fill() } else { theme.background })
-                    .child(entry.label.clone())
-                    .child(div().text_sm().text_color(theme.secondary).child(entry.detail.clone()))
-                    .on_click(cx.listener(move |this, _, w, cx| {
-                        let position = this
-                            .menu
-                            .as_ref()
-                            .and_then(|m| m.visible(cx).iter().position(|&i| m.entries[i].id == id));
-                        if let Some(p) = position {
-                            this.menu.as_mut().unwrap().selected = p;
-                            this.menu_enter(w, cx);
-                        }
-                    })),
-            );
+            let selected = position == m.selected;
+            let row = div()
+                .id(("menu-entry", position))
+                .role(Role::ListBoxOption)
+                .aria_label(format!("{} · {}", entry.label, entry.detail))
+                .aria_selected(position == m.selected)
+                .flex()
+                .flex_none()
+                .items_baseline()
+                .gap_3()
+                .px_3()
+                .py_2()
+                .rounded(px(7.))
+                .cursor_pointer()
+                .child(div().flex_none().child(entry.label.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
+                        .text_color(theme.secondary)
+                        .child(entry.detail.clone()),
+                )
+                .on_click(cx.listener(move |this, _, w, cx| {
+                    let position = this
+                        .menu
+                        .as_ref()
+                        .and_then(|m| m.visible(cx).iter().position(|&i| m.entries[i].id == id));
+                    if let Some(p) = position {
+                        this.menu.as_mut().unwrap().selected = p;
+                        this.menu_enter(w, cx);
+                    }
+                }));
+            list = list.child(if selected {
+                row.bg(crate::theme::lapis_blue().opacity(0.6)).text_color(theme.bright)
+            } else {
+                row.hover(|s| s.bg(theme.hover_fill()))
+            });
         }
         let input = gpui_omarchy::input("workspace-menu", &m.input, window, cx);
         let hint_color = if m.error.is_some() { theme.danger } else { theme.secondary };
@@ -670,28 +693,20 @@ impl Workspace {
             .inset_0()
             .flex()
             .justify_center()
-            .pt(px(64.))
-            .bg(theme.background.opacity(0.75))
+            .pt(px(72.))
+            .bg(theme.inset.opacity(0.7))
             .child(
-                div()
-                    .id("menu-dialog")
-                    .role(Role::Dialog)
-                    .aria_label(m.title())
-                    .w(px(640.))
-                    .max_w_full()
-                    .h_auto()
-                    .self_start()
-                    .p_4()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.background)
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(m.title())
-                    .child(input)
-                    .child(div().text_sm().text_color(hint_color).child(m.hint()))
+                super::chrome::dialog("menu-dialog", m.title(), &theme)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .p_3()
+                            .child(super::chrome::section(m.title().to_uppercase(), &theme))
+                            .child(input)
+                            .child(div().text_xs().text_color(hint_color).child(m.hint())),
+                    )
                     .child(list),
             )
             .into_any_element()

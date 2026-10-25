@@ -26,6 +26,9 @@ pub struct LiveEditor {
     layout_key: Option<layout::LayoutKey>,
     generation: u32,
     bounds: Bounds<Pixels>,
+    /// Left edge and width of the centred text column inside `bounds`.
+    left: Pixels,
+    measure: Pixels,
     scroll: Pixels,
     restored_scroll: Option<Pixels>,
     height: Pixels,
@@ -72,6 +75,8 @@ impl LiveEditor {
             layout_key: None,
             generation: 0,
             bounds: Bounds::default(),
+            left: px(24.),
+            measure: px(40.),
             scroll: px(0.),
             restored_scroll: None,
             height: px(0.),

@@ -45,6 +45,8 @@ pub(crate) struct PdfReader {
     page_input: Entity<InputState>,
     text: Entity<TextareaState>,
     show_text: bool,
+    /// The page area. A new page starts at its top, not where the last one was left.
+    scroll: gpui_kit::ScrollHandle,
 }
 impl PdfReader {
     pub fn new(
@@ -85,6 +87,7 @@ impl PdfReader {
             page_input,
             text,
             show_text: false,
+            scroll: gpui_kit::ScrollHandle::new(),
         }
     }
     pub fn position(&self) -> (u32, f32) {
@@ -141,6 +144,9 @@ impl PdfReader {
         let cancel = self.cancel.clone();
         if reload {
             self.clear_cache(window, cx);
+        }
+        if page != self.page {
+            self.scroll.set_offset(gpui_kit::point(px(0.), px(0.)));
         }
         self.page = page;
         self.error = None;
@@ -289,9 +295,12 @@ impl Render for PdfReader {
                     _ => label,
                 })
                 .px_2()
-                .py_1()
-                .rounded_md()
+                .h(px(26.))
+                .flex()
+                .items_center()
+                .rounded(px(6.))
                 .cursor_pointer()
+                .hover(|s| s.bg(theme.hover_fill()))
                 .child(label)
         };
         let mut toolbar = div()
@@ -348,8 +357,14 @@ impl Render for PdfReader {
             this.pages = None;
             this.load(this.page, true, w, cx)
         })));
-        let mut body =
-            div().id("pdf-page-scroll").flex_1().min_h_0().overflow_scroll().p_6().bg(theme.normal_fill());
+        let mut body = div()
+            .id("pdf-page-scroll")
+            .track_scroll(&self.scroll)
+            .flex_1()
+            .min_h_0()
+            .overflow_scroll()
+            .p_6()
+            .bg(theme.inset);
         if let Some(error) = &self.error {
             body = body.child(div().text_color(theme.danger).child(format!("{}: {error}", self.path))).child(
                 button("pdf-retry", "Retry")
@@ -370,9 +385,11 @@ impl Render for PdfReader {
             } else {
                 let width = (self.viewport - 48.).max(200.) * self.zoom;
                 body = body.child(
-                    img(page.image.clone())
-                        .w(px(width))
-                        .h(px(width * page.height as f32 / page.width as f32)),
+                    div().w(px(width)).flex_none().rounded(px(2.)).shadow_lg().child(
+                        img(page.image.clone())
+                            .w(px(width))
+                            .h(px(width * page.height as f32 / page.width as f32)),
+                    ),
                 );
             }
         }

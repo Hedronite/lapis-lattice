@@ -3,7 +3,7 @@ use gpui_kit::base::input::InputState;
 use gpui_kit::{
     InteractiveElement, IntoElement, ParentElement, Role, StatefulInteractiveElement, Styled, div, px,
 };
-use gpui_omarchy::ActiveTheme;
+use gpui_omarchy::{ActiveTheme, IconName, icon};
 
 pub(super) enum State {
     Draft,
@@ -42,6 +42,7 @@ impl Workspace {
             }
         });
         input.update(cx, |s, cx| s.focus(window, cx));
+        self.list_scroll = gpui_kit::ScrollHandle::new();
         self.palette = Some(Palette {
             input,
             _events: events,
@@ -85,6 +86,7 @@ impl Workspace {
                         p.hits = page.hits;
                         p.modalities = page.modalities;
                         p.selected = 0;
+                        this.list_scroll.scroll_to_item(0);
                         p.state =
                             if empty_index { State::NeedsIndex(page.can_build_index) } else { State::Ready };
                     }
@@ -172,42 +174,74 @@ impl Workspace {
             .id("palette-results")
             .role(Role::ListBox)
             .aria_label("Search results")
-            .max_h(px(420.))
+            .track_scroll(&self.list_scroll)
+            .max_h(px(440.))
             .overflow_y_scroll()
+            .px_2()
+            .pb_2()
             .flex()
             .flex_col()
-            .gap_1();
+            .gap_0p5();
         for (index, hit) in p.hits.iter().enumerate() {
             let path = hit.path.clone();
-            results = results.child(
-                div()
-                    .id(("result", index))
-                    .role(Role::ListBoxOption)
-                    .aria_label(format!("{} · {}", hit.title, hit.path))
-                    .aria_selected(index == p.selected)
-                    .p_3()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .bg(if index == p.selected { theme.normal_fill() } else { theme.background })
-                    .child(hit.title.clone())
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.secondary)
-                            .child(format!("{} · {}", hit.kind, hit.path)),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.secondary)
-                            .child(hit.snippet.clone().unwrap_or_default()),
-                    )
-                    .on_click(cx.listener(move |this, _, w, cx| {
-                        this.palette = None;
-                        this.query_epoch += 1;
-                        this.open_file(path.clone(), w, cx);
-                    })),
-            );
+            let snippet = hit.snippet.clone().filter(|s| !s.trim().is_empty());
+            let mut row = div()
+                .id(("result", index))
+                .role(Role::ListBoxOption)
+                .aria_label(format!("{} · {}", hit.title, hit.path))
+                .aria_selected(index == p.selected)
+                .flex()
+                .flex_none()
+                .flex_col()
+                .gap_0p5()
+                .px_3()
+                .py_2()
+                .rounded(px(7.))
+                .cursor_pointer()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(icon(IconName::FileText).size(px(14.)).text_color(theme.accent.opacity(0.8)))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.bright)
+                                .child(hit.title.clone()),
+                        )
+                        .child(super::chrome::kbd(hit.kind.to_string(), &theme)),
+                )
+                .child(
+                    div()
+                        .pl(px(22.))
+                        .truncate()
+                        .text_xs()
+                        .text_color(theme.secondary)
+                        .child(hit.path.clone()),
+                )
+                .on_click(cx.listener(move |this, _, w, cx| {
+                    this.palette = None;
+                    this.query_epoch += 1;
+                    this.open_file(path.clone(), w, cx);
+                }));
+            if let Some(snippet) = snippet {
+                row = row.child(
+                    div()
+                        .pl(px(22.))
+                        .line_clamp(2)
+                        .text_sm()
+                        .text_color(theme.foreground.opacity(0.8))
+                        .child(snippet),
+                );
+            }
+            results = results.child(if index == p.selected {
+                row.bg(crate::theme::lapis_blue().opacity(0.6))
+            } else {
+                row.hover(|s| s.bg(theme.hover_fill()))
+            });
         }
         if matches!(p.state, State::NeedsIndex(true)) {
             results = results.child(
@@ -228,28 +262,20 @@ impl Workspace {
             .inset_0()
             .flex()
             .justify_center()
-            .pt(px(64.))
-            .bg(theme.background.opacity(0.75))
+            .pt(px(72.))
+            .bg(theme.inset.opacity(0.7))
             .child(
-                div()
-                    .id("search-dialog")
-                    .role(Role::Dialog)
-                    .aria_label("Find in workspace")
-                    .w(px(640.))
-                    .max_w_full()
-                    .h_auto()
-                    .self_start()
-                    .p_4()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.background)
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child("Find in workspace")
-                    .child(input)
-                    .child(div().text_sm().text_color(theme.secondary).child(label))
+                super::chrome::dialog("search-dialog", "Find in workspace", &theme)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .p_3()
+                            .child(super::chrome::section("FIND IN WORKSPACE", &theme))
+                            .child(input)
+                            .child(div().text_xs().text_color(theme.secondary).child(label)),
+                    )
                     .child(results),
             )
             .into_any_element()
