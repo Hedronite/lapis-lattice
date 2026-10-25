@@ -489,7 +489,7 @@ pub struct DesktopArgs {
     #[arg(long, value_name = "PATH")]
     pub path: Option<String>,
 
-    /// Report whether the GPUI shell and the GitNexus sidecar are available, then exit.
+    /// Report whether the GPUI shell is available, then exit.
     #[arg(long)]
     pub check: bool,
 }

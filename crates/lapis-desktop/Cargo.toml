@@ -2,7 +2,7 @@
 name = "lapis-desktop"
 version = "0.4.2"
 edition = "2024"
-description = "Lapis desktop shell: GPUI window (feature `gpui`), HTML renderer, graph scene, GitNexus sidecar."
+description = "Lapis desktop shell: GPUI window (feature `gpui`), HTML renderer, graph scene."
 license = "MIT"
 
 [features]
