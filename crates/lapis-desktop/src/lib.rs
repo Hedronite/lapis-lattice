@@ -68,8 +68,12 @@ pub struct Options {
     pub title: String,
     /// Phantom binary for the code graph. `None` is an empty overlay and the
     /// line [`PHANTOM_NOT_FOUND`], and does not start a process. `Some` is
-    /// not executed in this step.
+    /// not executed here.
     pub phantom_binary: Option<PathBuf>,
+    /// Display lines the parser already capped. Drawn as text. Not opened.
+    pub phantom_rows: Vec<String>,
+    /// The parser dropped further values, or marked the reply truncated.
+    pub phantom_truncated: bool,
 }
 
 #[derive(Debug)]
@@ -125,6 +129,8 @@ mod tests {
             seed: None,
             title: "t".into(),
             phantom_binary: None,
+            phantom_rows: Vec::new(),
+            phantom_truncated: false,
         };
         let p = preflight(&o);
         assert_eq!(p.gpui_available, cfg!(feature = "gpui"));
