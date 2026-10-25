@@ -4,20 +4,22 @@
 //! frontmatter delimiter, or the whole file when there is no frontmatter).
 //! Matching is exact and raw: no regex, no CRLF folding, no trailing-newline
 //! normalization. Overlapping occurrences count, so `aa` in `aaa` is two hits.
-//! Zero or many hits is [`LapisError::Matches`] (exit 1) and the file is left
-//! byte-identical.
+//! Zero or many hits is [`EditKind::MatchCount`] (exit 1) and the file is left
+//! byte-identical. The JSON error carries `matches`.
 //!
 //! A real write bumps top-level `updated:` to today, or inserts that line
 //! immediately before the closing `---` when the key is absent, and leaves
 //! every other frontmatter byte unchanged (including newline style). A note
 //! with no frontmatter block is edited as raw text and does not gain one.
-//! `--dry-run` does not bump `updated:`, does not write, and returns a diff
-//! of that preview. The caller reindexes only this path, and only after a
-//! real write.
+//! `--dry-run` does not write and does not bump `updated:` on disk. `newHash`
+//! and the diff are that unbumped preview, so the hash excludes the bump.
+//! The dry-run still runs the same frontmatter and wikilink gate as a write,
+//! on the bumped text, and fails when that write would refuse. The caller
+//! reindexes only this path, and only after a real write.
 
 use std::path::Path;
 
-use crate::error::{LapisError, Result};
+use crate::error::{EditKind, LapisError, Result};
 use crate::write::{Guard, Written, today};
 use crate::{hal, notes};
 
@@ -37,6 +39,10 @@ pub enum EditOp {
 }
 
 pub fn edit(root: &Path, rel: &str, op: &EditOp, guard: &Guard) -> Result<Written> {
+    edit_at(root, rel, op, guard).map_err(as_edit)
+}
+
+fn edit_at(root: &Path, rel: &str, op: &EditOp, guard: &Guard) -> Result<Written> {
     let (rel, abs) = notes::resolve(root, rel)?;
     notes::refuse_escaped_symlink(root, &rel)?;
     let bytes = std::fs::read(&abs)?;
@@ -44,11 +50,35 @@ pub fn edit(root: &Path, rel: &str, op: &EditOp, guard: &Guard) -> Result<Writte
     let original = utf8_text(&rel, &bytes)?;
     let (head, body) = markdown_body(&rel, original)?;
     let preview = format!("{head}{}", apply_op(&rel, body, op)?);
-    let staged = if guard.dry_run { preview } else { commit_text(root, &rel, &preview)? };
+    // Gate the bytes a write would submit, bump included. The preview below
+    // stays unbumped, so dry-run `newHash` excludes that line.
+    let committed = commit_text(root, &rel, &preview)?;
+    let staged = if guard.dry_run { preview } else { committed };
     if !guard.dry_run {
         write_exact(&rel, &abs, &bytes, &staged)?;
     }
     Ok(edited_value(&rel, original, &staged, &bytes, guard))
+}
+
+/// Edit failures use the five stable kinds. Other commands keep `path` / `usage`.
+fn as_edit(err: LapisError) -> LapisError {
+    match err {
+        LapisError::Edit { .. } => err,
+        LapisError::Path(message) => LapisError::edit(path_kind(&message), message, None),
+        LapisError::Usage(message) if message.contains(": stale:") => {
+            LapisError::edit(EditKind::StaleGuard, message, None)
+        }
+        LapisError::Usage(message) => LapisError::edit(EditKind::BadArgs, message, None),
+        other => other,
+    }
+}
+
+fn path_kind(message: &str) -> EditKind {
+    if message.starts_with("not found:") || message.contains("No such file") {
+        EditKind::NotFound
+    } else {
+        EditKind::Sandbox
+    }
 }
 
 fn utf8_text<'a>(rel: &str, bytes: &'a [u8]) -> Result<&'a str> {
@@ -89,10 +119,11 @@ fn one_at(rel: &str, hay: &str, needle: &str) -> Result<usize> {
 }
 
 fn match_err(rel: &str, n: usize) -> LapisError {
-    LapisError::Matches {
-        message: format!("{rel}: {n} matches (need exactly 1); file unchanged"),
-        matches: n,
-    }
+    LapisError::edit(
+        EditKind::MatchCount,
+        format!("{rel}: {n} matches (need exactly 1); file unchanged"),
+        Some(n),
+    )
 }
 
 /// `Ok(offset)` when `needle` occurs once. `Err(count)` otherwise.

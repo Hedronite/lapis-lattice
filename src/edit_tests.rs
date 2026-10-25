@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{EditOp, edit};
-use crate::error::{LapisError, Result};
+use crate::error::{EditKind, LapisError, Result};
 use crate::notes::{self, HASH_ALGO};
 use crate::write::{Guard, Written, today};
 
@@ -34,20 +34,24 @@ fn ins(v: &Path, rel: &str, anchor: &str, text: &str, before: bool, g: &Guard) -
 }
 
 fn matches_of(err: LapisError) -> usize {
-    match err {
-        LapisError::Matches { matches, message } => {
-            assert!(message.contains(&matches.to_string()), "{message}");
-            let env =
-                serde_json::to_value(crate::envelope::err(&LapisError::Matches { matches, message }, 0.0))
-                    .unwrap();
-            assert_eq!(env["ok"], false);
-            assert_eq!(env["error"]["exit"], 1);
-            assert_eq!(env["error"]["matches"], matches);
-            assert!(env["error"]["message"].as_str().unwrap().contains(&matches.to_string()));
-            matches
-        }
-        other => panic!("expected match error, got {other}"),
-    }
+    let LapisError::Edit { kind: EditKind::MatchCount, matches: Some(matches), ref message } = err else {
+        panic!("expected match_count, got {err}");
+    };
+    assert!(message.contains(&matches.to_string()), "{message}");
+    let env = serde_json::to_value(crate::envelope::err(&err, 0.0)).unwrap();
+    assert_eq!(env["ok"], false);
+    assert_eq!(env["error"]["kind"], "match_count");
+    assert_eq!(env["error"]["exit"], 1);
+    assert_eq!(env["error"]["matches"], matches);
+    assert!(env["error"]["message"].as_str().unwrap().contains(&matches.to_string()));
+    matches
+}
+
+fn assert_kind(err: &LapisError, kind: &str, exit: i32) {
+    assert_eq!((err.kind(), err.exit_code()), (kind, exit), "{err}");
+    let env = serde_json::to_value(crate::envelope::err(err, 0.0)).unwrap();
+    assert_eq!(env["error"]["kind"], kind);
+    assert_eq!(env["error"]["exit"], exit);
 }
 
 const NOTE: &str = "---\nname: X\n# a comment\nweird-key: [1, 2]\nupdated: 2020-01-01\n---\nhello anchor\n";
@@ -102,12 +106,12 @@ fn stale_hash_and_mtime_write_nothing() {
     let hash = notes::content_hash(&before);
     let bad = Guard { if_hash: Some("fnv1a64:0000000000000000".into()), ..Guard::default() };
     let err = repl(&v, "notes/a.md", "anchor", "world", &bad).unwrap_err();
-    assert_eq!(err.exit_code(), 1);
+    assert_kind(&err, "stale_guard", 1);
     assert!(err.to_string().contains("stale"), "{err}");
     assert_eq!(disk(&v, "notes/a.md"), before);
     let bad_m = Guard { if_mtime: Some(1), ..Guard::default() };
     let err = repl(&v, "notes/a.md", "anchor", "world", &bad_m).unwrap_err();
-    assert!(err.to_string().contains("mtime"), "{err}");
+    assert_kind(&err, "stale_guard", 1);
     assert_eq!(disk(&v, "notes/a.md"), before);
     let ok = Guard { if_hash: Some(hash), ..Guard::default() };
     repl(&v, "notes/a.md", "anchor", "world", &ok).unwrap();
@@ -132,8 +136,66 @@ fn dry_run_skips_write_updated_bump_and_returns_diff() {
     let diff = w.diff.unwrap();
     assert!(diff.contains("-hello anchor") && diff.contains("+hello world"), "{diff}");
     assert!(!diff.contains(&format!("updated: {}", today())), "{diff}");
-    assert_eq!(w.new_hash.unwrap(), notes::content_hash(preview.as_bytes()));
+    assert_eq!(w.new_hash.as_deref().unwrap(), notes::content_hash(preview.as_bytes()));
+    let bumped = preview.replacen("updated: 2020-01-01", &format!("updated: {}", today()), 1);
+    assert_ne!(
+        w.new_hash.as_deref().unwrap(),
+        notes::content_hash(bumped.as_bytes()),
+        "dry-run newHash excludes the updated bump"
+    );
     assert_eq!(w.old_hash.unwrap(), notes::content_hash(&before));
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn not_found_and_bad_args_keep_their_exits() {
+    let v = vault();
+    put(&v, "notes/a.md", NOTE);
+    let err = repl(&v, "notes/missing.md", "a", "b", &Guard::default()).unwrap_err();
+    assert_kind(&err, "not_found", 3);
+    let err = repl(&v, "notes/a.md", "", "b", &Guard::default()).unwrap_err();
+    assert_kind(&err, "bad_args", 1);
+    assert_eq!(disk(&v, "notes/a.md"), NOTE.as_bytes());
+    std::fs::create_dir(v.join("notes/dir")).unwrap();
+    let err = repl(&v, "notes/dir", "a", "b", &Guard::default()).unwrap_err();
+    assert_kind(&err, "sandbox", 3);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+const GATED: &str = "---\ntitle: A\ntype: note\nupdated: 2020-01-01\ntags: []\n---\nhello\n";
+
+#[test]
+fn dry_run_refuses_when_the_write_gate_would() {
+    let v = vault();
+    let _mode = crate::rag_gate::force_mode(crate::rag_gate::Mode::Hard);
+    put(&v, "foundry/a.md", "---\nname: X\nupdated: 2020-01-01\n---\nhello\n");
+    let before = disk(&v, "foundry/a.md");
+    let dry = Guard { dry_run: true, ..Guard::default() };
+    let err = repl(&v, "foundry/a.md", "hello", "world", &dry).unwrap_err();
+    assert_kind(&err, "bad_args", 1);
+    assert!(err.to_string().contains("title"), "{err}");
+    assert_eq!(disk(&v, "foundry/a.md"), before);
+    let err = repl(&v, "foundry/a.md", "hello", "world", &Guard::default()).unwrap_err();
+    assert_eq!(err.kind(), "bad_args");
+    assert_eq!(disk(&v, "foundry/a.md"), before);
+
+    put(&v, "foundry/a.md", GATED);
+    let before = disk(&v, "foundry/a.md");
+    let err = repl(&v, "foundry/a.md", "hello", "see [[NoSuchNote]]", &dry).unwrap_err();
+    assert!(err.to_string().contains("wikilink"), "{err}");
+    assert_eq!(err.exit_code(), 1);
+    assert_eq!(disk(&v, "foundry/a.md"), before);
+    let err = repl(&v, "foundry/a.md", "hello", "see [[NoSuchNote]]", &Guard::default()).unwrap_err();
+    assert_kind(&err, "bad_args", 1);
+    assert_eq!(disk(&v, "foundry/a.md"), before);
+
+    let w = repl(&v, "foundry/a.md", "hello", "world", &dry).unwrap();
+    assert_eq!(disk(&v, "foundry/a.md"), before);
+    let preview = w.text.unwrap();
+    assert!(preview.contains("updated: 2020-01-01\n"), "{preview}");
+    assert_eq!(w.new_hash.as_deref().unwrap(), notes::content_hash(preview.as_bytes()));
+    let bumped = preview.replacen("updated: 2020-01-01", &format!("updated: {}", today()), 1);
+    assert_ne!(w.new_hash.as_deref().unwrap(), notes::content_hash(bumped.as_bytes()));
     let _ = std::fs::remove_dir_all(&v);
 }
 
@@ -213,13 +275,13 @@ fn sandbox_rejects_parent_and_absolute_without_touching_them() {
     std::fs::write(&secret, b"SECRET").unwrap();
     let abs = secret.to_str().unwrap();
     let err = repl(&v, abs, "SECRET", "nope", &Guard::default()).unwrap_err();
-    assert_eq!(err.exit_code(), 3, "{err}");
+    assert_kind(&err, "sandbox", 3);
     assert_eq!(std::fs::read(&secret).unwrap(), b"SECRET");
     let name = format!("secret-{}.md", unique());
     let sibling = v.parent().unwrap().join(&name);
     std::fs::write(&sibling, b"SECRET").unwrap();
     let err = repl(&v, &format!("../{name}"), "SECRET", "nope", &Guard::default()).unwrap_err();
-    assert_eq!(err.exit_code(), 3, "{err}");
+    assert_kind(&err, "sandbox", 3);
     assert_eq!(std::fs::read(&sibling).unwrap(), b"SECRET");
     let _ = std::fs::remove_file(&secret);
     let _ = std::fs::remove_file(&sibling);
@@ -240,7 +302,7 @@ fn symlink_out_of_vault_exits_3_and_keeps_the_target() {
     std::fs::write(&outside, b"SECRET").unwrap();
     symlink(&outside, v.join("notes/link.md")).unwrap();
     let err = repl(&v, "notes/link.md", "SECRET", "nope", &Guard::default()).unwrap_err();
-    assert_eq!(err.exit_code(), 3, "{err}");
+    assert_kind(&err, "sandbox", 3);
     assert!(err.to_string().contains("symlink"), "{err}");
     assert_eq!(std::fs::read(&outside).unwrap(), b"SECRET");
     assert!(std::fs::symlink_metadata(v.join("notes/link.md")).unwrap().file_type().is_symlink());
@@ -249,7 +311,7 @@ fn symlink_out_of_vault_exits_3_and_keeps_the_target() {
     std::fs::write(dir.join("note.md"), b"SECRET").unwrap();
     symlink(&dir, v.join("out")).unwrap();
     let err = repl(&v, "out/note.md", "SECRET", "nope", &Guard::default()).unwrap_err();
-    assert_eq!(err.exit_code(), 3, "{err}");
+    assert_kind(&err, "sandbox", 3);
     assert_eq!(std::fs::read(dir.join("note.md")).unwrap(), b"SECRET");
     put(&v, "notes/a.md", NOTE);
     std::fs::set_permissions(v.join("notes/a.md"), std::fs::Permissions::from_mode(0o640)).unwrap();
@@ -315,7 +377,7 @@ async fn mcp_lapis_edit_round_trip() {
     let ok = server
         .lapis_edit(rmcp::handler::server::wrapper::Parameters(crate::mcp::EditArg {
             path: "notes/a.md".into(),
-            mode: "replace".into(),
+            mode: crate::mcp::EditMode::Replace,
             old: "hello".into(),
             new: "world".into(),
             dry_run: None,
@@ -334,7 +396,7 @@ async fn mcp_lapis_edit_round_trip() {
     let err = server
         .lapis_edit(rmcp::handler::server::wrapper::Parameters(crate::mcp::EditArg {
             path: "notes/a.md".into(),
-            mode: "insert_after".into(),
+            mode: crate::mcp::EditMode::InsertAfter,
             old: "hello".into(),
             new: "!".into(),
             dry_run: Some(true),
@@ -344,8 +406,27 @@ async fn mcp_lapis_edit_round_trip() {
         .await
         .unwrap_err();
     assert!(err.message.contains('2'), "{}", err.message);
-    assert_eq!(err.data.as_ref().and_then(|d| d["matches"].as_u64()), Some(2));
+    let data = err.data.unwrap();
+    assert_eq!(data["kind"], "match_count");
+    assert_eq!(data["exit"], 1);
+    assert_eq!(data["matches"], 2);
     assert_eq!(disk(&v, "notes/a.md"), before);
+    let missing = server
+        .lapis_edit(rmcp::handler::server::wrapper::Parameters(crate::mcp::EditArg {
+            path: "notes/missing.md".into(),
+            mode: crate::mcp::EditMode::InsertBefore,
+            old: "x".into(),
+            new: "y".into(),
+            dry_run: None,
+            if_mtime: None,
+            if_hash: None,
+        }))
+        .await
+        .unwrap_err();
+    let data = missing.data.unwrap();
+    assert_eq!(data["kind"], "not_found");
+    assert_eq!(data["exit"], 3);
+    assert!(data.get("matches").is_none());
     let _ = std::fs::remove_dir_all(&v);
 }
 
@@ -386,4 +467,41 @@ fn cli_parses_replace_and_insert_guards() {
         Cli::try_parse_from(["lapis", "insert", "a.md", "--after", "A", "--before", "B", "--text", "t"])
             .is_err()
     );
+}
+
+#[test]
+fn lapis_edit_mode_schema_is_an_enum() {
+    let schema = schemars::schema_for!(crate::mcp::EditArg);
+    let v = serde_json::to_value(&schema).unwrap();
+    let allowed = mode_enum_values(&v);
+    assert_eq!(allowed, ["insert_after", "insert_before", "replace"], "{v}");
+}
+
+fn mode_enum_values(schema: &serde_json::Value) -> Vec<String> {
+    let mut found = Vec::new();
+    collect_mode_enums(schema, &mut found);
+    found.sort();
+    found.dedup();
+    found
+}
+
+fn collect_mode_enums(v: &serde_json::Value, out: &mut Vec<String>) {
+    let serde_json::Value::Object(map) = v else {
+        if let serde_json::Value::Array(items) = v {
+            items.iter().for_each(|child| collect_mode_enums(child, out));
+        }
+        return;
+    };
+    if let Some(items) = map.get("enum").and_then(|e| e.as_array()) {
+        let strings: Vec<String> = items.iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
+        if strings.iter().any(|s| s == "insert_after") {
+            out.extend(strings);
+        }
+    }
+    if let Some(s @ ("replace" | "insert_after" | "insert_before")) =
+        map.get("const").and_then(|c| c.as_str())
+    {
+        out.push(s.to_string());
+    }
+    map.values().for_each(|child| collect_mode_enums(child, out));
 }

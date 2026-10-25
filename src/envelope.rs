@@ -77,7 +77,7 @@ pub fn err(e: &LapisError, latency_ms: f64) -> Envelope<Value> {
         _ => None,
     };
     let matches = match e {
-        LapisError::Matches { matches, .. } => Some(*matches),
+        LapisError::Edit { matches, .. } => *matches,
         _ => None,
     };
     Envelope {

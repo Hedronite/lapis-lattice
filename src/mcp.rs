@@ -60,11 +60,15 @@ pub struct LapisServer {
 fn fail(e: LapisError) -> ErrorData {
     let msg = e.to_string();
     match e {
+        LapisError::Edit { kind, matches, .. } => {
+            let mut data = json!({ "kind": kind.as_str(), "exit": kind.exit() });
+            if let Some(n) = matches {
+                data["matches"] = json!(n);
+            }
+            ErrorData::invalid_params(msg, Some(data))
+        }
         LapisError::Usage(_) | LapisError::Path(_) | LapisError::HttpOnly { .. } => {
             ErrorData::invalid_params(msg, None)
-        }
-        LapisError::Matches { matches, .. } => {
-            ErrorData::invalid_params(msg, Some(json!({ "matches": matches, "exit": 1 })))
         }
         LapisError::Tome { code, .. } => tome_error(code, msg),
         LapisError::LatticeDown(_) | LapisError::Internal(_) => ErrorData::internal_error(msg, None),
@@ -255,17 +259,25 @@ pub struct AppendArg {
     pub if_hash: Option<String>,
 }
 
+/// `lapis_edit.mode`. Serialized as `replace`, `insert_after`, `insert_before`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EditMode {
+    Replace,
+    InsertAfter,
+    InsertBefore,
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct EditArg {
     /// Vault-relative note path.
     pub path: String,
-    /// `replace`, `insert_after`, or `insert_before`.
-    pub mode: String,
+    pub mode: EditMode,
     /// Literal that must match the body once. Raw bytes; overlaps count. Anchor when inserting.
     pub old: String,
     /// Replacement, or the text inserted at the anchor. Empty deletes on replace.
     pub new: String,
-    /// Diff only. Does not write, bump `updated`, or reindex.
+    /// Diff only. Does not write or reindex. `newHash` excludes the `updated:` bump.
     pub dry_run: Option<bool>,
     /// Refuse unless `updatedAt` (ms) still matches.
     pub if_mtime: Option<u64>,
@@ -309,22 +321,16 @@ pub fn hop_of(h: Option<u32>) -> std::result::Result<u32, ErrorData> {
     }
 }
 
-fn edit_op(a: &EditArg) -> std::result::Result<crate::edit::EditOp, ErrorData> {
-    Ok(match a.mode.as_str() {
-        "replace" => crate::edit::EditOp::Replace { old: a.old.clone(), new: a.new.clone() },
-        "insert_after" => {
+fn edit_op(a: &EditArg) -> crate::edit::EditOp {
+    match a.mode {
+        EditMode::Replace => crate::edit::EditOp::Replace { old: a.old.clone(), new: a.new.clone() },
+        EditMode::InsertAfter => {
             crate::edit::EditOp::Insert { anchor: a.old.clone(), text: a.new.clone(), before: false }
         }
-        "insert_before" => {
+        EditMode::InsertBefore => {
             crate::edit::EditOp::Insert { anchor: a.old.clone(), text: a.new.clone(), before: true }
         }
-        other => {
-            return Err(ErrorData::invalid_params(
-                format!("mode must be replace|insert_after|insert_before, got {other}"),
-                None,
-            ));
-        }
-    })
+    }
 }
 
 fn guard(dry_run: Option<bool>, if_mtime: Option<u64>, if_hash: Option<String>) -> write::Guard {
@@ -707,14 +713,14 @@ impl LapisServer {
     }
 
     #[tool(
-        description = "In-place body edit. mode: replace | insert_after | insert_before. old matches once (raw bytes). dry_run, if_hash, if_mtime."
+        description = "In-place body edit. mode: replace | insert_after | insert_before. old matches once (raw bytes). dry_run, if_hash, if_mtime. Errors carry kind and exit."
     )]
     pub(crate) async fn lapis_edit(
         &self,
         Parameters(a): Parameters<EditArg>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let t0 = Instant::now();
-        let op = edit_op(&a)?;
+        let op = edit_op(&a);
         let g = guard(a.dry_run, a.if_mtime, a.if_hash);
         let w = crate::edit::edit(&self.ctx.vault.root, &a.path, &op, &g).map_err(fail)?;
         ok_at(t0, &ops::kick(&self.ctx, w, false).await.map_err(fail)?)

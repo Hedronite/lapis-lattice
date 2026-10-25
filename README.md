@@ -135,11 +135,13 @@ lapis --vault ~/Notes --json insert notes/plan.md --after 'anchor' --text 'inser
 lapis --vault ~/Notes replace notes/plan.md --old 'exact text' --new 'replacement' --dry-run
 ```
 
-`--if-hash` and `--if-mtime` are the same stale guards as `append`. The hash is FNV-1a 64 over the exact on-disk bytes (`hashAlgo` is `fnv1a64` in the JSON; `oldHash` / `newHash` use that prefix). A mismatch exits 1 and writes nothing. `--dry-run` prints a unified diff, writes nothing, does not bump `updated:`, and does not reindex. `--stdin` reads the replacement or the inserted text.
+`--if-hash` and `--if-mtime` are the same stale guards as `append`. The hash is FNV-1a 64 over the exact on-disk bytes (`hashAlgo` is `fnv1a64` in the JSON; `oldHash` / `newHash` use that prefix). A mismatch exits 1 and writes nothing. `--dry-run` prints a unified diff, writes nothing, does not bump `updated:` on disk, and does not reindex. Its `newHash` is the unbumped preview, so it excludes the `updated:` line a real write stores. The dry-run still runs the same frontmatter and wikilink gate as that write, on the bumped text, and fails when the write would refuse. `--stdin` reads the replacement or the inserted text.
 
 A real write is a temp file in the note's directory, then rename, and it keeps the original file mode. It bumps top-level `updated:` to today, or inserts that line immediately before the closing `---` when the key is absent, and leaves every other frontmatter byte unchanged. A note with no frontmatter block stays headerless. The frontmatter block is not searched, so a needle that lives only there is zero matches. The index kick reindexes that one path. `..`, an absolute path, and a symlink that resolves outside the vault exit 3 and touch nothing.
 
-MCP exposes one tool, `lapis_edit`, with `mode` of `replace`, `insert_after`, or `insert_before`. Same guards and the same match rule. The base server is 15 tools.
+`--json` errors from these commands set `error.kind` and `error.exit`. `kind` is `not_found` or `sandbox` (both exit 3), or `stale_guard`, `match_count`, or `bad_args` (exit 1). `match_count` also sets `error.matches`.
+
+MCP exposes one tool, `lapis_edit`. `mode` is an enum: `replace`, `insert_after`, or `insert_before`. Same guards and the same match rule. A tool error's `data` carries `kind` and `exit`, plus `matches` when the kind is `match_count`. The base server is 15 tools.
 
 Coding agents with a shell should use the skill in `skills/lapis/` (see Agent use, above). This stdio config is for harnesses that talk MCP:
 

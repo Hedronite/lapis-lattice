@@ -125,6 +125,8 @@ def "main doctor" [--vault: string = ""] {
 
 # Recommended edit: read, copy data.hash, then pass --hash.
 # The CLI matches raw body bytes and exits 1 unless the literal occurs once.
+# `--json` error.kind is not_found, sandbox, stale_guard, match_count, or bad_args.
+# Dry-run newHash excludes the updated: bump. The write gate still runs.
 def "main replace" [
   path: string
   --old: string
