@@ -841,11 +841,7 @@ fn desktop(ctx: &Ctx, args: cli::DesktopArgs) -> Result<()> {
         if ctx.json {
             return emit_json(&report);
         }
-        println!(
-            "desktop: gpui={} sidecar={}",
-            report.gpui_available,
-            report.gitnexus.as_deref().unwrap_or("none")
-        );
+        println!("desktop: gpui={}", report.gpui_available);
         return Ok(());
     }
     lapis_desktop::run_workspace(opts, desktop_services::service(ctx)).map_err(|e| match e {
