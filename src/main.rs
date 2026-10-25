@@ -878,24 +878,26 @@ async fn doctor(ctx: &Ctx) -> Result<()> {
 fn desktop(ctx: &Ctx, args: cli::DesktopArgs) -> Result<()> {
     // D1: `phantom-fractal` only. Absent is not an error; the overlay stays empty.
     let phantom_binary = phantom::discover::from_env();
+    // One `phantom-fractal --json version` when found (G3). A run that yields no
+    // envelope is an error, not an empty overlay.
+    let probe = phantom_binary.as_deref().map(|p| phantom::run::run(p, &["version"]));
+    let (phantom_rows, phantom_truncated) = match &probe {
+        Some(Ok(reply)) => (reply.rows(), reply.truncated),
+        Some(Err(e)) => (vec![format!("phantom: {e}")], false),
+        None => (Vec::new(), false),
+    };
     let opts = lapis_desktop::Options {
         vault_root: ctx.vault.root.clone(),
         lattice_url: ctx.lattice_url.clone(),
         seed: args.path,
         title: "Lapis".into(),
         phantom_binary,
+        phantom_rows,
+        phantom_truncated,
     };
     if args.check {
         let report = lapis_desktop::preflight(&opts);
-        // One `phantom-fractal --json version` when found. A run that yields no
-        // envelope is an error, not an empty overlay.
-        let probe = match &opts.phantom_binary {
-            Some(p) => Some(
-                phantom::run::run(p, &["version"])
-                    .map_err(|e| LapisError::Internal(format!("phantom: {e}")))?,
-            ),
-            None => None,
-        };
+        let probe = probe.transpose().map_err(|e| LapisError::Internal(format!("phantom: {e}")))?;
         if ctx.json {
             let mut v = serde_json::to_value(&report)?;
             v["phantomBinary"] = json!(opts.phantom_binary);

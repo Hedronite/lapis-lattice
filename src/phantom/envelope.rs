@@ -55,6 +55,27 @@ pub struct Reply {
     pub truncated: bool,
 }
 
+impl Reply {
+    /// Display lines for the desktop overlay: one per `data` array value (a
+    /// string as is, anything else as compact JSON), one for any other `data`,
+    /// and one for `error`. Text only; nothing named in a row is opened.
+    pub fn rows(&self) -> Vec<String> {
+        let text = |v: &Value| match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        let mut rows: Vec<String> = match &self.envelope.data {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(items)) => items.iter().map(text).collect(),
+            Some(other) => vec![text(other)],
+        };
+        if let Some(e) = &self.envelope.error {
+            rows.push(format!("exit {} {}: {}", e.exit, e.kind, e.message));
+        }
+        rows
+    }
+}
+
 /// Why stdout did not become a [`Reply`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseError {

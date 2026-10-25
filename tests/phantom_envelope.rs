@@ -358,3 +358,22 @@ fn desktop_check_reports_a_typed_error_for_a_broken_phantom() {
     assert!(stderr.contains("phantom-fractal exited 139, outside 0-6"), "{stderr}");
     assert!(!stdout.contains("Phantom not found"), "{stdout}");
 }
+
+// ------------------------------------------------------------------ rows
+
+/// The overlay's rows come from the capped reply, as text. A path stays a string.
+#[test]
+fn rows_are_text_from_the_capped_reply() {
+    let rows: Vec<Value> = (0..=DATA_CAP).map(|i| json!(format!("/abs/src/{i}.rs"))).collect();
+    let reply = parse(&json!({"ok": true, "data": rows, "error": null}).to_string()).unwrap();
+    let text = reply.rows();
+    assert_eq!(text.len(), 256);
+    assert_eq!(text[0], "/abs/src/0.rs");
+    assert!(reply.truncated);
+
+    let reply = parse(r#"{"ok":true,"data":[{"id":1},2,null],"error":null}"#).unwrap();
+    assert_eq!(reply.rows(), [r#"{"id":1}"#, "2", "null"]);
+
+    assert_eq!(parse(SUCCESS).unwrap().rows(), [r#"{"version":"0.0.1","schema":1}"#]);
+    assert_eq!(parse(NOT_FOUND).unwrap().rows(), ["exit 3 not_found: missing"]);
+}
