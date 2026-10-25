@@ -61,9 +61,10 @@ fn skill_lists_every_wrapper() {
         ("nu lapis.nu status", "def \"main status\""),
         ("nu lapis.nu doctor", "def \"main doctor\""),
         ("nu lapis.nu create ", "def \"main create\""),
-        ("nu lapis.nu append ", "def \"main append\""),
+        ("nu lapis.nu append ", "def --wrapped \"main append\""),
         ("nu lapis.nu task list ", "def \"main task list\""),
-        ("nu lapis.nu task toggle ", "def \"main task toggle\""),
+        ("nu lapis.nu task toggle ", "def --wrapped \"main task toggle\""),
+        ("nu lapis.nu tome build ", "def --wrapped \"main tome build\""),
         ("nu lapis.nu tome tree ", "def \"main tome tree\""),
         ("nu lapis.nu tome open ", "def \"main tome open\""),
     ] {

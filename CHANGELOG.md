@@ -24,8 +24,9 @@ Crate `repository` and `homepage` are
   `create`, `append`, `task list`, `task toggle`, `tome tree`, and
   `tome open` (`--features tome`). Search rows keep `path`, `title`,
   `score`, and `snippet`. A failing command exits with the envelope's
-  `exit` code. Values that start with `-` are passed after `--` or as
-  `--flag=value`.
+  `exit` code. Flags go before `--`. Text that starts with `-` follows
+  `--`. Text that starts with `--` uses `--body=` or `--stdin`. A flag
+  after `--` is a usage error and writes nothing. `tome build` is wrapped.
 
 ### Jev rerank
 

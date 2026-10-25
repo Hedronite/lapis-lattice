@@ -2,9 +2,10 @@
 # Deterministic body for the lapis skill. Wraps `lapis --json`.
 # Vault: --vault, else $LAPIS_VAULT, else the path `lapis init` recorded.
 #
-# Flags come before positionals. A `--` ends flags, and string values travel
-# as `--flag=value`, so text that starts with `-` (a task line, a body) is
-# data. On failure the process exits with the envelope's `exit` code.
+# Flags come before `--`. A positional that starts with `-` is only text
+# after that `--`. A known flag after `--` is a usage error, not note text.
+# Text that starts with `--` is `--body=` or `--stdin`. String flag values
+# travel as `--flag=value`. On failure the process exits with `exit`.
 #
 # CLI each command actually runs:
 #   search        lapis search --per-doc --limit=N [--domain=D] -- QUERY
@@ -19,6 +20,7 @@
 #   doctor        lapis doctor
 #   create        lapis create --title=T [--body=TEXT] [--dry-run] …
 #   append        lapis append [--dry-run] [--if-mtime=MS] [--if-hash=HASH] -- PATH TEXT
+#   tome build    lapis tome build [--force] [--allow-windows] -- PDF…
 #   task list     lapis task list [--path=P] [--full] …
 #   task toggle   lapis task toggle [--dry-run] [--if-mtime=MS] [--if-hash=HASH] -- ID
 #   tome tree     lapis tome tree [--node=ID] [--depth=N] -- DOC
@@ -136,8 +138,84 @@ def envelope [command: string, args: list<string>, vault: string] {
     if not ($good | is-empty) {
       $out = ($out | upsert data ($good | first | get data?))
     }
+    # Clap prints text and exits 1 before `--json` can emit an envelope.
+    if $code == 1 and ($docs | is-empty) {
+      $out = ($out | upsert kind "usage")
+    }
     $out
   }
+}
+
+# Wrapped commands see every token, including `--`. Flags are recognized only
+# before the first positional and before `--`. A dash-leading positional
+# without `--` is usage. A known flag after `--` would otherwise be written.
+def valued-name [tok: string, valued: list<string>] {
+  let hit = ($valued | where {|n| $tok == $n or ($tok | str starts-with $"($n)=") })
+  if ($hit | is-empty) { "" } else { $hit | first }
+}
+
+def take-val [args: list<string>, i: int, tok: string, name: string] {
+  let eq = $"($name)="
+  if ($tok | str starts-with $eq) {
+    { value: ($tok | str replace $eq ""), next: ($i + 1), error: "" }
+  } else if ($i + 1) >= ($args | length) {
+    { value: "", next: $i, error: $"($name) needs a value" }
+  } else {
+    { value: ($args | get ($i + 1)), next: ($i + 2), error: "" }
+  }
+}
+
+def parse-args [
+  command: string
+  args: list<string>
+  switches: list<string>
+  valued: list<string>
+] {
+  mut i = 0
+  mut after = false
+  mut saw_pos = false
+  mut on = []
+  mut values = {}
+  mut pos = []
+  let n = ($args | length)
+  while $i < $n {
+    let tok = ($args | get $i)
+    if ($tok == "--") and (not $after) {
+      $after = true
+      $i = $i + 1
+    } else {
+      let named = (valued-name $tok $valued)
+      let is_switch = ($tok in $switches)
+      if ($named != "") or $is_switch {
+        if $after {
+          return (usage $command $"($tok) is a flag and must come before --. Nothing was written")
+        }
+        if $saw_pos {
+          return (usage $command $"($tok) starts with '-'. Put flags before -- and pass dash-leading text after --, or use --body= / --stdin")
+        }
+        if $named != "" {
+          let spec = (take-val $args $i $tok $named)
+          if $spec.error != "" { return (usage $command $spec.error) }
+          $values = ($values | upsert $named $spec.value)
+          $i = $spec.next
+        } else {
+          $on = ($on | append $tok)
+          $i = $i + 1
+        }
+      } else if (not $after) and ($tok | str starts-with "-") {
+        return (usage $command $"($tok) starts with '-'. Put flags before -- and pass dash-leading text after --, or use --body= / --stdin")
+      } else {
+        $pos = ($pos | append $tok)
+        $saw_pos = true
+        $i = $i + 1
+      }
+    }
+  }
+  { ok: true, on: $on, values: $values, pos: $pos }
+}
+
+def flag-on [on: list<string>, name: string] {
+  $on | any {|s| $s == $name }
 }
 
 def hit-row [h: record] {
@@ -294,27 +372,40 @@ def "main create" [
   }
 }
 
-def "main append" [
-  --dry-run
-  --if-mtime: string = ""
-  --if-hash: string = ""
-  --no-reindex
-  --vault: string = ""
-  ...rest: string
-] {
-  if ($rest | length) < 2 {
-    finish (usage "append" "path and text required")
-  } else {
-    let path = ($rest | first)
-    let text = ($rest | skip 1 | str join " ")
-    mut a = ["append"]
-    $a = (with-switch $a "--dry-run" $dry_run)
-    $a = (with-opt $a "--if-mtime" $if_mtime)
-    $a = (with-opt $a "--if-hash" $if_hash)
-    $a = (with-switch $a "--no-reindex" $no_reindex)
-    $a = ($a ++ ["--" $path $text])
-    finish (envelope "append" $a $vault)
+def --wrapped "main append" [...args: string] {
+  let p = (parse-args "append" $args ["--dry-run" "--no-reindex" "--stdin"] ["--if-mtime" "--if-hash" "--vault" "--body"])
+  if not $p.ok { finish $p }
+  let body = ($p.values."--body"? | default "")
+  let vault = ($p.values."--vault"? | default "")
+  let stdin = (flag-on $p.on "--stdin")
+  if $stdin and ($body != "") {
+    finish (usage "append" "--stdin and --body both set")
   }
+  mut path = ""
+  mut text = ""
+  if $stdin or ($body != "") {
+    if ($p.pos | length) != 1 {
+      finish (usage "append" "path required")
+    }
+    $path = ($p.pos | first)
+    $text = $body
+  } else if ($p.pos | length) < 2 {
+    finish (usage "append" "path and text required. Put flags before -- and pass dash-leading text after --, or use --body= / --stdin")
+  } else {
+    $path = ($p.pos | first)
+    $text = ($p.pos | skip 1 | str join " ")
+  }
+  mut a = ["append"]
+  $a = (with-switch $a "--dry-run" (flag-on $p.on "--dry-run"))
+  $a = (with-opt $a "--if-mtime" ($p.values."--if-mtime"? | default ""))
+  $a = (with-opt $a "--if-hash" ($p.values."--if-hash"? | default ""))
+  $a = (with-switch $a "--no-reindex" (flag-on $p.on "--no-reindex"))
+  if $stdin {
+    $a = ($a ++ ["--stdin" "--" $path])
+  } else {
+    $a = ($a ++ ["--" $path $text])
+  }
+  finish (envelope "append" $a $vault)
 }
 
 def "main task list" [
@@ -338,25 +429,35 @@ def "main task list" [
   finish (envelope "task list" $a $vault)
 }
 
-def "main task toggle" [
-  --dry-run
-  --if-mtime: string = ""
-  --if-hash: string = ""
-  --no-reindex
-  --vault: string = ""
-  ...id: string
-] {
-  if ($id | length) != 1 {
+def --wrapped "main task toggle" [...args: string] {
+  let p = (parse-args "task toggle" $args ["--dry-run" "--no-reindex"] ["--if-mtime" "--if-hash" "--vault"])
+  if not $p.ok { finish $p }
+  if ($p.pos | length) != 1 {
     finish (usage "task toggle" "id required")
-  } else {
-    mut a = ["task" "toggle"]
-    $a = (with-switch $a "--dry-run" $dry_run)
-    $a = (with-opt $a "--if-mtime" $if_mtime)
-    $a = (with-opt $a "--if-hash" $if_hash)
-    $a = (with-switch $a "--no-reindex" $no_reindex)
-    $a = ($a ++ ["--" ($id | first)])
-    finish (envelope "task toggle" $a $vault)
   }
+  let vault = ($p.values."--vault"? | default "")
+  mut a = ["task" "toggle"]
+  $a = (with-switch $a "--dry-run" (flag-on $p.on "--dry-run"))
+  $a = (with-opt $a "--if-mtime" ($p.values."--if-mtime"? | default ""))
+  $a = (with-opt $a "--if-hash" ($p.values."--if-hash"? | default ""))
+  $a = (with-switch $a "--no-reindex" (flag-on $p.on "--no-reindex"))
+  $a = ($a ++ ["--" ($p.pos | first)])
+  finish (envelope "task toggle" $a $vault)
+}
+
+def --wrapped "main tome build" [...args: string] {
+  let p = (parse-args "tome build" $args ["--force" "--allow-windows" "--llm-struct"] ["--vault"])
+  if not $p.ok { finish $p }
+  if ($p.pos | is-empty) {
+    finish (usage "tome build" "pdf required")
+  }
+  let vault = ($p.values."--vault"? | default "")
+  mut a = ["tome" "build"]
+  $a = (with-switch $a "--force" (flag-on $p.on "--force"))
+  $a = (with-switch $a "--allow-windows" (flag-on $p.on "--allow-windows"))
+  $a = (with-switch $a "--llm-struct" (flag-on $p.on "--llm-struct"))
+  $a = ($a ++ ["--"] ++ $p.pos)
+  finish (envelope "tome build" $a $vault)
 }
 
 def "main tome tree" [

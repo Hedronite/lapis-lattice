@@ -27,12 +27,14 @@ nu lapis.nu tree-retrieve [--path p] [--query text] [--depth n] [--max-nodes n]
 nu lapis.nu status
 nu lapis.nu doctor
 nu lapis.nu create --title TITLE [--path p] [--type t] [--domain d] [--tag [a b]] [--body text] [--dry-run]
-nu lapis.nu append PATH TEXT [--dry-run] [--if-mtime ms] [--if-hash hash]
+nu lapis.nu append [--dry-run] [--body text] -- PATH TEXT
 nu lapis.nu task list [--path p] [--full] [--limit n] [--status s] [--due when] [--tag t]
-nu lapis.nu task toggle ID [--dry-run] [--if-mtime ms] [--if-hash hash]
+nu lapis.nu task toggle [--dry-run] -- ID
+nu lapis.nu tome build PDF... [--allow-windows] [--force]
 nu lapis.nu tome tree DOC [--node id] [--depth n]
 nu lapis.nu tome open DOC NODE...
 ```
 
-`tome tree` and `tome open` need a `lapis` built with `--features tome`.
+Flags go before `--`. `nu lapis.nu append --dry-run -- PATH "- [ ] x"`. A value that starts with `--` uses `--body=` or `--stdin`. Words after PATH are one text.
+`tome build`, `tome tree`, and `tome open` need a `lapis` built with `--features tome`.
 Run `create`, `append`, and `task toggle` only when a human has explicitly asked.
