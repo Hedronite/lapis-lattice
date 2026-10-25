@@ -490,7 +490,8 @@ pub struct DesktopArgs {
     pub path: Option<String>,
 
     /// Report whether the GPUI shell is available and where `phantom-fractal`
-    /// was found (`PATH`, then `$LAPIS_PHANTOM_BINARY`), then exit.
+    /// was found (`PATH`, then `$LAPIS_PHANTOM_BINARY`), run
+    /// `phantom-fractal --json version` once when it was, then exit.
     #[arg(long)]
     pub check: bool,
 }
