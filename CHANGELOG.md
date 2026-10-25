@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Phantom client
+
+- Lapis parses the JSON envelope that `phantom-fractal` prints and does not read Phantom's database.
+
 ### Dependencies
 
 - `lapis-lattice` moved to rusqlite 0.40, and its behavior is unchanged.
