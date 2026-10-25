@@ -883,18 +883,19 @@ fn desktop(ctx: &Ctx, args: cli::DesktopArgs) -> Result<()> {
         lattice_url: ctx.lattice_url.clone(),
         seed: args.path,
         title: "Lapis".into(),
+        phantom_binary,
     };
     if args.check {
         let report = lapis_desktop::preflight(&opts);
         if ctx.json {
             let mut v = serde_json::to_value(&report)?;
-            v["phantomBinary"] = json!(phantom_binary);
+            v["phantomBinary"] = json!(opts.phantom_binary);
             return emit_json(&v);
         }
         println!("desktop: gpui={}", report.gpui_available);
-        match &phantom_binary {
+        match &opts.phantom_binary {
             Some(p) => println!("phantom: {}", p.display()),
-            None => println!("Phantom not found"),
+            None => println!("{}", lapis_desktop::PHANTOM_NOT_FOUND),
         }
         return Ok(());
     }
