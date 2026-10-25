@@ -2,32 +2,37 @@
 # Deterministic body for the lapis skill. Wraps `lapis --json`.
 # Vault: --vault, else $LAPIS_VAULT, else the path `lapis init` recorded.
 #
+# Flags come before positionals. A `--` ends flags, and string values travel
+# as `--flag=value`, so text that starts with `-` (a task line, a body) is
+# data. On failure the process exits with the envelope's `exit` code.
+#
 # CLI each command actually runs:
-#   search        lapis search --per-doc --limit N [--domain D] -- QUERY
+#   search        lapis search --per-doc --limit=N [--domain=D] -- QUERY
 #   read          lapis read -- PATH
-#   list          lapis list --limit N [-- PREFIX]
+#   list          lapis list --limit=N [-- PREFIX]
 #   neighbors     lapis neighbors -- PATH
 #   resolve       lapis resolve -- LINK
 #   recent        lapis analytics recent
-#   analytics     lapis analytics QUERY
-#   tree-retrieve lapis tree-retrieve [--path P] [--query Q] [--depth N] [--max-nodes N]
+#   analytics     lapis analytics -- QUERY
+#   tree-retrieve lapis tree-retrieve [--path=P] [--query=Q] [--depth=N] [--max-nodes=N]
 #   status        lapis vault info
 #   doctor        lapis doctor
-#   create        lapis create --title T [--dry-run] …
-#   append        lapis append PATH TEXT [--dry-run] [--if-mtime MS] [--if-hash HASH]
-#   task list     lapis task list [--path P] [--full] …
-#   task toggle   lapis task toggle ID [--dry-run] [--if-mtime MS] [--if-hash HASH]
-#   tome tree     lapis tome tree DOC [--node ID] [--depth N]
-#   tome open     lapis tome open DOC NODE…
+#   create        lapis create --title=T [--body=TEXT] [--dry-run] …
+#   append        lapis append [--dry-run] [--if-mtime=MS] [--if-hash=HASH] -- PATH TEXT
+#   task list     lapis task list [--path=P] [--full] …
+#   task toggle   lapis task toggle [--dry-run] [--if-mtime=MS] [--if-hash=HASH] -- ID
+#   tome tree     lapis tome tree [--node=ID] [--depth=N] -- DOC
+#   tome open     lapis tome open -- DOC NODE…
 # `tome` needs a binary built with `--features tome`.
 
 def vault-args [vault: string] {
   let v = if $vault != "" { $vault } else { $env.LAPIS_VAULT? | default "" }
-  if $v == "" { [] } else { ["--vault" $v] }
+  if $v == "" { [] } else { [$"--vault=($v)"] }
 }
 
+# One argv. A separate `$flag $value` lets clap read a leading `-` as a flag.
 def with-opt [args: list<string>, flag: string, value: string] {
-  if ($value | is-empty) { $args } else { $args ++ [$flag $value] }
+  if ($value | is-empty) { $args } else { $args ++ [$"($flag)=($value)"] }
 }
 
 def with-switch [args: list<string>, flag: string, on: bool] {
@@ -36,8 +41,36 @@ def with-switch [args: list<string>, flag: string, on: bool] {
 
 def with-repeat [args: list<string>, flag: string, values: list<string>] {
   if ($values | is-empty) { $args } else {
-    $values | reduce -f $args {|v, acc| $acc ++ [$flag $v] }
+    $values | reduce -f $args {|v, acc| $acc ++ [$"($flag)=($v)"] }
   }
+}
+
+def usage [command: string, error: string] {
+  {
+    ok: false
+    command: $command
+    error: $error
+    stderr: ""
+    exit: 1
+    kind: "usage"
+  }
+}
+
+def missing-lapis [command: string, detail: string] {
+  {
+    ok: false
+    command: $command
+    error: "lapis is not on PATH"
+    stderr: ($detail | str substring 0..<400)
+    exit: 127
+    kind: "missing_lapis"
+  }
+}
+
+# Print the envelope and exit with its code (0 when the field is absent).
+def finish [e: record] {
+  print ($e | to json)
+  exit ($e.exit? | default 0)
 }
 
 # `vault info` and `doctor` print a report and, when the index is down, a
@@ -54,28 +87,51 @@ def json-docs [text: string] {
   }
 }
 
+def lapis-missing [stderr: string, stdout: string, code: int] {
+  $code != 0 and ($stdout | is-empty) and (
+    ($stderr | str contains "not found")
+    or ($stderr | str contains "External command failed")
+    or ($stderr | str contains "No such file")
+    or ($stderr | str contains "no such file")
+  )
+}
+
 # Always passes `--json`. On failure the envelope carries the CLI exit code
 # and stderr (both trimmed to 400 chars for the message fields).
 def envelope [command: string, args: list<string>, vault: string] {
-  let r = (^lapis --json ...(vault-args $vault) ...$args | complete)
-  let docs = (json-docs $r.stdout)
+  let r = (try {
+    ^lapis --json ...(vault-args $vault) ...$args | complete
+  } catch {|err|
+    {
+      exit_code: 127
+      stdout: ""
+      stderr: ($err.msg? | default "Command lapis not found")
+      missing: true
+    }
+  })
+  let stderr = ($r.stderr? | default "" | str trim)
+  let stdout = ($r.stdout? | default "" | str trim)
+  let code = ($r.exit_code? | default 127)
+  if ($r.missing? | default false) or (lapis-missing $stderr $stdout $code) {
+    return (missing-lapis $command $stderr)
+  }
+  let docs = (json-docs $stdout)
   let good = ($docs | where {|d| ($d.ok? | default false)})
   let bad = ($docs | where {|d| not ($d.ok? | default false)})
-  if $r.exit_code == 0 and not ($good | is-empty) {
+  if $code == 0 and not ($good | is-empty) {
     { ok: true, command: $command, data: ($good | first | get data?) }
   } else {
     let from_cli = if ($bad | is-empty) { "" } else {
       $bad | last | get error?.message? | default ""
     }
-    let stderr = ($r.stderr | str trim)
-    let raw = ([$stderr $r.stdout] | str join " " | str trim)
+    let raw = ([$stderr $stdout] | str join " " | str trim)
     let msg = if ($from_cli | is-empty) { $raw } else { $from_cli }
     mut out = {
       ok: false
       command: $command
       error: ($msg | str substring 0..<400)
       stderr: ($stderr | str substring 0..<400)
-      exit: $r.exit_code
+      exit: $code
     }
     if not ($good | is-empty) {
       $out = ($out | upsert data ($good | first | get data?))
@@ -84,42 +140,71 @@ def envelope [command: string, args: list<string>, vault: string] {
   }
 }
 
-def "main search" [
-  query: string
-  --limit (-n): int = 5
-  --domain: string = ""
-  --vault: string = ""
-] {
-  mut a = ["search" "--per-doc" "--limit" ($limit | into string)]
-  if $domain != "" { $a = ($a ++ ["--domain" $domain]) }
-  $a = ($a ++ ["--" $query])
-  let e = (envelope "search" $a $vault)
-  if not $e.ok { return ($e | to json) }
-  let hits = ($e.data?.hits? | default [])
-  let rows = if ($hits | is-empty) { [] } else { $hits | select path title }
-  $e | upsert data $rows | to json
+def hit-row [h: record] {
+  {
+    path: ($h.path? | default null)
+    title: ($h.title? | default null)
+    score: ($h.score? | default null)
+    snippet: ($h.snippet? | default null)
+  }
 }
 
-def "main read" [path: string, --vault: string = ""] {
-  envelope "read" ["read" "--" $path] $vault | to json
+def "main search" [
+  --limit (-n): string = "5"
+  --domain: string = ""
+  --vault: string = ""
+  ...query: string
+] {
+  if ($query | is-empty) {
+    finish (usage "search" "query required")
+  } else {
+    let q = ($query | str join " ")
+    mut a = ["search" "--per-doc" $"--limit=($limit)"]
+    $a = (with-opt $a "--domain" $domain)
+    $a = ($a ++ ["--" $q])
+    let e = (envelope "search" $a $vault)
+    if not $e.ok {
+      finish $e
+    } else {
+      let hits = ($e.data?.hits? | default [])
+      let rows = ($hits | each {|h| hit-row $h })
+      finish ($e | upsert data $rows)
+    }
+  }
+}
+
+def "main read" [--vault: string = "", ...path: string] {
+  if ($path | length) != 1 {
+    finish (usage "read" "path required")
+  } else {
+    finish (envelope "read" ["read" "--" ($path | first)] $vault)
+  }
 }
 
 def "main list" [
   --prefix: string = ""
-  --limit (-n): int = 50
+  --limit (-n): string = "50"
   --vault: string = ""
 ] {
-  mut a = ["list" "--limit" ($limit | into string)]
+  mut a = ["list" $"--limit=($limit)"]
   if $prefix != "" { $a = ($a ++ ["--" $prefix]) }
-  envelope "list" $a $vault | to json
+  finish (envelope "list" $a $vault)
 }
 
-def "main neighbors" [path: string, --vault: string = ""] {
-  envelope "neighbors" ["neighbors" "--" $path] $vault | to json
+def "main neighbors" [--vault: string = "", ...path: string] {
+  if ($path | length) != 1 {
+    finish (usage "neighbors" "path required")
+  } else {
+    finish (envelope "neighbors" ["neighbors" "--" ($path | first)] $vault)
+  }
 }
 
-def "main resolve" [link: string, --vault: string = ""] {
-  envelope "resolve" ["resolve" "--" $link] $vault | to json
+def "main resolve" [--vault: string = "", ...link: string] {
+  if ($link | is-empty) {
+    finish (usage "resolve" "link required")
+  } else {
+    finish (envelope "resolve" ["resolve" "--" ($link | str join " ")] $vault)
+  }
 }
 
 # `analytics recent` names its cells in `columns`. 0.4.2 is
@@ -132,16 +217,28 @@ def recent-row [columns: list, row: list] {
   { path: ($rec.path? | default null), title: ($rec.title? | default null), mtime: $when }
 }
 
-def "main recent" [--limit (-n): int = 10, --vault: string = ""] {
-  let e = (envelope "recent" ["analytics" "recent"] $vault)
-  if not $e.ok { return ($e | to json) }
-  let cols = ($e.data?.columns? | default [])
-  let rows = ($e.data?.rows? | default [] | take $limit | each {|r| recent-row $cols $r })
-  $e | upsert data $rows | to json
+def "main recent" [--limit (-n): string = "10", --vault: string = ""] {
+  let n = (try { $limit | into int } catch { null })
+  if $n == null {
+    finish (usage "recent" "limit must be an integer")
+  } else {
+    let e = (envelope "recent" ["analytics" "--" "recent"] $vault)
+    if not $e.ok {
+      finish $e
+    } else {
+      let cols = ($e.data?.columns? | default [])
+      let rows = ($e.data?.rows? | default [] | take $n | each {|r| recent-row $cols $r })
+      finish ($e | upsert data $rows)
+    }
+  }
 }
 
-def "main analytics" [query: string, --vault: string = ""] {
-  envelope "analytics" ["analytics" $query] $vault | to json
+def "main analytics" [--vault: string = "", ...query: string] {
+  if ($query | is-empty) {
+    finish (usage "analytics" "query required")
+  } else {
+    finish (envelope "analytics" ["analytics" "--" ($query | str join " ")] $vault)
+  }
 }
 
 def "main tree-retrieve" [
@@ -156,19 +253,19 @@ def "main tree-retrieve" [
   $a = (with-opt $a "--query" $query)
   $a = (with-opt $a "--depth" $depth)
   $a = (with-opt $a "--max-nodes" $max_nodes)
-  envelope "tree-retrieve" $a $vault | to json
+  finish (envelope "tree-retrieve" $a $vault)
 }
 
 def "main status" [--vault: string = ""] {
-  envelope "status" ["vault" "info"] $vault | to json
+  finish (envelope "status" ["vault" "info"] $vault)
 }
 
 def "main doctor" [--vault: string = ""] {
-  envelope "doctor" ["doctor"] $vault | to json
+  finish (envelope "doctor" ["doctor"] $vault)
 }
 
 def "main create" [
-  --title: string
+  --title: string = ""
   --path: string = ""
   --template: string = ""
   --type: string = ""
@@ -180,34 +277,44 @@ def "main create" [
   --no-reindex
   --vault: string = ""
 ] {
-  mut a = ["create" "--title" $title]
-  $a = (with-opt $a "--path" $path)
-  $a = (with-opt $a "--template" $template)
-  $a = (with-opt $a "--type" $type)
-  $a = (with-opt $a "--domain" $domain)
-  $a = (with-repeat $a "--tag" $tag)
-  $a = (with-opt $a "--body" $body)
-  $a = (with-opt $a "--director" $director)
-  $a = (with-switch $a "--dry-run" $dry_run)
-  $a = (with-switch $a "--no-reindex" $no_reindex)
-  envelope "create" $a $vault | to json
+  if ($title | is-empty) {
+    finish (usage "create" "title required")
+  } else {
+    mut a = ["create" $"--title=($title)"]
+    $a = (with-opt $a "--path" $path)
+    $a = (with-opt $a "--template" $template)
+    $a = (with-opt $a "--type" $type)
+    $a = (with-opt $a "--domain" $domain)
+    $a = (with-repeat $a "--tag" $tag)
+    $a = (with-opt $a "--body" $body)
+    $a = (with-opt $a "--director" $director)
+    $a = (with-switch $a "--dry-run" $dry_run)
+    $a = (with-switch $a "--no-reindex" $no_reindex)
+    finish (envelope "create" $a $vault)
+  }
 }
 
 def "main append" [
-  path: string
-  text: string
   --dry-run
   --if-mtime: string = ""
   --if-hash: string = ""
   --no-reindex
   --vault: string = ""
+  ...rest: string
 ] {
-  mut a = ["append" $path $text]
-  $a = (with-switch $a "--dry-run" $dry_run)
-  $a = (with-opt $a "--if-mtime" $if_mtime)
-  $a = (with-opt $a "--if-hash" $if_hash)
-  $a = (with-switch $a "--no-reindex" $no_reindex)
-  envelope "append" $a $vault | to json
+  if ($rest | length) < 2 {
+    finish (usage "append" "path and text required")
+  } else {
+    let path = ($rest | first)
+    let text = ($rest | skip 1 | str join " ")
+    mut a = ["append"]
+    $a = (with-switch $a "--dry-run" $dry_run)
+    $a = (with-opt $a "--if-mtime" $if_mtime)
+    $a = (with-opt $a "--if-hash" $if_hash)
+    $a = (with-switch $a "--no-reindex" $no_reindex)
+    $a = ($a ++ ["--" $path $text])
+    finish (envelope "append" $a $vault)
+  }
 }
 
 def "main task list" [
@@ -228,39 +335,55 @@ def "main task list" [
   $a = (with-opt $a "--status" $status)
   $a = (with-opt $a "--due" $due)
   $a = (with-opt $a "--tag" $tag)
-  envelope "task list" $a $vault | to json
+  finish (envelope "task list" $a $vault)
 }
 
 def "main task toggle" [
-  id: string
   --dry-run
   --if-mtime: string = ""
   --if-hash: string = ""
   --no-reindex
   --vault: string = ""
+  ...id: string
 ] {
-  mut a = ["task" "toggle" $id]
-  $a = (with-switch $a "--dry-run" $dry_run)
-  $a = (with-opt $a "--if-mtime" $if_mtime)
-  $a = (with-opt $a "--if-hash" $if_hash)
-  $a = (with-switch $a "--no-reindex" $no_reindex)
-  envelope "task toggle" $a $vault | to json
+  if ($id | length) != 1 {
+    finish (usage "task toggle" "id required")
+  } else {
+    mut a = ["task" "toggle"]
+    $a = (with-switch $a "--dry-run" $dry_run)
+    $a = (with-opt $a "--if-mtime" $if_mtime)
+    $a = (with-opt $a "--if-hash" $if_hash)
+    $a = (with-switch $a "--no-reindex" $no_reindex)
+    $a = ($a ++ ["--" ($id | first)])
+    finish (envelope "task toggle" $a $vault)
+  }
 }
 
 def "main tome tree" [
-  doc: string
   --node: string = ""
   --depth: string = ""
   --vault: string = ""
+  ...doc: string
 ] {
-  mut a = ["tome" "tree" $doc]
-  $a = (with-opt $a "--node" $node)
-  $a = (with-opt $a "--depth" $depth)
-  envelope "tome tree" $a $vault | to json
+  if ($doc | is-empty) {
+    finish (usage "tome tree" "doc required")
+  } else {
+    mut a = ["tome" "tree"]
+    $a = (with-opt $a "--node" $node)
+    $a = (with-opt $a "--depth" $depth)
+    $a = ($a ++ ["--" ($doc | str join " ")])
+    finish (envelope "tome tree" $a $vault)
+  }
 }
 
-def "main tome open" [doc: string, ...nodes: string, --vault: string = ""] {
-  envelope "tome open" (["tome" "open" $doc] ++ $nodes) $vault | to json
+def "main tome open" [--vault: string = "", ...rest: string] {
+  if ($rest | is-empty) {
+    finish (usage "tome open" "doc required")
+  } else {
+    let doc = ($rest | first)
+    let nodes = ($rest | skip 1)
+    finish (envelope "tome open" (["tome" "open" "--" $doc] ++ $nodes) $vault)
+  }
 }
 
 def main [] { help main }

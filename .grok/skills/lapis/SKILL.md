@@ -12,6 +12,8 @@ description: >
 `lapis.nu` beside this file. Needs `nu` and `lapis` on `PATH`. Every command
 takes `--vault` (else `$LAPIS_VAULT`, else the path `lapis init` recorded).
 Prints `{ ok, command, data }` or `{ ok: false, command, error, stderr, exit }`.
+On failure the process exits with that `exit` code. Search rows keep `path`,
+`title`, `score`, and `snippet`.
 
 ```bash
 nu lapis.nu search "phrase" --limit 5 [--domain d]

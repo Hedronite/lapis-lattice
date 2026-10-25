@@ -16,10 +16,16 @@ Crate `repository` and `homepage` are
   The same bytes are regular files under `.claude/skills/lapis/`,
   `.grok/skills/lapis/`, and `.cursor/skills/lapis/`. `scripts/sync-skills`
   rewrites the copies. There is no root `skills/` tree.
+- The skill maps 14 of the 16 MCP tools. The default server exposes 14;
+  `tome_tree` and `tome_open` register only with `--features tome` and
+  `LAPIS_TOME=1`. `health` and `search_and_read` have no CLI command.
+  `lapis_edit` is not in this tree; it is a gap only after that tool exists.
 - The skill wraps the existing CLI for `analytics`, `tree-retrieve`,
   `create`, `append`, `task list`, `task toggle`, `tome tree`, and
-  `tome open` (`--features tome`). `health` and `search_and_read` have no
-  CLI command, so the skill does not invent one.
+  `tome open` (`--features tome`). Search rows keep `path`, `title`,
+  `score`, and `snippet`. A failing command exits with the envelope's
+  `exit` code. Values that start with `-` are passed after `--` or as
+  `--flag=value`.
 
 ### Jev rerank
 
