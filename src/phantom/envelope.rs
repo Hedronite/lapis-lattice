@@ -1,6 +1,6 @@
 //! Inbound Phantom envelope (G3), parsed with local serde types.
 //!
-//! Shape from Phantom SPEC §9 and the G1 proto at Hedronite/phantom `2063a55`:
+//! Shape from Phantom SPEC §9 and Phantom's G1 proto at `2063a55`:
 //! `{ok, data, error: {kind, message, exit} | null, meta}`. Unknown fields are
 //! ignored on every object (no `deny_unknown_fields`), as §9 promises they are
 //! additive. This is not `crate::envelope`, which is Lapis's own outbound shape.

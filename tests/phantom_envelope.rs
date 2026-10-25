@@ -1,6 +1,6 @@
 //! G0c, G3a-G3c, T1-T2: the re-check before spawn, the inbound envelope, exits,
 //! and what Lapis refuses to do with Phantom's JSON. Envelope fixtures follow
-//! Phantom SPEC §9 and the G1 proto at Hedronite/phantom `2063a55`
+//! Phantom SPEC §9 and Phantom's G1 proto at `2063a55`
 //! (`crates/phantom-fractal-proto/src/lib.rs`). Phantom runs as stub scripts.
 
 #![cfg(unix)]
