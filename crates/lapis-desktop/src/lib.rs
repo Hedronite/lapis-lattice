@@ -14,8 +14,10 @@
 //! * [`run`]: opens the GPUI window when built with the `gpui` feature, else
 //!   returns [`DesktopError::NotBuilt`]. Window code lives in `window.rs`.
 
+mod code_graph;
 pub mod graph_data;
 pub mod html;
+pub use code_graph::{CodeGraphOverlay, PHANTOM_NOT_FOUND};
 pub mod live;
 mod motion;
 pub mod panes;
@@ -62,6 +64,10 @@ pub struct Options {
     /// it, the window opens on the whole indexed vault.
     pub seed: Option<String>,
     pub title: String,
+    /// Phantom binary for the code graph. `None` is an empty overlay and the
+    /// line [`PHANTOM_NOT_FOUND`], and does not start a process. `Some` is
+    /// not executed in this step.
+    pub phantom_binary: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -116,6 +122,7 @@ mod tests {
             lattice_url: "http://127.0.0.1:8080".into(),
             seed: None,
             title: "t".into(),
+            phantom_binary: None,
         };
         let p = preflight(&o);
         assert_eq!(p.gpui_available, cfg!(feature = "gpui"));

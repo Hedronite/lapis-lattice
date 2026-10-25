@@ -253,6 +253,25 @@ impl Render for Workspace {
                     })),
             );
         let mut content = div().flex_1().min_h_0().min_w_0().flex().flex_col().child(navigation).child(tabs);
+        if self.code_graph.is_empty() {
+            // Empty code-graph overlay. No nodes, no dialog, no process.
+            content = content.child(
+                div()
+                    .id("code-graph-overlay")
+                    .role(Role::Status)
+                    .aria_label(crate::PHANTOM_NOT_FOUND)
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .h(px(72.))
+                    .flex_shrink_0()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_color(theme.secondary)
+                    .child(crate::PHANTOM_NOT_FOUND),
+            );
+        }
         if self.graph_visible {
             if let Some(graph) = &self.graph {
                 content = content.child(div().flex_1().min_h_0().child(graph.clone()));
