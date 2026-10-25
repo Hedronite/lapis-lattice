@@ -91,22 +91,29 @@ pub(super) fn render(this: &Workspace, cx: &mut Context<Workspace>) -> impl Into
         .overflow_y_scroll()
         .border_l_1()
         .border_color(theme.border)
+        .bg(theme.inset)
         .p_4()
         .text_sm()
-        .child(div().text_color(theme.accent).child("Document context"));
+        .child(super::chrome::section("CONTEXT", &theme));
     let Some(tab) = this.tabs.get(this.active) else {
         return content.child("Open a document to see its context.");
     };
-    content = content.child(div().mt_2().text_color(theme.secondary).child(tab.document.path.clone())).child(
-        div()
-            .id("context-refresh")
-            .role(Role::Button)
-            .aria_label("Refresh document links")
-            .mt_3()
-            .cursor_pointer()
-            .child("Refresh links")
-            .on_click(cx.listener(|this, _, w, cx| this.refresh_context(true, w, cx))),
-    );
+    content = content
+        .child(div().mt_1().text_color(theme.bright).child(tab.document.title.clone()))
+        .child(div().mt_0p5().text_xs().text_color(theme.secondary).child(tab.document.path.clone()))
+        .child(
+            div()
+                .id("context-refresh")
+                .role(Role::Button)
+                .aria_label("Refresh document links")
+                .mt_3()
+                .cursor_pointer()
+                .text_xs()
+                .text_color(theme.secondary)
+                .hover(|s| s.text_color(theme.accent))
+                .child("↻ Refresh links")
+                .on_click(cx.listener(|this, _, w, cx| this.refresh_context(true, w, cx))),
+        );
     if panel.loading {
         content = content.child(div().mt_3().child("Loading links…"));
     } else if let Some(result) = &panel.links {
@@ -119,17 +126,25 @@ pub(super) fn render(this: &Workspace, cx: &mut Context<Workspace>) -> impl Into
             }
             Ok(links) => {
                 for (label, direction) in [("Backlinks", "in"), ("Outgoing links", "out")] {
-                    content = content.child(div().mt_4().text_color(theme.accent).child(label));
+                    content =
+                        content.child(super::chrome::section(label.to_uppercase(), &theme).mt_5().mb_1());
                     let mut count = 0;
                     for (i, link) in links.iter().enumerate().filter(|(_, l)| l.direction == direction) {
                         count += 1;
-                        let mut row = div().id(("context-link", i)).mt_2().child(link.label.clone());
+                        let mut row = div()
+                            .id(("context-link", i))
+                            .px_2()
+                            .py_1()
+                            .mx(px(-8.))
+                            .rounded(px(6.))
+                            .child(link.label.clone());
                         if let Some(path) = &link.path {
                             let path = path.clone();
                             row = row
                                 .role(Role::Button)
                                 .aria_label(format!("Open link {path}"))
                                 .cursor_pointer()
+                                .hover(|s| s.bg(theme.hover_fill()).text_color(theme.bright))
                                 .on_click(
                                     cx.listener(move |this, _, w, cx| this.open_file(path.clone(), w, cx)),
                                 );
@@ -150,9 +165,10 @@ pub(super) fn render(this: &Workspace, cx: &mut Context<Workspace>) -> impl Into
             .id("context-tree")
             .role(Role::Button)
             .aria_label("Retrieve related tree")
-            .mt_4()
+            .mt_5()
             .cursor_pointer()
             .text_color(theme.accent)
+            .hover(|s| s.text_color(theme.bright))
             .child(if panel.tree_loading { "Retrieving tree…" } else { "Traverse related tree" })
             .on_click(cx.listener(|this, _, w, cx| this.context_tree(w, cx))),
     );
@@ -182,9 +198,14 @@ pub(super) fn render(this: &Workspace, cx: &mut Context<Workspace>) -> impl Into
             }
         }
     }
-    content.child(div().mt_5().text_color(theme.accent).child("Properties")).child(
+    content.child(super::chrome::section("PROPERTIES", &theme).mt_5()).child(
         div()
             .mt_2()
+            .p_2()
+            .rounded(px(6.))
+            .bg(theme.background)
+            .font_family(crate::theme::MONO)
+            .text_xs()
             .text_color(theme.secondary)
             .child(serde_json::to_string_pretty(&tab.document.properties).unwrap_or_default()),
     )

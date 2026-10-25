@@ -27,6 +27,8 @@ pub mod scene;
 pub mod services;
 pub mod session;
 pub mod sim;
+#[cfg(feature = "gpui")]
+mod theme;
 pub mod view;
 pub mod vim;
 

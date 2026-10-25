@@ -1,5 +1,6 @@
 //! Native notes shell. Files load independently from the optional graph/index.
 
+mod chrome;
 mod command;
 mod context;
 mod document;
@@ -87,6 +88,8 @@ struct Workspace {
     pane_errors: std::collections::BTreeMap<String, String>,
     palette: Option<palette::Palette>,
     menu: Option<menu::Menu>,
+    /// The palette or menu result list; only one is open at a time.
+    list_scroll: gpui_kit::ScrollHandle,
     query_epoch: u64,
     indexing: bool,
     register: crate::vim::Register,
@@ -130,6 +133,7 @@ impl Workspace {
             pane_errors: Default::default(),
             palette: None,
             menu: None,
+            list_scroll: gpui_kit::ScrollHandle::new(),
             query_epoch: 0,
             indexing: false,
             register: crate::vim::Register::default(),
@@ -496,10 +500,12 @@ impl Workspace {
                 "down" => {
                     let p = self.palette.as_mut().unwrap();
                     p.selected = (p.selected + 1).min(p.hits.len().saturating_sub(1));
+                    self.list_scroll.scroll_to_item(p.selected);
                 }
                 "up" => {
                     let p = self.palette.as_mut().unwrap();
                     p.selected = p.selected.saturating_sub(1);
+                    self.list_scroll.scroll_to_item(p.selected);
                 }
                 _ => return,
             }
@@ -612,6 +618,7 @@ pub fn open(opts: Options, services: Arc<dyn WorkspaceServices>) -> Result<(), D
     let code_graph = crate::CodeGraphOverlay::from_options(&opts);
     gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx: &mut App| {
         gpui_omarchy::init(cx);
+        crate::theme::init(cx);
         init_workspace(cx);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
