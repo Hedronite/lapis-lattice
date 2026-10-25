@@ -32,17 +32,19 @@ No hosted notes service. Files are the source of truth.
 |---|---|---|
 | **TUI** | you | Vim, preview, tasks, Kanban, dailies, templates, hop-1 graph pane |
 | **CLI** | scripts and agents | `lapis --json` |
-| **Skill** | coding agents (default) | `skills/lapis/` over `lapis --json` |
+| **Skill** | coding agents (default) | `.agents/skills/lapis/` over `lapis --json` |
 | **MCP** | harnesses that defer tool schemas, or have no shell | `lapis mcp` over stdio |
 | **Desktop** | Linux / Omarchy | `lapis desktop` — off in the default CLI asset. The Linux desktop asset paints hop-1/hop-2 (gpui-omarchy). |
 
 ## Agent use: skills + CLI first, MCP still shipped
 
 The default way for an agent to use Lapis is the bundled skill in
-`skills/lapis/`: a short `SKILL.md` the harness reads to decide when to use
+`.agents/skills/lapis/`: a short `SKILL.md` the harness reads to decide when to use
 it, plus a Nushell body (`lapis.nu`) that calls `lapis --json`. The body needs
-`nu` and `lapis` on `PATH`. The MCP server (`lapis mcp`) is still built and
-shipped, and works the same as before.
+`nu` and `lapis` on `PATH`. The same bytes are regular files at
+`.claude/skills/lapis/`, `.grok/skills/lapis/`, and `.cursor/skills/lapis/`.
+`scripts/sync-skills` rewrites those copies from `.agents/skills/`. The MCP
+server (`lapis mcp`) is still built and shipped, and works the same as before.
 
 Why the skill is the default:
 
@@ -59,8 +61,9 @@ Use the MCP server when your harness defers or filters MCP tool schemas
 (loading them only on demand, or letting you enable single tools), or when
 the client has no shell.
 
-Install the skill by copying or linking `skills/lapis/` into your harness's
-skills directory (for example `~/.agents/skills/` or `~/.claude/skills/`).
+A checkout already has the project copies. To install the skill for every
+project on one machine, copy `.agents/skills/lapis/` into a user skills
+directory (for example `~/.agents/skills/` or `~/.claude/skills/`).
 
 ## Install
 
@@ -122,7 +125,7 @@ lapis --vault ~/Notes --json list
 lapis --vault ~/Notes doctor
 ```
 
-Coding agents with a shell should use the skill in `skills/lapis/` (see Agent use, above). This stdio config is for harnesses that talk MCP:
+Coding agents with a shell should use the skill in `.agents/skills/lapis/` (see Agent use, above). This stdio config is for harnesses that talk MCP:
 
 ```json
 { "mcpServers": { "lapis": { "command": "lapis", "args": ["mcp"] } } }
@@ -132,7 +135,7 @@ Coding agents with a shell should use the skill in `skills/lapis/` (see Agent us
 
 | Works today | Not yet |
 |---|---|
-| TUI (files / editor / tasks), JSON CLI envelope, skill (`skills/lapis/`), MCP | Windows |
+| TUI (files / editor / tasks), JSON CLI envelope, skill (`.agents/skills/lapis/`), MCP | Windows |
 | Embedded CLI search / list / hop-1 / doctor (no `:8080`) | Homebrew tap / formula; macOS Developer ID + notarization |
 | `lapis search … --rerank-jev` (shadow Jev gate; Facet TypeSafe) | TUI palette Jev rerank |
 | Tasks, dailies, templates (`note`, `daily`, `weekly`, `monthly`, `adr`) | Hop-2 ego and `tree-retrieve` on the embedded default (honest HTTP-required) |

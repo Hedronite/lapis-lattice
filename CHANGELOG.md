@@ -10,6 +10,13 @@ notes for the next tag. The tag, GitHub Release, and `cargo publish` of
 Crate `repository` and `homepage` are
 `https://github.com/Hedronite/lapis-lattice`.
 
+### Agent skill
+
+- The vault skill is `.agents/skills/lapis/` (`SKILL.md` plus `lapis.nu`).
+  The same bytes are regular files under `.claude/skills/lapis/`,
+  `.grok/skills/lapis/`, and `.cursor/skills/lapis/`. `scripts/sync-skills`
+  rewrites the copies. There is no root `skills/` tree.
+
 ### Jev rerank
 
 - `lapis search … --rerank-jev` (MCP `search.rerank_jev`): post-retrieve

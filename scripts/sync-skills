@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Rewrite the harness skill trees from .agents/skills.
+# Each copy is a regular file. A symlink in the canonical tree is an error.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$root"
+
+canon=".agents/skills"
+dests=(.claude/skills .grok/skills .cursor/skills)
+
+if [[ ! -d "$canon" ]]; then
+  echo "sync-skills: missing $canon" >&2
+  exit 1
+fi
+
+links="$(find "$canon" -type l || true)"
+if [[ -n "$links" ]]; then
+  echo "sync-skills: $canon contains a symlink" >&2
+  printf '%s\n' "$links" >&2
+  exit 1
+fi
+
+for dest in "${dests[@]}"; do
+  rm -rf "$dest"
+  mkdir -p "$dest"
+  cp -R "$canon/." "$dest/"
+done
