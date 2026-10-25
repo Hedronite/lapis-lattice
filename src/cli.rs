@@ -489,7 +489,8 @@ pub struct DesktopArgs {
     #[arg(long, value_name = "PATH")]
     pub path: Option<String>,
 
-    /// Report whether the GPUI shell is available, then exit.
+    /// Report whether the GPUI shell is available and where `phantom-fractal`
+    /// was found (`PATH`, then `$LAPIS_PHANTOM_BINARY`), then exit.
     #[arg(long)]
     pub check: bool,
 }
