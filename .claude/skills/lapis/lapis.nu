@@ -20,6 +20,8 @@
 #   doctor        lapis doctor
 #   create        lapis create --title=T [--body=TEXT] [--dry-run] …
 #   append        lapis append [--dry-run] [--if-mtime=MS] [--if-hash=HASH] -- PATH TEXT
+#   replace       lapis replace [--dry-run] [--if-mtime=MS] [--if-hash=HASH] [--no-reindex] --old=OLD (--new=NEW | --stdin) -- PATH
+#   insert        lapis insert [--dry-run] [--if-mtime=MS] [--if-hash=HASH] [--no-reindex] (--after=A | --before=A) (--text=T | --stdin) -- PATH
 #   tome build    lapis tome build [--force] [--allow-windows] -- PDF…
 #   task list     lapis task list [--path=P] [--full] …
 #   task toggle   lapis task toggle [--dry-run] [--if-mtime=MS] [--if-hash=HASH] -- ID
@@ -138,6 +140,20 @@ def envelope [command: string, args: list<string>, vault: string] {
     if not ($good | is-empty) {
       $out = ($out | upsert data ($good | first | get data?))
     }
+    # Copy the CLI error fields as they arrived. Do not rename them.
+    if not ($bad | is-empty) {
+      let cli_err = ($bad | last | get error?)
+      if $cli_err != null {
+        let k = ($cli_err.kind? | default null)
+        if $k != null {
+          $out = ($out | upsert kind $k)
+        }
+        let m = ($cli_err.matches? | default null)
+        if $m != null {
+          $out = ($out | upsert matches $m)
+        }
+      }
+    }
     # Clap prints text and exits 1 before `--json` can emit an envelope.
     if $code == 1 and ($docs | is-empty) {
       $out = ($out | upsert kind "usage")
@@ -216,6 +232,20 @@ def parse-args [
 
 def flag-on [on: list<string>, name: string] {
   $on | any {|s| $s == $name }
+}
+
+def flag-set [values: record, name: string] {
+  $name in ($values | columns)
+}
+
+# Pass the flag even when the value is empty. `with-opt` drops empty strings,
+# and an empty `--new` is a real delete.
+def with-set [args: list<string>, values: record, flag: string] {
+  if (flag-set $values $flag) {
+    $args ++ [$"($flag)=($values | get $flag)"]
+  } else {
+    $args
+  }
 }
 
 def hit-row [h: record] {
@@ -406,6 +436,78 @@ def --wrapped "main append" [...args: string] {
     $a = ($a ++ ["--" $path $text])
   }
   finish (envelope "append" $a $vault)
+}
+
+def --wrapped "main replace" [...args: string] {
+  let p = (parse-args "replace" $args ["--dry-run" "--no-reindex" "--stdin"] ["--old" "--new" "--if-hash" "--if-mtime" "--vault"])
+  if not $p.ok { finish $p }
+  let stdin = (flag-on $p.on "--stdin")
+  let has_new = (flag-set $p.values "--new")
+  if not (flag-set $p.values "--old") {
+    finish (usage "replace" "--old required")
+  }
+  if $stdin and $has_new {
+    finish (usage "replace" "--stdin and --new both set")
+  }
+  if (not $stdin) and (not $has_new) {
+    finish (usage "replace" "pass --new or --stdin")
+  }
+  if ($p.pos | length) != 1 {
+    finish (usage "replace" "path required")
+  }
+  let vault = ($p.values."--vault"? | default "")
+  mut a = ["replace"]
+  $a = (with-switch $a "--dry-run" (flag-on $p.on "--dry-run"))
+  $a = (with-set $a $p.values "--if-mtime")
+  $a = (with-set $a $p.values "--if-hash")
+  $a = (with-switch $a "--no-reindex" (flag-on $p.on "--no-reindex"))
+  $a = (with-set $a $p.values "--old")
+  if $stdin {
+    $a = ($a ++ ["--stdin" "--" ($p.pos | first)])
+  } else {
+    $a = (with-set $a $p.values "--new")
+    $a = ($a ++ ["--" ($p.pos | first)])
+  }
+  finish (envelope "replace" $a $vault)
+}
+
+def --wrapped "main insert" [...args: string] {
+  let p = (parse-args "insert" $args ["--dry-run" "--no-reindex" "--stdin"] ["--after" "--before" "--text" "--if-hash" "--if-mtime" "--vault"])
+  if not $p.ok { finish $p }
+  let has_after = (flag-set $p.values "--after")
+  let has_before = (flag-set $p.values "--before")
+  if ($has_after and $has_before) or (not $has_after and not $has_before) {
+    finish (usage "insert" "pass exactly one of --after or --before")
+  }
+  let stdin = (flag-on $p.on "--stdin")
+  let has_text = (flag-set $p.values "--text")
+  if $stdin and $has_text {
+    finish (usage "insert" "--stdin and --text both set")
+  }
+  if (not $stdin) and (not $has_text) {
+    finish (usage "insert" "pass --text or --stdin")
+  }
+  if ($p.pos | length) != 1 {
+    finish (usage "insert" "path required")
+  }
+  let vault = ($p.values."--vault"? | default "")
+  mut a = ["insert"]
+  $a = (with-switch $a "--dry-run" (flag-on $p.on "--dry-run"))
+  $a = (with-set $a $p.values "--if-mtime")
+  $a = (with-set $a $p.values "--if-hash")
+  $a = (with-switch $a "--no-reindex" (flag-on $p.on "--no-reindex"))
+  if $has_before {
+    $a = (with-set $a $p.values "--before")
+  } else {
+    $a = (with-set $a $p.values "--after")
+  }
+  if $stdin {
+    $a = ($a ++ ["--stdin" "--" ($p.pos | first)])
+  } else {
+    $a = (with-set $a $p.values "--text")
+    $a = ($a ++ ["--" ($p.pos | first)])
+  }
+  finish (envelope "insert" $a $vault)
 }
 
 def "main task list" [

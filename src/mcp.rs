@@ -41,7 +41,8 @@ Lapis: a local Markdown notes vault with Lapis Lattice retrieval.
 11. `search_and_read` returns top hits with HAL meta and a body snippet in one call; `read_note` takes heading / chunk / max_chars.
 12. Notes are also resources: `lapis://note/{path}` (body as text/markdown). `resolve_link` maps a [[wikilink]] or dst_raw to a path.
 13. `neighbors` with hop=2 returns the ego graph (rows carry depth and via). `tree_retrieve` walks hub-first from a seed or a query. `analytics` runs named read-only queries over the index (inventory, priority, tags, health, recent, hubs, density, degree, dangling).
-14. `search.rerank_jev` is a shadow Jev gate over the returned hits (Facet TypeSafe recipe). Empty/uncertain ≠ approve; it does not replace BM25/embed.";
+14. `search.rerank_jev` is a shadow Jev gate over the returned hits (Facet TypeSafe recipe). Empty/uncertain ≠ approve; it does not replace BM25/embed.
+15. Change note text with `lapis_edit` (mode replace | insert_after | insert_before) and `if_hash` from `read_note`. Do not write the file or sqlite yourself.";
 
 pub const NOTE_URI_PREFIX: &str = "lapis://note/";
 
@@ -59,6 +60,13 @@ pub struct LapisServer {
 fn fail(e: LapisError) -> ErrorData {
     let msg = e.to_string();
     match e {
+        LapisError::Edit { kind, matches, .. } => {
+            let mut data = json!({ "kind": kind.as_str(), "exit": kind.exit() });
+            if let Some(n) = matches {
+                data["matches"] = json!(n);
+            }
+            ErrorData::invalid_params(msg, Some(data))
+        }
         LapisError::Usage(_) | LapisError::Path(_) | LapisError::HttpOnly { .. } => {
             ErrorData::invalid_params(msg, None)
         }
@@ -251,6 +259,32 @@ pub struct AppendArg {
     pub if_hash: Option<String>,
 }
 
+/// `lapis_edit.mode`. Serialized as `replace`, `insert_after`, `insert_before`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EditMode {
+    Replace,
+    InsertAfter,
+    InsertBefore,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct EditArg {
+    /// Vault-relative note path.
+    pub path: String,
+    pub mode: EditMode,
+    /// Literal that must match the body once. Raw bytes; overlaps count. Anchor when inserting.
+    pub old: String,
+    /// Replacement, or the text inserted at the anchor. Empty deletes on replace.
+    pub new: String,
+    /// Diff only. Does not write or reindex. `newHash` excludes the `updated:` bump.
+    pub dry_run: Option<bool>,
+    /// Refuse unless `updatedAt` (ms) still matches.
+    pub if_mtime: Option<u64>,
+    /// Refuse unless `hash` (fnv1a64 of the exact file bytes) still matches.
+    pub if_hash: Option<String>,
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct ListTasksArg {
     /// `open`, `done`, `in-progress`, `cancelled`, `forwarded`, `waiting`.
@@ -284,6 +318,18 @@ pub fn hop_of(h: Option<u32>) -> std::result::Result<u32, ErrorData> {
     match h.unwrap_or(1) {
         h @ (1 | 2) => Ok(h),
         other => Err(ErrorData::invalid_params(format!("hop must be 1 or 2, got {other}"), None)),
+    }
+}
+
+fn edit_op(a: &EditArg) -> crate::edit::EditOp {
+    match a.mode {
+        EditMode::Replace => crate::edit::EditOp::Replace { old: a.old.clone(), new: a.new.clone() },
+        EditMode::InsertAfter => {
+            crate::edit::EditOp::Insert { anchor: a.old.clone(), text: a.new.clone(), before: false }
+        }
+        EditMode::InsertBefore => {
+            crate::edit::EditOp::Insert { anchor: a.old.clone(), text: a.new.clone(), before: true }
+        }
     }
 }
 
@@ -667,6 +713,20 @@ impl LapisServer {
     }
 
     #[tool(
+        description = "In-place body edit. mode: replace | insert_after | insert_before. old matches once (raw bytes). dry_run, if_hash, if_mtime. Errors carry kind and exit."
+    )]
+    pub(crate) async fn lapis_edit(
+        &self,
+        Parameters(a): Parameters<EditArg>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let t0 = Instant::now();
+        let op = edit_op(&a);
+        let g = guard(a.dry_run, a.if_mtime, a.if_hash);
+        let w = crate::edit::edit(&self.ctx.vault.root, &a.path, &op, &g).map_err(fail)?;
+        ok_at(t0, &ops::kick(&self.ctx, w, false).await.map_err(fail)?)
+    }
+
+    #[tool(
         description = "List checkbox tasks (ids `path#index`) and file tasks (`path#task`). Unscoped → summary counts; with path or full=true → rows, paged by limit / offset."
     )]
     async fn list_tasks(
@@ -754,7 +814,7 @@ impl ServerHandler for LapisServer {
 /// Names `LapisServer::tool_router` registers. The CLI help text lists these
 /// and only these; tome tools join later, behind the feature and `LAPIS_TOME`.
 #[cfg(test)]
-pub(crate) const BASE_TOOL_NAMES: [&str; 14] = [
+pub(crate) const BASE_TOOL_NAMES: [&str; 15] = [
     "vault_info",
     "health",
     "read_note",
@@ -767,6 +827,7 @@ pub(crate) const BASE_TOOL_NAMES: [&str; 14] = [
     "resolve_link",
     "create_note",
     "append_to_note",
+    "lapis_edit",
     "list_tasks",
     "toggle_task",
 ];

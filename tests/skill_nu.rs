@@ -451,6 +451,9 @@ struct Env {
     snippet: String,
     has_score: bool,
     has_snippet: bool,
+    matches: Option<i64>,
+    dry_run: bool,
+    hash: String,
 }
 
 fn parse_env(stdout: &[u8]) -> Env {
@@ -467,11 +470,15 @@ exit_code = doc.get("exit", None)
 emit("exit", "" if exit_code is None else str(exit_code))
 emit("kind", doc.get("kind") or "")
 emit("command", doc.get("command") or "")
+matches = doc.get("matches", None)
+emit("matches", "" if matches is None else str(matches))
 data = doc.get("data")
 if isinstance(data, dict):
     emit("path", data.get("path") or "")
     text = data.get("text") or ""
     emit("text", text if isinstance(text, str) else "")
+    emit("dry_run", "true" if data.get("dryRun") is True else "false")
+    emit("hash", data.get("hash") or "")
 if isinstance(data, list) and data and isinstance(data[0], dict):
     row = data[0]
     emit("has_score", "true" if "score" in row else "false")
@@ -510,6 +517,9 @@ if isinstance(data, list) and data and isinstance(data[0], dict):
         snippet: fields.get("snippet").cloned().unwrap_or_default(),
         has_score: fields.get("has_score").map(String::as_str) == Some("true"),
         has_snippet: fields.get("has_snippet").map(String::as_str) == Some("true"),
+        matches: fields.get("matches").filter(|s| !s.is_empty()).and_then(|s| s.parse().ok()),
+        dry_run: fields.get("dry_run").map(String::as_str) == Some("true"),
+        hash: fields.get("hash").cloned().unwrap_or_default(),
     }
 }
 
@@ -619,6 +629,81 @@ fn skill_usage_and_missing_lapis_are_envelopes() {
     assert_eq!(gone_env.kind, "missing_lapis");
     assert_eq!(gone_env.exit, Some(127));
     assert_eq!(gone_env.command, "read");
+
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn skill_replace_and_insert_keep_kind_matches_and_dry_run() {
+    let home = scratch();
+    let vault = home.join("vault");
+    init_vault(&home, &vault);
+    let path_env = path_with(lapis().parent().unwrap());
+    let vault_s = vault.to_str().unwrap();
+
+    let created =
+        run_nu(&home, &path_env, &["create", "--title", "Edit", "--body", "aaa", "--vault", vault_s]);
+    assert!(created.status.success(), "{}", show(&created));
+    let path = parse_env(&created.stdout).path;
+    let note = vault.join(&path);
+    let before = fs::read(&note).unwrap();
+
+    let read = run_nu(&home, &path_env, &["read", &path, "--vault", vault_s]);
+    assert!(read.status.success(), "{}", show(&read));
+    let hash = parse_env(&read.stdout).hash;
+    assert!(hash.starts_with("fnv1a64:"), "{}", show(&read));
+
+    let dry = run_nu(
+        &home,
+        &path_env,
+        &[
+            "replace",
+            "--dry-run",
+            "--old=aaa",
+            "--new=bbb",
+            &format!("--if-hash={hash}"),
+            "--vault",
+            vault_s,
+            "--",
+            &path,
+        ],
+    );
+    assert!(dry.status.success(), "{}", show(&dry));
+    let dry_env = parse_env(&dry.stdout);
+    assert!(dry_env.ok, "{}", show(&dry));
+    assert!(dry_env.dry_run, "{}", show(&dry));
+    assert_eq!(dry_env.command, "replace");
+    assert_eq!(fs::read(&note).unwrap(), before, "dry-run replace wrote the note");
+
+    let inserted = run_nu(
+        &home,
+        &path_env,
+        &[
+            "insert",
+            "--dry-run",
+            "--after=aaa",
+            "--text=!",
+            &format!("--if-hash={hash}"),
+            "--vault",
+            vault_s,
+            "--",
+            &path,
+        ],
+    );
+    assert!(inserted.status.success(), "{}", show(&inserted));
+    let inserted_env = parse_env(&inserted.stdout);
+    assert!(inserted_env.ok && inserted_env.dry_run, "{}", show(&inserted));
+    assert_eq!(inserted_env.command, "insert");
+    assert_eq!(fs::read(&note).unwrap(), before, "dry-run insert wrote the note");
+
+    let many = run_nu(&home, &path_env, &["replace", "--old=aa", "--new=z", "--vault", vault_s, "--", &path]);
+    assert_eq!(many.status.code(), Some(1), "{}", show(&many));
+    let many_env = parse_env(&many.stdout);
+    assert!(!many_env.ok, "{}", show(&many));
+    assert_eq!(many_env.kind, "match_count", "{}", show(&many));
+    assert_eq!(many_env.matches, Some(2), "{}", show(&many));
+    assert_eq!(many_env.exit, Some(1), "{}", show(&many));
+    assert_eq!(fs::read(&note).unwrap(), before, "a non-unique replace wrote the note");
 
     let _ = fs::remove_dir_all(&home);
 }

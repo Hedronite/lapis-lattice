@@ -11,12 +11,9 @@
 //!   the hop rings in [`scene::build`] are a debug view.
 //! * [`view`]: the camera (pan, zoom), hit testing, hover neighbourhoods and
 //!   the paint list of rim-terminated strokes and discs.
-//! * [`gitnexus`]: optional sidecar client. No vendored code; no-op when there
-//!   is no `.gitnexus` in the vault.
 //! * [`run`]: opens the GPUI window when built with the `gpui` feature, else
 //!   returns [`DesktopError::NotBuilt`]. Window code lives in `window.rs`.
 
-pub mod gitnexus;
 pub mod graph_data;
 pub mod html;
 pub mod live;
@@ -87,20 +84,12 @@ impl std::error::Error for DesktopError {}
 #[serde(rename_all = "camelCase")]
 pub struct Preflight {
     pub gpui_available: bool,
-    /// Path of the GitNexus sidecar config when present.
-    pub gitnexus: Option<String>,
     pub seed: Option<String>,
 }
 
 /// What `lapis desktop --check` reports.
 pub fn preflight(opts: &Options) -> Preflight {
-    Preflight {
-        gpui_available: cfg!(feature = "gpui"),
-        gitnexus: gitnexus::Sidecar::discover(&opts.vault_root)
-            .config_path()
-            .map(|p| p.display().to_string()),
-        seed: opts.seed.clone(),
-    }
+    Preflight { gpui_available: cfg!(feature = "gpui"), seed: opts.seed.clone() }
 }
 
 pub const NOT_BUILT: &str = "lapis desktop: this binary was built without the `desktop` feature \
@@ -130,7 +119,7 @@ mod tests {
         };
         let p = preflight(&o);
         assert_eq!(p.gpui_available, cfg!(feature = "gpui"));
-        assert!(p.gitnexus.is_none());
+        assert!(p.seed.is_none());
         if !cfg!(feature = "gpui") {
             match run(o) {
                 Err(DesktopError::NotBuilt(m)) => assert!(m.contains("--features desktop")),

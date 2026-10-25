@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### In-place edit
+
+- `lapis replace PATH --old TEXT --new TEXT` and `lapis insert PATH (--after|--before) ANCHOR (--text|--stdin)` edit one note by an exact raw-byte match. Zero or many matches, including overlaps, exit 1, leave the file unchanged, and report the hit count as JSON `error.matches`.
+- `--json` errors and MCP error `data` carry `kind` and `exit`: `not_found` and `sandbox` (both exit 3), `stale_guard`, `match_count` (also `matches`), and `bad_args` (exit 1). The hash stays FNV-1a 64.
+- `--if-hash`, `--if-mtime`, and `--dry-run` match `append`. The hash is FNV-1a 64 over the exact on-disk bytes (`hashAlgo: fnv1a64`, `oldHash`, `newHash`). A stale guard writes nothing. Dry-run returns a unified diff and does not bump `updated:` on disk, write, or reindex. `newHash` is that preview and excludes the bump. The dry-run still runs the frontmatter and wikilink gate on the bumped text, so it fails when the write would refuse.
+- A real write bumps `updated:` and, when that key is missing, inserts it before the closing `---`. Every other frontmatter byte stays, including CRLF. A file with no frontmatter block does not gain one. The body is the only search region.
+- The write is a same-directory temp file plus rename and keeps the file mode. `..`, an absolute path, and a symlink that leaves the vault exit 3 (`sandbox`). A missing note is exit 3 (`not_found`).
+- MCP adds one tool, `lapis_edit`. `mode` is an enum: `replace` | `insert_after` | `insert_before`. The base tool count is 15.
+
 ## 0.4.2 — 2026-09-21
 
 The cut that ships `--rerank-jev`. Tag `v0.4.1` (2026-09-11) is already
@@ -16,21 +27,26 @@ Crate `repository` and `homepage` are
   The same bytes are regular files under `.claude/skills/lapis/`,
   `.grok/skills/lapis/`, and `.cursor/skills/lapis/`. `scripts/sync-skills`
   rewrites the copies. There is no root `skills/` tree.
-- The skill maps 14 of the 16 MCP tools. The default server exposes 14;
+- The skill maps 15 of the 17 MCP tools. The default server exposes 15;
   `tome_tree` and `tome_open` register only with `--features tome` and
   `LAPIS_TOME=1`. `health` and `search_and_read` have no CLI command.
-  `lapis_edit` is not in this tree; it is a gap only after that tool exists.
+  `lapis_edit` is the `replace` and `insert` wrappers.
 - The skill wraps the existing CLI for `analytics`, `tree-retrieve`,
-  `create`, `append`, `task list`, `task toggle`, `tome tree`, and
-  `tome open` (`--features tome`). Search rows keep `path`, `title`,
-  `score`, and `snippet`. A failing command exits with the envelope's
-  `exit` code. Flags go before `--`. Text that starts with `-` follows
-  `--`. Text that starts with `--` uses `--body=` or `--stdin`. A flag
-  after `--` is a usage error and writes nothing. `tome build` is wrapped.
-- `append`, `task toggle`, and `tome build` reject a flag after a
-  positional or after `--`. `append X.md hello --vault V` is a usage
-  error and writes nothing. `read`, `search`, and `create` still accept
-  a flag after their positionals.
+  `create`, `append`, `replace`, `insert`, `task list`, `task toggle`,
+  `tome tree`, and `tome open` (`--features tome`). Search rows keep
+  `path`, `title`, `score`, and `snippet`. A failing command exits with
+  the envelope's `exit` code. Flags go before `--`. Text that starts
+  with `-` follows `--`. Text that starts with `--` uses `--flag=value`
+  or `--stdin`. A flag after `--` is a usage error and writes nothing.
+  `tome build` is wrapped. A CLI error's `kind` and `matches` are copied
+  onto the skill envelope unchanged.
+- `append`, `task toggle`, `tome build`, `replace`, and `insert` reject
+  a flag after a positional or after `--`. `append X.md hello --vault V`
+  is a usage error and writes nothing. `read`, `search`, and `create`
+  still accept a flag after their positionals. `replace` and `insert`
+  forward `--dry-run`, `--if-mtime`, `--if-hash`, `--no-reindex`, and
+  `--stdin`. They are the agent edit path. `create`, `append`, and
+  `task toggle` run only when a human has asked.
 
 ### Jev rerank
 
@@ -76,6 +92,7 @@ Built with `--features desktop` (off in the default CLI asset).
   in a cancellable reader; the PDFium runtime is packaged beside the app
   and is never downloaded on open.
 - An idle Live note no longer repaints on caret blink.
+- The optional GitNexus sidecar was removed. There is no user-visible change unless a `.gitnexus` config was present.
 
 ## 0.4.1 — 2026-09-11
 

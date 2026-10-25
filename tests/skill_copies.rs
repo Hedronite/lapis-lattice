@@ -62,6 +62,8 @@ fn skill_lists_every_wrapper() {
         ("nu lapis.nu doctor", "def \"main doctor\""),
         ("nu lapis.nu create ", "def \"main create\""),
         ("nu lapis.nu append ", "def --wrapped \"main append\""),
+        ("nu lapis.nu replace ", "def --wrapped \"main replace\""),
+        ("nu lapis.nu insert ", "def --wrapped \"main insert\""),
         ("nu lapis.nu task list ", "def \"main task list\""),
         ("nu lapis.nu task toggle ", "def --wrapped \"main task toggle\""),
         ("nu lapis.nu tome build ", "def --wrapped \"main tome build\""),
