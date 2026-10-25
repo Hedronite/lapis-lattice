@@ -90,6 +90,8 @@ struct Workspace {
     menu: Option<menu::Menu>,
     /// The palette or menu result list; only one is open at a time.
     list_scroll: gpui_kit::ScrollHandle,
+    /// The tab strip, so the active tab can be brought into view.
+    tab_scroll: gpui_kit::ScrollHandle,
     query_epoch: u64,
     indexing: bool,
     register: crate::vim::Register,
@@ -134,6 +136,7 @@ impl Workspace {
             palette: None,
             menu: None,
             list_scroll: gpui_kit::ScrollHandle::new(),
+            tab_scroll: gpui_kit::ScrollHandle::new(),
             query_epoch: 0,
             indexing: false,
             register: crate::vim::Register::default(),
@@ -240,6 +243,9 @@ impl Workspace {
         self.active = index;
         self.panes.assign(self.tabs[index].document.path.clone());
         self.history.commit(self.tabs[index].document.path.clone().into(), travel);
+        if let Some(ordinal) = self.tab_order.iter().position(|p| *p == self.tabs[index].document.path) {
+            self.tab_scroll.scroll_to_item(ordinal);
+        }
         self.refresh_context(false, window, cx);
         self.focus_active(window, cx);
         cx.notify();

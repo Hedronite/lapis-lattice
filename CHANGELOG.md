@@ -10,7 +10,7 @@
 - The sidebar file list scrolls. Before this, entries past the window height could not be reached.
 - Arrow keys keep the palette and menu selection in view. A new PDF page opens at its top.
 - The `Phantom not found` notice moved from a banner above every document to the status bar.
-- Tabs with the same file name show their parent folder, not the full path.
+- Tabs with the same file name show their parent folder, not the full path. Opening a note scrolls its tab into view.
 
 ### Dependencies
 

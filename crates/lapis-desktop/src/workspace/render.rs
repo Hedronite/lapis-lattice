@@ -221,6 +221,7 @@ impl Workspace {
             .id("workspace-tabs")
             .role(Role::TabList)
             .aria_label("Open documents")
+            .track_scroll(&self.tab_scroll)
             .flex()
             .flex_none()
             .w_full()
