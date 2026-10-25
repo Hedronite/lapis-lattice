@@ -1,4 +1,4 @@
-//! The write path: create, append, capture.
+//! The write path: create, append, capture, and in-place edit.
 //!
 //! Files are the write source of truth. Every function here writes exactly
 //! one file under the vault root and returns its vault-relative path; the
@@ -80,6 +80,18 @@ pub struct Written {
     /// Full text that was (or would be) written; only on dry runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Exact on-disk bytes before the edit (`fnv1a64:…`, see `hash_algo`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_hash: Option<String>,
+    /// Bytes written, or the dry-run preview (which does not bump `updated:`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_hash: Option<String>,
+    /// Algorithm for `old_hash` / `new_hash`. `fnv1a64` is FNV-1a 64, no normalization.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash_algo: Option<&'static str>,
+    /// Unified diff of the dry-run preview. Absent on a real write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
 }
 
 pub fn today() -> String {
@@ -332,10 +344,26 @@ pub fn create(root: &Path, opts: &CreateOpts) -> Result<Written> {
             taxonomy: tax_source,
             dry_run: true,
             text: Some(text),
+            old_hash: None,
+            new_hash: None,
+            hash_algo: None,
+            diff: None,
         });
     }
     let bytes = write_atomic(&root.join(&rel), &text)?;
-    Ok(Written { path: rel, title, hal, bytes, taxonomy: tax_source, dry_run: false, text: None })
+    Ok(Written {
+        path: rel,
+        title,
+        hal,
+        bytes,
+        taxonomy: tax_source,
+        dry_run: false,
+        text: None,
+        old_hash: None,
+        new_hash: None,
+        hash_algo: None,
+        diff: None,
+    })
 }
 
 /// Append `text` to an existing note and bump `updated:` (allowlisted), with
@@ -370,6 +398,10 @@ pub fn append_with(root: &Path, rel: &str, text: &str, guard: &Guard) -> Result<
         taxonomy: "unchanged",
         dry_run: guard.dry_run,
         text: if guard.dry_run { Some(current) } else { None },
+        old_hash: None,
+        new_hash: None,
+        hash_algo: None,
+        diff: None,
     })
 }
 

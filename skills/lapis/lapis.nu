@@ -1,5 +1,5 @@
 #!/usr/bin/env nu
-# Deterministic body for the lapis skill. Wraps read-only `lapis --json`.
+# Deterministic body for the lapis skill. Wraps `lapis --json`.
 # Vault: --vault, else $LAPIS_VAULT, else the path `lapis init` recorded.
 #
 # CLI each command actually runs:
@@ -11,6 +11,8 @@
 #   recent     lapis analytics recent           (columns by name; LIMIT 50)
 #   status     lapis vault info
 #   doctor     lapis doctor
+#   replace    lapis replace PATH --old OLD --new NEW [--if-hash HASH]
+#   insert     lapis insert PATH (--after ANCHOR | --before ANCHOR) --text TEXT [--if-hash HASH]
 
 def vault-args [vault: string] {
   let v = if $vault != "" { $vault } else { $env.LAPIS_VAULT? | default "" }
@@ -119,6 +121,47 @@ def "main status" [--vault: string = ""] {
 
 def "main doctor" [--vault: string = ""] {
   envelope "doctor" ["doctor"] $vault | to json
+}
+
+# Recommended edit: read, copy data.hash, then pass --hash.
+# The CLI matches raw body bytes and exits 1 unless the literal occurs once.
+def "main replace" [
+  path: string
+  --old: string
+  --new: string
+  --hash: string = ""
+  --vault: string = ""
+] {
+  mut a = ["replace" "--old" $old "--new" $new]
+  if $hash != "" { $a = ($a ++ ["--if-hash" $hash]) }
+  $a = ($a ++ ["--" $path])
+  envelope "replace" $a $vault | to json
+}
+
+def "main insert" [
+  path: string
+  --after: string = ""
+  --before: string = ""
+  --text: string
+  --hash: string = ""
+  --vault: string = ""
+] {
+  if ($after != "" and $before != "") or ($after == "" and $before == "") {
+    return ({
+      ok: false
+      command: "insert"
+      error: "pass exactly one of --after or --before"
+      exit: 1
+    } | to json)
+  }
+  mut a = if $before != "" {
+    ["insert" "--before" $before "--text" $text]
+  } else {
+    ["insert" "--after" $after "--text" $text]
+  }
+  if $hash != "" { $a = ($a ++ ["--if-hash" $hash]) }
+  $a = ($a ++ ["--" $path])
+  envelope "insert" $a $vault | to json
 }
 
 def main [] { help main }

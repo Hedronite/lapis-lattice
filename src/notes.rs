@@ -187,15 +187,52 @@ fn read_impl(root: &Path, rel: &str, display: bool) -> Result<Note> {
     Ok(Note { path, kind, title, hal, hal_valid, hal_error, tags, body, size, updated_at, hash, pages: None })
 }
 
+/// Name of [`content_hash`]. The hash string is `{HASH_ALGO}:{hex}`.
+pub const HASH_ALGO: &str = "fnv1a64";
+
 /// FNV-1a 64 over the raw bytes. Not cryptographic: a cheap stale-write guard
-/// (`--if-hash`) that agents can round-trip from `read`.
+/// (`--if-hash`) that agents can round-trip from `read`. No newline normalization.
 pub fn content_hash(bytes: &[u8]) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in bytes {
         h ^= *b as u64;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    format!("fnv1a64:{h:016x}")
+    format!("{HASH_ALGO}:{h:016x}")
+}
+
+/// Refuse a symlink that resolves outside `root`, and a symlink used as the
+/// note itself (so a writer cannot replace the link or write through it).
+/// A directory symlink that stays inside the vault is allowed. Exit 3.
+pub fn refuse_escaped_symlink(root: &Path, rel: &str) -> Result<()> {
+    let root_canon = root.canonicalize().map_err(|e| LapisError::Path(format!("{rel}: {e}")))?;
+    let parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
+    let mut acc = root.to_path_buf();
+    for (i, part) in parts.iter().enumerate() {
+        acc.push(part);
+        if let Some(err) = symlink_block(&root_canon, &acc, rel, i + 1 == parts.len()) {
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+fn symlink_block(root: &Path, acc: &Path, rel: &str, last: bool) -> Option<LapisError> {
+    let meta = std::fs::symlink_metadata(acc).ok()?;
+    if !meta.file_type().is_symlink() {
+        return None;
+    }
+    let outside = match std::fs::canonicalize(acc) {
+        Ok(target) => !target.starts_with(root),
+        Err(_) => true,
+    };
+    if outside {
+        return Some(LapisError::Path(format!("{rel}: symlink escapes the vault")));
+    }
+    if last {
+        return Some(LapisError::Path(format!("{rel}: refuses to edit a symlink")));
+    }
+    None
 }
 
 /// Millisecond mtime of a file, as `read` reports in `updatedAt`.

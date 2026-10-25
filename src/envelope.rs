@@ -54,6 +54,9 @@ pub struct ErrorBody {
     /// Tome failures. Same string as `kind` (`no_structure`, `over_budget`, …).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<&'static str>,
+    /// In-place edit: how many times the literal matched. Set only for that error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matches: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -73,10 +76,14 @@ pub fn err(e: &LapisError, latency_ms: f64) -> Envelope<Value> {
         LapisError::Tome { code, .. } => Some(*code),
         _ => None,
     };
+    let matches = match e {
+        LapisError::Matches { matches, .. } => Some(*matches),
+        _ => None,
+    };
     Envelope {
         ok: false,
         data: None,
-        error: Some(ErrorBody { kind: e.kind(), message: e.message(), exit: e.exit_code(), code }),
+        error: Some(ErrorBody { kind: e.kind(), message: e.message(), exit: e.exit_code(), code, matches }),
         meta: Meta { latency_ms, ..Meta::default() },
     }
 }

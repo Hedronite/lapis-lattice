@@ -22,6 +22,9 @@ pub enum LapisError {
     /// enum so every match compiles in the default build.
     #[cfg_attr(not(feature = "tome"), allow(dead_code))]
     Tome { code: &'static str, message: String },
+    /// In-place edit matched zero or many times. Exit 1. The file is unchanged.
+    /// `matches` is the hit count, including overlapping hits.
+    Matches { message: String, matches: usize },
 }
 
 impl LapisError {
@@ -30,7 +33,8 @@ impl LapisError {
             LapisError::Usage(_)
             | LapisError::Internal(_)
             | LapisError::HttpOnly { .. }
-            | LapisError::Tome { .. } => 1,
+            | LapisError::Tome { .. }
+            | LapisError::Matches { .. } => 1,
             LapisError::LatticeDown(_) => 2,
             LapisError::Path(_) => 3,
         }
@@ -38,7 +42,7 @@ impl LapisError {
 
     pub fn kind(&self) -> &'static str {
         match self {
-            LapisError::Usage(_) => "usage",
+            LapisError::Usage(_) | LapisError::Matches { .. } => "usage",
             LapisError::LatticeDown(_) => "lattice_down",
             LapisError::Path(_) => "path",
             LapisError::Internal(_) => "internal",
@@ -57,7 +61,7 @@ impl LapisError {
                 "{op} is not implemented by the embedded index; it requires `lattice.mode = \"http\"` \
                  (set it in ~/.config/lapis/config.toml or pass --lattice <url>)"
             ),
-            LapisError::Tome { message, .. } => message.clone(),
+            LapisError::Tome { message, .. } | LapisError::Matches { message, .. } => message.clone(),
         }
     }
 }
