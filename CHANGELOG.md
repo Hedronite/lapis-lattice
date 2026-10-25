@@ -92,7 +92,8 @@ Built with `--features desktop` (off in the default CLI asset).
   in a cancellable reader; the PDFium runtime is packaged beside the app
   and is never downloaded on open.
 - An idle Live note no longer repaints on caret blink.
-- The optional GitNexus sidecar was removed. There is no user-visible change unless a `.gitnexus` config was present.
+- The optional code-graph sidecar was removed. There is no user-visible
+  change unless that sidecar's config was present.
 
 ## 0.4.1 — 2026-09-11
 
