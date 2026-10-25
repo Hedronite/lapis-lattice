@@ -19,6 +19,11 @@
 - The write is a same-directory temp file plus rename and keeps the file mode. `..`, an absolute path, and a symlink that leaves the vault exit 3 (`sandbox`). A missing note is exit 3 (`not_found`).
 - MCP adds one tool, `lapis_edit`. `mode` is an enum: `replace` | `insert_after` | `insert_before`. The base tool count is 15.
 
+### Desktop
+
+- The optional code-graph sidecar was removed. There is no user-visible
+  change unless that sidecar's config was present.
+
 ## 0.4.2 — 2026-09-21
 
 The cut that ships `--rerank-jev`. Tag `v0.4.1` (2026-09-11) is already
@@ -100,8 +105,6 @@ Built with `--features desktop` (off in the default CLI asset).
   in a cancellable reader; the PDFium runtime is packaged beside the app
   and is never downloaded on open.
 - An idle Live note no longer repaints on caret blink.
-- The optional code-graph sidecar was removed. There is no user-visible
-  change unless that sidecar's config was present.
 
 ## 0.4.1 — 2026-09-11
 
