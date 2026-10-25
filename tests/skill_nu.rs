@@ -7,7 +7,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const NU_VERSION: &str = "0.106.1";
 
@@ -26,20 +27,66 @@ fn nu_bin() -> &'static Path {
     NU.get_or_init(ensure_nu)
 }
 
+fn nu_ok(bin: &Path) -> bool {
+    bin.is_file()
+        && Command::new(bin)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+}
+
+/// nextest runs each test in its own process, and the ci profile kills a
+/// silent test after 20s. One process downloads; the others wait on the
+/// directory lock instead of writing the same tarball.
 fn ensure_nu() -> PathBuf {
-    let triple = nu_triple();
-    let name = format!("nu-{NU_VERSION}-{triple}");
-    let cached = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/skill-nu").join(&name).join("nu");
-    if cached.is_file() {
-        return cached;
+    let name = format!("nu-{NU_VERSION}-{}", nu_triple());
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/skill-nu").join(&name);
+    let cached = dir.join("nu");
+    if let Some(found) = ready_nu(&cached, &name) {
+        return found;
+    }
+    fs::create_dir_all(&dir).unwrap_or_else(|err| panic!("{}: {err}", dir.display()));
+    let lock = dir.join(".download-lock");
+    let started = Instant::now();
+    loop {
+        if let Some(found) = ready_nu(&cached, &name) {
+            return found;
+        }
+        match fs::create_dir(&lock) {
+            Ok(()) => {
+                let bin = download_nu(&dir, &name);
+                let _ = fs::remove_dir(&lock);
+                return bin;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                if started.elapsed() > Duration::from_secs(90) {
+                    let _ = fs::remove_dir(&lock);
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+            Err(err) => panic!("{}: {err}", lock.display()),
+        }
+    }
+}
+
+fn ready_nu(cached: &Path, name: &str) -> Option<PathBuf> {
+    if nu_ok(cached) {
+        return Some(cached.to_path_buf());
     }
     let unpacked = PathBuf::from(format!("/tmp/{name}/nu"));
-    if unpacked.is_file() {
-        return unpacked;
+    nu_ok(&unpacked).then_some(unpacked)
+}
+
+fn download_nu(dir: &Path, name: &str) -> PathBuf {
+    let bin = dir.join("nu");
+    if nu_ok(&bin) {
+        return bin;
     }
-    fs::create_dir_all(cached.parent().unwrap()).unwrap_or_else(|err| panic!("{}: {err}", cached.display()));
     let url = format!("https://github.com/nushell/nushell/releases/download/{NU_VERSION}/{name}.tar.gz");
-    let tar_path = cached.parent().unwrap().join("nu.tar.gz");
+    let tar_path = dir.join(format!("nu-{}.tar.gz", std::process::id()));
     let curl = Command::new("curl")
         .args(["--retry", "3", "--retry-delay", "2", "-fsSL", "-o"])
         .arg(&tar_path)
@@ -47,17 +94,23 @@ fn ensure_nu() -> PathBuf {
         .status()
         .unwrap_or_else(|err| panic!("curl {url}: {err}"));
     assert!(curl.success(), "download {url} failed");
+    let extract = dir.join(format!("extract-{}", std::process::id()));
+    fs::create_dir_all(&extract).unwrap_or_else(|err| panic!("{}: {err}", extract.display()));
     let tar = Command::new("tar")
         .args(["-xzf"])
         .arg(&tar_path)
         .arg("-C")
-        .arg(cached.parent().unwrap())
+        .arg(&extract)
         .arg("--strip-components=1")
         .status()
         .unwrap_or_else(|err| panic!("tar: {err}"));
     assert!(tar.success(), "extract {url} failed");
-    assert!(cached.is_file(), "nu missing after extract");
-    cached
+    let staged = extract.join("nu");
+    assert!(nu_ok(&staged), "extracted nu at {} does not run", staged.display());
+    fs::rename(&staged, &bin).unwrap_or_else(|err| panic!("rename {}: {err}", bin.display()));
+    let _ = fs::remove_dir_all(&extract);
+    let _ = fs::remove_file(&tar_path);
+    bin
 }
 
 fn scratch() -> PathBuf {

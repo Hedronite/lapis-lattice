@@ -28,3 +28,9 @@ test-group = "pty"
 threads-required = "num-test-threads"
 slow-timeout = { period = "90s", terminate-after = 2 }
 
+# skill_nu downloads a pinned Nushell on first use, then several processes
+# wait out that download. The 20s workspace kill fires before the tarball lands.
+[[profile.ci.overrides]]
+filter = "binary(skill_nu)"
+slow-timeout = { period = "90s", terminate-after = 2 }
+
