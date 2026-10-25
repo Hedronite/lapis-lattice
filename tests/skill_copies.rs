@@ -42,6 +42,39 @@ fn harness_skill_copies_match_canonical() {
     assert!(!frontmatter_value(&skill, "description").is_empty());
 }
 
+/// SKILL.md lists each wrapper, and `lapis.nu` defines it. The copies are
+/// checked above, so this only reads the canonical tree.
+#[test]
+fn skill_lists_every_wrapper() {
+    let root = root().join(".agents/skills/lapis");
+    let skill = fs::read_to_string(root.join("SKILL.md")).unwrap();
+    let body = fs::read_to_string(root.join("lapis.nu")).unwrap();
+    for (listed, defined) in [
+        ("nu lapis.nu search ", "def \"main search\""),
+        ("nu lapis.nu read ", "def \"main read\""),
+        ("nu lapis.nu list ", "def \"main list\""),
+        ("nu lapis.nu neighbors ", "def \"main neighbors\""),
+        ("nu lapis.nu resolve ", "def \"main resolve\""),
+        ("nu lapis.nu recent ", "def \"main recent\""),
+        ("nu lapis.nu analytics ", "def \"main analytics\""),
+        ("nu lapis.nu tree-retrieve ", "def \"main tree-retrieve\""),
+        ("nu lapis.nu status", "def \"main status\""),
+        ("nu lapis.nu doctor", "def \"main doctor\""),
+        ("nu lapis.nu create ", "def \"main create\""),
+        ("nu lapis.nu append ", "def \"main append\""),
+        ("nu lapis.nu task list ", "def \"main task list\""),
+        ("nu lapis.nu task toggle ", "def \"main task toggle\""),
+        ("nu lapis.nu tome tree ", "def \"main tome tree\""),
+        ("nu lapis.nu tome open ", "def \"main tome open\""),
+    ] {
+        assert!(skill.contains(listed), "SKILL.md missing {listed}");
+        assert!(body.contains(defined), "lapis.nu missing {defined}");
+    }
+    assert!(body.contains("^lapis --json"), "wrappers must pass --json");
+    assert!(body.contains("\"--dry-run\""), "write wrappers must forward --dry-run");
+    assert!(skill.contains("--features tome"));
+}
+
 fn assert_regular_file(path: &Path) {
     let meta = fs::symlink_metadata(path).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
     assert!(meta.file_type().is_file(), "{} must be a regular file", path.display());

@@ -16,6 +16,10 @@ Crate `repository` and `homepage` are
   The same bytes are regular files under `.claude/skills/lapis/`,
   `.grok/skills/lapis/`, and `.cursor/skills/lapis/`. `scripts/sync-skills`
   rewrites the copies. There is no root `skills/` tree.
+- The skill wraps the existing CLI for `analytics`, `tree-retrieve`,
+  `create`, `append`, `task list`, `task toggle`, `tome tree`, and
+  `tome open` (`--features tome`). `health` and `search_and_read` have no
+  CLI command, so the skill does not invent one.
 
 ### Jev rerank
 
