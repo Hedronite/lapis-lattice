@@ -9,6 +9,12 @@
 - Saving a note no longer re-runs the whole layout. The reload starts warm from the map on screen, so the graph adjusts in place.
 - A missing, damaged or foreign-version memory file only means a fresh layout. Local and ring views keep their own layouts and are not remembered.
 
+### What the index covers
+
+- The embedded index skips nested vaults: a folder below the vault root that holds its own `.lapis/` or `.obsidian/` is left to its own index. Test fixtures that build sample vaults inside a real vault no longer show up in search and the graph.
+- `.lapisignore` at the vault root takes gitignore patterns (anchors, `**`, negation) for generated output inside the vault. A full reindex, the stale count and a single-path reindex all follow it. Saving a file inside an ignored folder removes it from the index instead of indexing it.
+- One vault had 12,733 generated test notes inside it, which filled its graph past the 20,000-node snapshot cap and its search with fixtures.
+
 ### Vectors in the embedded index
 
 - `[embedder]` in the config turns on the vector arm of the embedded index. `provider = "ollama"` with `model` and `ollama_url` (defaults `nomic-embed-text`, `http://127.0.0.1:11434`); nomic models get their `search_query:` / `search_document:` prefixes. `timeout_ms` (5000) bounds a query, `index_timeout_ms` (120000) a batch of chunks.

@@ -9,6 +9,7 @@ use rusqlite::{Connection, params};
 
 use crate::graph::parse_wikilinks;
 use crate::kinds;
+use crate::scope::{self, Scope};
 use crate::{IndexReport, Result};
 
 const SKIP: &[&str] = &[".lapis", ".git", ".obsidian", "node_modules", ".venv", "target"];
@@ -101,7 +102,9 @@ pub fn reindex_path(conn: &Connection, vault: &Path, rel: &str) -> Result<IndexR
     let abs = vault.join(&rel);
     let mut documents = 0u64;
     let mut chunks_n = 0u64;
-    if abs.is_file() {
+    // A path the index does not cover is only forgotten: saving a file inside an
+    // ignored folder or a nested vault must not pull it back in.
+    if abs.is_file() && Scope::load(vault).covers(vault, &rel) {
         chunks_n = index_one(conn, vault, &rel)?;
         documents = 1;
     }
@@ -216,12 +219,12 @@ fn index_one(conn: &Connection, vault: &Path, rel: &str) -> Result<u64> {
 
 fn walk(root: &Path) -> Result<Vec<String>> {
     let mut out = Vec::new();
-    walk_inner(root, root, &mut out)?;
+    walk_inner(root, root, &Scope::load(root), &mut out)?;
     out.sort();
     Ok(out)
 }
 
-fn walk_inner(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {
+fn walk_inner(root: &Path, dir: &Path, scope: &Scope, out: &mut Vec<String>) -> Result<()> {
     for ent in fs::read_dir(dir)? {
         let ent = ent?;
         let name = ent.file_name();
@@ -230,14 +233,19 @@ fn walk_inner(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {
             continue;
         }
         let path = ent.path();
+        let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
         if path.is_dir() {
-            if SKIP.iter().any(|s| path.ends_with(s)) {
+            // Pruned whole: a nested vault keeps its own index, and an ignored
+            // folder is not read at all.
+            if SKIP.iter().any(|s| path.ends_with(s))
+                || scope::is_nested_vault(&path)
+                || scope.ignores(&rel, true)
+            {
                 continue;
             }
-            walk_inner(root, &path, out)?;
-        } else if kinds::kind_for(&name).is_some() {
-            let rel = path.strip_prefix(root).unwrap_or(&path);
-            out.push(rel.to_string_lossy().replace('\\', "/"));
+            walk_inner(root, &path, scope, out)?;
+        } else if kinds::kind_for(&name).is_some() && !scope.ignores(&rel, false) {
+            out.push(rel);
         }
     }
     Ok(())
