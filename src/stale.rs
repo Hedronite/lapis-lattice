@@ -89,7 +89,7 @@ pub fn forget(root: &Path) {
 pub fn warn(count: Option<u64>) {
     if let Some(n) = count.filter(|n| *n > 0) {
         eprintln!(
-            "{n} notes changed since indexing; `lapis vault info` lists them, `lapis reindex PATH` fixes one"
+            "{n} notes changed since indexing; `lapis vault info` lists them, `lapis reindex PATH` fixes one, `lapis reindex --all` fixes all"
         );
     }
 }

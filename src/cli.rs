@@ -94,7 +94,8 @@ pub enum Command {
     /// List notes from the lattice `documents` table (metadata only). Never walks the vault.
     List(ListArgs),
 
-    /// Re-index one note in the embedded sqlite index (or the HTTP lattice, if opted in).
+    /// Re-index one note (or `--all`: rebuild the whole embedded index) in the embedded
+    /// sqlite index, or the HTTP lattice if opted in.
     Reindex(ReindexArgs),
 
     /// Create a note with a HAL create-set (name, type, domain, status=draft, dates, hal_version).
@@ -337,8 +338,12 @@ pub struct CaptureArgs {
 #[derive(Debug, Args)]
 pub struct ReindexArgs {
     /// Vault-relative markdown path, e.g. `notes/STATUS.md`.
-    #[arg(value_name = "PATH")]
-    pub path: String,
+    #[arg(value_name = "PATH", required_unless_present = "all", conflicts_with = "all")]
+    pub path: Option<String>,
+
+    /// Rebuild the whole embedded index, every note, with progress on stderr.
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Debug, Args)]
@@ -689,6 +694,16 @@ mod tests {
         assert!(
             matches!(Cli::try_parse_from(["lapis", "trash", "a/b.md"]).unwrap().command(), Command::Trash(t) if t.path == "a/b.md")
         );
+    }
+
+    #[test]
+    fn reindex_takes_one_path_or_all() {
+        let c = Cli::try_parse_from(["lapis", "reindex", "a.md"]).unwrap();
+        assert!(matches!(c.command(), Command::Reindex(r) if r.path.as_deref() == Some("a.md") && !r.all));
+        let c = Cli::try_parse_from(["lapis", "reindex", "--all", "--json"]).unwrap();
+        assert!(matches!(c.command(), Command::Reindex(r) if r.path.is_none() && r.all));
+        assert!(Cli::try_parse_from(["lapis", "reindex"]).is_err(), "a path or --all");
+        assert!(Cli::try_parse_from(["lapis", "reindex", "a.md", "--all"]).is_err(), "not both");
     }
 
     #[test]
