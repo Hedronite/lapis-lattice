@@ -126,7 +126,7 @@ ollama_url = "http://127.0.0.1:11434"
 timeout_ms = 5000              # per query; index_timeout_ms (120000) per batch
 ```
 
-If Ollama is down or slow, search falls back to BM25 and the stored vectors stay. `search --embedder none` skips the vector arm for one query. `lapis doctor` reports the embedder, how many chunks have vectors, and one query round trip.
+If Ollama is down or slow, search falls back to BM25 and the stored vectors stay; `lapis reindex --vectors` later embeds whatever was missed. `search --embedder none` skips the vector arm for one query. `lapis doctor` reports the embedder, how many chunks have vectors, and one query round trip.
 
 ```text
 lapis init ~/Notes

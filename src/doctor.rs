@@ -157,7 +157,7 @@ fn embedder_check(
     if vectors < chunks {
         state = "warn";
         notes.push(format!(
-            "{} of {chunks} chunks have no vector; `lapis reindex --all` embeds them",
+            "{} of {chunks} chunks have no vector; `lapis reindex --vectors` embeds them",
             chunks - vectors
         ));
     }

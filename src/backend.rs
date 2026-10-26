@@ -420,6 +420,16 @@ impl Backend {
         }
     }
 
+    /// Embed the chunks that have no vector yet, without walking the vault.
+    pub fn embed_pending(&self) -> Result<u64> {
+        match self {
+            Backend::Embedded(engine) => lock(engine).embed_pending().map_err(LapisError::from),
+            Backend::Http(_) => {
+                Err(LapisError::Usage("Embedding is managed by the configured HTTP service".into()))
+            }
+        }
+    }
+
     /// Index one path after a write. Embedded does it in-process; HTTP kicks serve.py.
     pub async fn reindex(&self, rel: &str) -> Result<http::Reindex> {
         match self {

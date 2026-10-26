@@ -276,3 +276,28 @@ async fn resolution_rules() {
     assert_eq!(vectors(&c).await, (chunks, chunks), "even an explicit none only stops using the vectors");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// `reindex --vectors` fills what an outage left without vectors, and nothing else.
+#[tokio::test(flavor = "multi_thread")]
+async fn reindex_vectors_resumes_after_an_outage() {
+    let d = vault();
+    let mut down = cfg(&dead_url(), Some("ollama"));
+    down.dim = Some(8);
+    let (b, _) = ctx(&d, down).backend_with(None, true).unwrap();
+    let r = b.reindex_all().await.unwrap();
+    assert!(r.embed_error.is_some() && r.embedded == 0);
+    drop(b);
+
+    let f = fake(8, false);
+    let c = ctx(&d, cfg(&f.url, Some("ollama")));
+    assert_eq!(vectors(&c).await, (0, r.chunks));
+    crate::reindex_all::vectors(&c).unwrap();
+    assert_eq!(vectors(&c).await, (r.chunks, r.chunks));
+    let before = f.requests();
+    crate::reindex_all::vectors(&c).unwrap();
+    assert_eq!(f.requests(), before, "nothing left to embed, so no request");
+
+    let none = ctx(&d, cfg(&dead_url(), Some("none")));
+    assert!(crate::reindex_all::vectors(&none).is_err(), "no embedder is a usage error, not a silent zero");
+    let _ = std::fs::remove_dir_all(&d);
+}

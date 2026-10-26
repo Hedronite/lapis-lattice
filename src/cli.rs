@@ -338,12 +338,16 @@ pub struct CaptureArgs {
 #[derive(Debug, Args)]
 pub struct ReindexArgs {
     /// Vault-relative markdown path, e.g. `notes/STATUS.md`.
-    #[arg(value_name = "PATH", required_unless_present = "all", conflicts_with = "all")]
+    #[arg(value_name = "PATH", required_unless_present_any = ["all", "vectors"], conflicts_with_all = ["all", "vectors"])]
     pub path: Option<String>,
 
     /// Rebuild the whole embedded index, every note, with progress on stderr.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "vectors")]
     pub all: bool,
+
+    /// Embed only the chunks that have no vector yet: no walk, nothing cleared.
+    #[arg(long)]
+    pub vectors: bool,
 }
 
 #[derive(Debug, Args)]
@@ -705,6 +709,9 @@ mod tests {
         assert!(matches!(c.command(), Command::Reindex(r) if r.path.is_none() && r.all));
         assert!(Cli::try_parse_from(["lapis", "reindex"]).is_err(), "a path or --all");
         assert!(Cli::try_parse_from(["lapis", "reindex", "a.md", "--all"]).is_err(), "not both");
+        let c = Cli::try_parse_from(["lapis", "reindex", "--vectors"]).unwrap();
+        assert!(matches!(c.command(), Command::Reindex(r) if r.vectors && r.path.is_none()));
+        assert!(Cli::try_parse_from(["lapis", "reindex", "--all", "--vectors"]).is_err());
     }
 
     #[test]
