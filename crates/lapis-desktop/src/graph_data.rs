@@ -21,7 +21,7 @@ use crate::sim::{ForceParams, ForceSim};
 
 /// Ticks a scene is settled for before the first frame. Enough for the fixture
 /// vaults and small real ones to reach rest; the window keeps ticking after.
-pub const SETTLE_TICKS: usize = 600;
+pub const SETTLE_TICKS: usize = 700;
 
 /// A laid-out graph and the sim that is still laying it out. The window keeps
 /// both: the scene is what gets drawn, the sim is what keeps moving it.

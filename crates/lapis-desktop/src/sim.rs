@@ -217,14 +217,16 @@ impl Default for ForceParams {
             repel: 400.0,
             link: 0.02,
             link_distance: 30.0,
-            // d3's velocityDecay of 0.4: enough friction that a settled graph
-            // glides to rest instead of ringing.
-            damping: 0.6,
-            max_velocity: 12.0,
+            // Momentum lets a big vault unfold from its spiral while it is still
+            // warm; the cooling schedule, not friction, is what brings it to rest.
+            damping: 0.85,
+            max_velocity: 40.0,
             dt: 0.3,
             alpha_min: 0.001,
-            // From 1 to `alpha_min` in about 300 ticks, d3's default schedule.
-            alpha_decay: 1.0 - 0.001f32.powf(1.0 / 300.0),
+            // From 1 to `alpha_min` in about 600 ticks: twice d3's default, so a
+            // vault of thousands of notes spreads out before it freezes. The
+            // settle runs off the paint thread, so the operator sees the result.
+            alpha_decay: 1.0 - 0.001f32.powf(1.0 / 600.0),
             alpha_drag: 0.12,
             // 0.8 is the reference value and it converges. A coarser angle
             // saves a little tick time and leaves a residual energy that never
@@ -685,14 +687,14 @@ mod tests {
         assert!(per_tick < 16.6, "{per_tick:.3} ms per tick misses the 60 fps budget");
     }
 
-    /// The layout cools on a schedule: a big graph comes to rest in about 300
+    /// The layout cools on a schedule: a big graph comes to rest in about 600
     /// ticks however much residual force is left, sits still, and a drag warms
     /// it only until the drag ends.
     #[test]
     fn the_layout_cools_to_stillness_and_a_drag_only_warms_it_while_held() {
         let mut sim = big(2_000, 3_000);
         let ran = sim.settle(5_000);
-        assert!(ran <= 320, "a cooling schedule ends near 300 ticks, ran {ran}");
+        assert!(ran <= 620, "a cooling schedule ends near 600 ticks, ran {ran}");
         assert!(!sim.is_running(), "at rest the sim stops asking for frames");
         let still = sim.positions().to_vec();
         assert!(!sim.tick(), "a cooled graph does not tick");
@@ -707,7 +709,7 @@ mod tests {
         assert!(sim.alpha() <= sim.params.alpha_drag + 1e-6, "a drag is warm, never a fresh big bang");
         sim.hold_warm(false);
         let cooled = sim.settle(5_000);
-        assert!(cooled <= 320, "after the drop it cools again, ran {cooled}");
+        assert!(cooled <= 620, "after the drop it cools again, ran {cooled}");
         assert_eq!(sim.positions()[0], [500.0, 500.0], "the dropped node stays where it was put");
     }
 
