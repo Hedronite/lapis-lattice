@@ -15,8 +15,8 @@
 - Frontmatter shows as a properties card above Live and Reading text: the first four keys (title, type, status, …), with `Show all` for the rest. Wikilinks in values, such as `parent` and `cross_refs`, follow like body links. The card is read-only; Properties in the command menu edits.
 - Reading view follows wikilinks too. Search snippets read as one run of prose and clamp to two lines.
 - The sidebar is a folder tree: folders open and close in place and load on first open, with indent guides and a collapse-all control. Opening a note opens the folders above it and scrolls its row into view. A Recent section lists the last five notes opened. The saved session format is unchanged.
-
 - The search palette shows keyword results as soon as they arrive (a fraction of a second) and replaces them with the hybrid ranking when the embedder answers, keeping the selected note selected. If vector search fails, the keyword results stay and say so.
+
 ### Phantom client
 
 - Lapis parses the JSON envelope that `phantom-fractal` prints and does not read Phantom's database.
