@@ -384,6 +384,12 @@ impl ForceSim {
         self.alpha = self.alpha.max(self.params.alpha_drag);
     }
 
+    /// Start no hotter than `alpha`: a layout seeded from remembered positions
+    /// only needs to settle the seams, not unfold from scratch.
+    pub fn cool_to(&mut self, alpha: f32) {
+        self.alpha = self.alpha.min(alpha);
+    }
+
     /// Hold the layout warm while a node is being dragged, and let it cool once
     /// the drag ends.
     pub fn hold_warm(&mut self, on: bool) {

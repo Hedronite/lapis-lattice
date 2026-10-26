@@ -105,6 +105,8 @@ struct Workspace {
     register: crate::vim::Register,
     command: Option<command::Prompt>,
     code_graph: crate::CodeGraphOverlay,
+    /// The vault on disk, for the graph's per-vault memory and its error text.
+    vault_root: std::path::PathBuf,
 }
 
 impl Workspace {
@@ -151,6 +153,7 @@ impl Workspace {
             register: crate::vim::Register::default(),
             command: None,
             code_graph: crate::CodeGraphOverlay::absent(),
+            vault_root: std::path::PathBuf::new(),
         };
         workspace.focus.focus(window, cx);
         workspace
@@ -608,11 +611,12 @@ pub fn open(opts: Options, services: Arc<dyn WorkspaceServices>) -> Result<(), D
             }),
             ..Default::default()
         };
-        let seed = opts.seed;
+        let (seed, vault_root) = (opts.seed, opts.vault_root);
         let opened = cx.open_window(options, move |window, cx| {
             let entity = cx.new(|cx| Workspace::new(services, window, cx));
             entity.update(cx, |this, cx| {
                 this.code_graph = code_graph;
+                this.vault_root = vault_root;
                 this.start(window, cx);
             });
             let weak = entity.downgrade();

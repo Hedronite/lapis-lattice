@@ -189,6 +189,11 @@ pub(crate) struct Root {
     draw_ms: Rc<Cell<f32>>,
     /// True when the last frame skipped physics to protect the frame slot.
     skipped_tick: bool,
+    /// Where the whole-vault map last came to rest, and the pins on it. Seeds
+    /// the next layout, so the map keeps its shape across saves and launches.
+    memory: Option<std::sync::Arc<crate::graph_memory::Remembered>>,
+    /// A drag or an unpin changed the map; remember it once it is still again.
+    layout_dirty: bool,
     /// A layout in progress: the background settle leaves its newest scene and
     /// positions here, and the board draws them, so the graph unfolds in view.
     unfolding: Option<std::sync::Arc<std::sync::Mutex<graph_data::Unfolding>>>,
@@ -281,6 +286,32 @@ impl Root {
             self.camera_to = None;
         }
         true
+    }
+
+    /// Keep the whole-vault map as it rests now, in this session and in the
+    /// cache directory. Local and ring views have their own shapes and are not kept.
+    fn remember(&mut self, cx: &mut Context<Self>) {
+        self.layout_dirty = false;
+        if self.layout != Layout::Global || self.scene.nodes.is_empty() {
+            return;
+        }
+        // The sim holds the final places; the scene may still be gliding toward them.
+        let xy: Vec<[f32; 2]> = if self.sim.len() == self.scene.nodes.len() {
+            self.sim.positions().to_vec()
+        } else {
+            self.scene.nodes.iter().map(|n| [n.x, n.y]).collect()
+        };
+        let nodes = self.scene.nodes.iter().zip(xy).map(|(n, p)| (n.id.clone(), p)).collect();
+        let memory = std::sync::Arc::new(crate::graph_memory::Remembered::new(nodes, self.pins.clone()));
+        self.memory = Some(memory.clone());
+        let vault = self.vault.clone();
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(e) = crate::graph_memory::save(&vault, &memory) {
+                    eprintln!("lapis desktop: graph layout not remembered: {e}");
+                }
+            })
+            .detach();
     }
 
     /// The operator panned or zoomed: during a load, stop framing for them.
@@ -378,6 +409,7 @@ impl Root {
                 if let Some(i) = self.scene.index_of(&id) {
                     self.sim.set_pinned(i, false);
                 }
+                self.layout_dirty = true;
                 cx.notify();
             }
             return;
@@ -449,6 +481,7 @@ impl Root {
 
     fn on_up(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(press) = self.press.take() else { return };
+        self.layout_dirty |= press.moved && press.node.is_some();
         // A drag ends: the layout cools back to stillness around the dropped node.
         self.sim.hold_warm(false);
         // A short press is still a click, even on a node you could have

@@ -42,6 +42,8 @@ impl Root {
             fitted_for: (0., 0.),
             draw_ms: Rc::new(Cell::new(0.)),
             skipped_tick: false,
+            memory: None,
+            layout_dirty: false,
             unfolding: None,
             unfolded: false,
             camera_held: false,
@@ -113,10 +115,13 @@ impl Root {
         (self.unfolding, self.unfolded, self.camera_held) = (Some(slot.clone()), false, false);
         (self.glide, self.camera_to) = (None, None);
         let (seed, layout, depth) = (self.seed.clone().unwrap_or_default(), self.layout, self.depth);
+        // The whole-vault map starts from where it last rested: in this session
+        // from the board itself, on a fresh launch from the cache directory.
+        let remembered = self.memory.clone();
         let task = cx.background_executor().spawn(async move {
             if layout == Layout::Rings {
                 return graph_data::scene_for(&vault, &seed, 2, false)
-                    .map(|scene| (None, graph_data::Laid { scene, sim: ForceSim::empty() }));
+                    .map(|scene| (None, graph_data::Laid { scene, sim: ForceSim::empty() }, None));
             }
             let snapshot = match cached {
                 Some(snapshot) => snapshot,
@@ -137,12 +142,23 @@ impl Root {
             };
             // Settle off-thread, publishing as it goes so the board can show the graph
             // unfolding. Subsequent dragging uses the existing live simulation.
-            let laid = graph_data::lay_out_streaming(&scene, &seed, graph_data::SETTLE_TICKS, &mut |u| {
-                if let Ok(mut latest) = slot.lock() {
-                    u.into_slot(&mut latest);
-                }
-            });
-            Ok((Some(snapshot), laid))
+            let from_disk = match (layout, &remembered) {
+                (Layout::Global, None) => crate::graph_memory::load(&vault).map(Arc::new),
+                _ => None,
+            };
+            let memory = if layout == Layout::Global { remembered.or(from_disk.clone()) } else { None };
+            let laid = graph_data::lay_out_remembered(
+                &scene,
+                &seed,
+                graph_data::SETTLE_TICKS,
+                memory.as_deref(),
+                &mut |u| {
+                    if let Ok(mut latest) = slot.lock() {
+                        u.into_slot(&mut latest);
+                    }
+                },
+            );
+            Ok((Some(snapshot), laid, from_disk))
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
@@ -152,9 +168,16 @@ impl Root {
                 }
                 this.loading = false;
                 match result {
-                    Ok((snapshot, laid)) => {
+                    Ok((snapshot, laid, from_disk)) => {
+                        // Pins dropped in an earlier session come back with the map.
+                        if let Some(memory) = &from_disk
+                            && this.pins.is_empty()
+                        {
+                            this.pins = memory.pins.clone();
+                        }
                         this.snapshot = snapshot;
                         this.adopt(laid);
+                        this.remember(cx);
                         this.error = None;
                     }
                     Err(error) => {

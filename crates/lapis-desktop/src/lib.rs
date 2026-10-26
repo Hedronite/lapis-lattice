@@ -18,6 +18,7 @@ mod code_graph;
 pub mod file_tree;
 pub mod glide;
 pub mod graph_data;
+pub mod graph_memory;
 pub mod graph_style;
 pub mod html;
 pub use code_graph::{CodeGraphOverlay, PHANTOM_NOT_FOUND};
