@@ -564,8 +564,7 @@ impl Workspace {
     }
 
     fn refresh_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let folder = self.folder.clone();
-        self.directory(folder, window, cx);
+        self.refresh_tree(window, cx);
     }
 
     /// Poll the service for files changed outside the workspace: reload clean open
