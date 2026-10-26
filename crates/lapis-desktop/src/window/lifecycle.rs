@@ -42,6 +42,7 @@ impl Root {
             fitted_for: (0., 0.),
             draw_ms: Rc::new(Cell::new(0.)),
             skipped_tick: false,
+            folders: vec![],
             focus: cx.focus_handle(),
         }
     }

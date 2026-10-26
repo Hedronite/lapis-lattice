@@ -321,6 +321,8 @@ pub enum Prim {
         alpha: f32,
         /// Set when a group's query matched this node.
         group: Option<GroupColour>,
+        /// Index of the node in the scene that was painted.
+        node: usize,
     },
     Label {
         x: f32,
@@ -385,6 +387,7 @@ pub fn paint(
             pinned: pinned(&n.id),
             alpha: hi.node_alpha(i),
             group: group_for(n, groups),
+            node: i,
         });
     }
     out.extend(labels(scene, &pos, &rad, cam, board, hi));

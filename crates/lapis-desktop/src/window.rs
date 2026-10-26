@@ -17,7 +17,9 @@ use gpui_kit::{
 };
 use gpui_omarchy::ActiveTheme;
 
+mod board;
 mod lifecycle;
+mod render;
 pub(crate) use lifecycle::OpenNote;
 
 use crate::scene::{Filters, Scene};
@@ -185,6 +187,8 @@ pub(crate) struct Root {
     draw_ms: Rc<Cell<f32>>,
     /// True when the last frame skipped physics to protect the frame slot.
     skipped_tick: bool,
+    /// The busiest top-level folders and their note counts; their order is their colour.
+    folders: Vec<(String, usize)>,
     focus: FocusHandle,
 }
 
@@ -201,6 +205,7 @@ impl Root {
         }
         self.scene = laid.scene;
         self.sim = laid.sim;
+        self.folders = crate::graph_style::top_folders(&self.scene);
         let board = self.board();
         self.camera.fit(&self.scene, board);
         self.fit_zoom = self.camera.zoom;
@@ -326,10 +331,11 @@ impl Root {
                 if let Some(i) = index {
                     self.scene.nodes[i].x = w[0];
                     self.scene.nodes[i].y = w[1];
-                    // The sim holds it there and lets the rest settle
-                    // around it, which is what makes a drag feel live.
+                    // The sim holds it there and keeps the layout gently warm,
+                    // so the neighbours follow and nothing else wanders.
                     self.sim.place(i, w[0], w[1]);
                     self.sim.set_pinned(i, true);
+                    self.sim.hold_warm(true);
                 }
             }
             // Drag empty space: pan the camera. The layout does not move.
@@ -345,6 +351,8 @@ impl Root {
 
     fn on_up(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(press) = self.press.take() else { return };
+        // A drag ends: the layout cools back to stillness around the dropped node.
+        self.sim.hold_warm(false);
         // A short press is still a click, even on a node you could have
         // dragged.
         if !press.moved
@@ -567,372 +575,6 @@ fn outline(x: f32, y: f32, w: f32, h: f32, origin: Point<Pixels>, colour: Hsla) 
 fn with_alpha(mut c: Hsla, a: f32) -> Hsla {
     c.a *= a;
     c
-}
-
-impl Render for Root {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.omarchy();
-        // The first frame lays out against the fallback size; once the
-        // canvas reports its real bounds, frame the graph for those.
-        let board_now = self.board();
-        if self.fitted_for != (board_now[0], board_now[1]) {
-            self.camera.fit(&self.scene, board_now);
-            self.fit_zoom = self.camera.zoom;
-            self.fitted_for = (board_now[0], board_now[1]);
-        }
-        // The graph keeps moving until it settles; each frame asks for the
-        // next one, and a graph at rest stops asking.
-        let moving = self.visible && !self.loading && self.advance();
-        if moving {
-            self.meter.frame();
-            window.request_animation_frame();
-        } else {
-            self.meter.idle();
-        }
-        let (edge_c, node_c, seed_c, dangling_c, label_c) =
-            (theme.border, theme.foreground, theme.accent, theme.danger, theme.secondary);
-        let seen = self.visible();
-        let focus = self.hover.as_deref().or(self.selected.as_deref()).and_then(|id| seen.index_of(id));
-        let hi = highlight(&seen, focus);
-        let pins = self.pins.clone();
-        let groups = self.groups.clone();
-        let palette = theme.clone();
-        let group_of = move |g: GroupColour| group_hsla(g, &palette);
-        let prims = paint(&seen, &self.camera, self.board(), &hi, &move |id| pins.contains_key(id), &groups);
-        let labels: Vec<Prim> = prims.iter().filter(|p| matches!(p, Prim::Label { .. })).cloned().collect();
-        let label_count = labels.len();
-        let draw_last = self.draw_ms.get();
-        let origin = self.origin.clone();
-        let board_px = self.board_px.clone();
-        let show_boxes = debug_overlay_on();
-        let draw_ms = self.draw_ms.clone();
-
-        // Strokes are real hairlines built with PathBuilder and dashed by
-        // the tessellator: the v0.2 run-of-dots is gone.
-        let painted = canvas(
-            move |_, _, _| {},
-            move |bounds, _, window, _| {
-                let t_draw = Instant::now();
-                origin.set((f32::from(bounds.origin.x), f32::from(bounds.origin.y)));
-                board_px.set((f32::from(bounds.size.width), f32::from(bounds.size.height)));
-                let at = |x: f32, y: f32| point(bounds.origin.x + px(x), bounds.origin.y + px(y));
-
-                // Every stroke of one colour goes into one path. The
-                // buckets are (solid|dashed) x (lit|dimmed), which is every
-                // distinct colour a stroke can have.
-                let mut batch: [Vec<[f32; 4]>; 4] = Default::default();
-                let mut width = crate::view::STROKE_PX;
-                for p in &prims {
-                    if let Prim::Stroke { x0, y0, x1, y1, width: w, dashed, alpha } = p {
-                        width = *w;
-                        let slot = usize::from(*dashed) | (usize::from(*alpha < FULL_ALPHA) << 1);
-                        if *dashed {
-                            dashes(
-                                [*x0, *y0, *x1, *y1],
-                                crate::view::DASH_PX[0],
-                                crate::view::DASH_PX[1],
-                                &mut batch[slot],
-                            );
-                        } else {
-                            batch[slot].push([*x0, *y0, *x1, *y1]);
-                        }
-                    }
-                }
-                for (slot, segs) in batch.iter().enumerate() {
-                    let alpha = if slot & 2 != 0 { DIM_ALPHA } else { FULL_ALPHA };
-                    if let Some(path) = segments_path(segs, width, bounds.origin) {
-                        window.paint_path(path, with_alpha(edge_c, alpha));
-                    }
-                }
-
-                if show_boxes {
-                    // The rectangle each label reserved, so a screenshot
-                    // shows whether the drawn text stays inside its claim
-                    // instead of leaving it to be argued about.
-                    for p in &prims {
-                        if let Prim::Label { x, y, text, .. } = p {
-                            let b = crate::view::label_box(text, [*x, *y]);
-                            window.paint_quad(outline(
-                                b[0],
-                                b[1],
-                                b[2] - b[0],
-                                b[3] - b[1],
-                                bounds.origin,
-                                with_alpha(seed_c, 0.45),
-                            ));
-                        }
-                    }
-                }
-
-                for p in &prims {
-                    if let Prim::Disc { x, y, r, seed, dangling, pinned, alpha, group } = p {
-                        // A group wins over the default roles: the operator
-                        // asked for that colour by query.
-                        let colour = match group {
-                            Some(g) => group_of(*g),
-                            None if *dangling => dangling_c,
-                            None if *seed => seed_c,
-                            None => node_c,
-                        };
-                        if *pinned {
-                            // A ring around a pinned disc, so a held node is
-                            // legible without a tooltip.
-                            window.paint_quad(dot(at(*x, *y), r + 3.0, with_alpha(seed_c, *alpha * 0.35)));
-                        }
-                        window.paint_quad(dot(at(*x, *y), *r, with_alpha(colour, *alpha)));
-                    }
-                }
-                draw_ms.set(t_draw.elapsed().as_secs_f32() * 1000.0);
-            },
-        )
-        .absolute()
-        .size_full();
-
-        let mut board = div()
-            .id("graph-board")
-            .track_focus(&self.focus)
-            .relative()
-            .w_full()
-            .flex_1()
-            .min_h(px(120.))
-            .overflow_hidden()
-            .bg(theme.background)
-            .child(painted)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, ev, w, cx| {
-                    this.focus.focus(w, cx);
-                    this.on_down(ev, cx)
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, ev, w, cx| {
-                    this.focus.focus(w, cx);
-                    this.on_down(ev, cx)
-                }),
-            )
-            .on_mouse_move(cx.listener(|this, ev, w, cx| this.on_move(ev, w, cx)))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, ev, w, cx| this.on_up(ev, w, cx)))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, ev, w, cx| this.on_up(ev, w, cx)))
-            .on_scroll_wheel(cx.listener(|this, ev, _, cx| this.on_wheel(ev, cx)))
-            .on_key_down(cx.listener(|this, ev, w, cx| this.on_key(ev, w, cx)));
-
-        if debug_overlay_on() {
-            let (lo, hi) = self.sim.extent();
-            let overlay = format!(
-                "{:.0} fps · worst {:.1} ms · tick {:.2} · build {:.2} · draw {:.2} ms · \
-                 {} nodes / {} edges / {} labels · energy {:.4} · {}",
-                self.meter.fps(),
-                self.meter.worst_ms(),
-                self.meter.tick_ms,
-                self.meter.build_ms,
-                draw_last,
-                self.scene.nodes.len(),
-                self.scene.edges.len(),
-                label_count,
-                self.sim.energy(),
-                if moving {
-                    format!("settling, span {:.0}", (hi[0] - lo[0]).max(hi[1] - lo[1]))
-                } else {
-                    "at rest".to_string()
-                },
-            );
-            board = board.child(
-                div().absolute().left(px(6.0)).top(px(6.0)).text_xs().text_color(theme.accent).child(overlay),
-            );
-        }
-
-        // Labels stay elements so they use the theme's text stack; they are
-        // placed from the same paint list as the discs, so they cannot drift.
-        // Each label is drawn in exactly the rectangle the placer reserved
-        // for it: same width, same height, clipped, with the line height
-        // pinned. gpui's default line box is over two ems tall, so a label
-        // that reserved thirteen pixels and drew twenty-six is how they
-        // ended up stacked. Nothing here is free to grow past its box.
-        for l in labels {
-            let Prim::Label { x, y, text, alpha } = l else { continue };
-            let w = crate::view::label_width_px(&text);
-            if x + w < 0.0 || y + LABEL_H < 0.0 || x - w > board_now[0] || y > board_now[1] {
-                continue;
-            }
-            board = board.child(
-                div()
-                    .absolute()
-                    .left(px(x - w / 2.0))
-                    .top(px(y))
-                    .w(px(w))
-                    .h(px(LABEL_H))
-                    .overflow_hidden()
-                    .flex()
-                    .justify_center()
-                    .child(
-                        div()
-                            .text_xs()
-                            .line_height(px(LABEL_H))
-                            .whitespace_nowrap()
-                            .text_color(with_alpha(label_c, alpha.max(0.8)))
-                            .child(text),
-                    ),
-            );
-        }
-
-        let mode_label = match self.layout {
-            Layout::Local => format!("local d{}", self.depth),
-            other => other.label().to_string(),
-        };
-        let query_label = if self.typing {
-            format!("query: {}_", self.filters.query)
-        } else if self.filters.query.is_empty() {
-            "query: /".to_string()
-        } else {
-            format!("query: {}", self.filters.query)
-        };
-        let existing_label =
-            format!("existing only: {}", if self.filters.show_dangling { "off" } else { "on" });
-        let orphans_label =
-            format!("orphans: {}", if self.filters.show_orphans { "shown" } else { "hidden" });
-        let domain_label = format!("domain: {}", self.filters.domain.clone().unwrap_or_else(|| "all".into()));
-        let zoom_label = format!("Fit · {:.0}%", self.camera.zoom / self.fit_zoom.max(f32::EPSILON) * 100.0);
-        let pin_label = format!("unpin {}", self.pins.len());
-        let theme_label = format!("theme: {}", theme.name);
-
-        let chip = |id: &'static str, text: String, colour: Hsla| {
-            div()
-                .id(id)
-                .role(gpui_kit::Role::Button)
-                .aria_label(text.clone())
-                .cursor_pointer()
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .bg(theme.normal_fill())
-                .text_sm()
-                .text_color(colour)
-                .child(text)
-        };
-
-        let mut controls = div()
-            .p_3()
-            .flex_shrink_0()
-            .flex()
-            .flex_wrap()
-            .gap_2()
-            .child(chip("f-layout", format!("layout: {mode_label}"), label_c).on_click(cx.listener(
-                |this, _, window, cx| {
-                    this.layout = this.next_layout();
-                    this.reload(window, cx);
-                    cx.notify();
-                },
-            )))
-            .child(chip("f-depth", format!("depth {}", self.depth), label_c).on_click(cx.listener(
-                |this, _, window, cx| {
-                    this.depth = if this.depth >= graph_data::MAX_DEPTH {
-                        graph_data::MIN_DEPTH
-                    } else {
-                        this.depth + 1
-                    };
-                    if this.layout == Layout::Local {
-                        this.reload(window, cx);
-                    }
-                    cx.notify();
-                },
-            )))
-            .child(chip("f-query", query_label, if self.typing { seed_c } else { label_c }).on_click(
-                cx.listener(|this, _, window, cx| {
-                    this.focus.focus(window, cx);
-                    this.typing = !this.typing;
-                    cx.notify();
-                }),
-            ))
-            .child(chip("f-existing", existing_label, label_c).on_click(cx.listener(|this, _, _, cx| {
-                this.filters.show_dangling = !this.filters.show_dangling;
-                cx.notify();
-            })))
-            .child(chip("f-orphans", orphans_label, label_c).on_click(cx.listener(|this, _, _, cx| {
-                this.filters.show_orphans = !this.filters.show_orphans;
-                cx.notify();
-            })))
-            .child(chip("f-domain", domain_label, label_c).on_click(cx.listener(|this, _, _, cx| {
-                this.cycle_domain();
-                cx.notify();
-            })))
-            .child(chip("f-group", "+group".into(), label_c).on_click(cx.listener(|this, _, _, cx| {
-                this.add_group();
-                cx.notify();
-            })))
-            .child(chip("f-zoom", zoom_label, label_c).on_click(cx.listener(|this, _, _, cx| {
-                let board = this.board();
-                this.camera.fit(&this.scene, board);
-                this.fit_zoom = this.camera.zoom;
-                cx.notify();
-            })))
-            .child(chip("f-unpin", pin_label, label_c).on_click(cx.listener(|this, _, _, cx| {
-                this.pins.clear();
-                this.sim.unpin_all();
-                cx.notify();
-            })))
-            // The live Omarchy theme by name, so a swap is visible in a
-            // screenshot and not just a claim.
-            .child(chip("f-theme", theme_label, label_c));
-
-        // Each group shows in its own colour, so the legend is the swatch.
-        for (n, g) in self.groups.iter().enumerate() {
-            let colour = group_hsla(g.colour, theme);
-            controls = controls.child(
-                div()
-                    .id(gpui_kit::SharedString::from(format!("group-{n}")))
-                    .text_sm()
-                    .text_color(colour)
-                    .child(format!("● {}", g.query))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if n < this.groups.len() {
-                            this.groups.remove(n);
-                        }
-                        cx.notify();
-                    })),
-            );
-        }
-
-        let summary = if self.loading {
-            "Loading graph… Notes remain available.".to_string()
-        } else if let Some(error) = &self.error {
-            format!("Graph unavailable: {error}")
-        } else if self.scene.nodes.is_empty() {
-            "No indexed notes. Build the index from Find, then Refresh graph.".into()
-        } else if seen.nodes.is_empty() {
-            "No nodes match these filters. Reset filters to show the graph.".into()
-        } else {
-            format!(
-                "{} of {} notes · {} links{} · {}",
-                seen.nodes.len(),
-                self.scene.nodes.len(),
-                seen.edges.len(),
-                if self.scene.truncated { " · partial snapshot" } else { "" },
-                self.seed.as_deref().unwrap_or("Whole workspace")
-            )
-        };
-        controls = controls
-            .child(chip("graph-refresh", "Refresh graph".into(), seed_c).on_click(cx.listener(
-                |this, _, w, cx| {
-                    this.snapshot = None;
-                    this.reload(w, cx);
-                },
-            )))
-            .child(chip("graph-reset", "Reset filters".into(), label_c).on_click(cx.listener(
-                |this, _, _, cx| {
-                    this.filters = Filters::default();
-                    this.typing = false;
-                    cx.notify();
-                },
-            )));
-        div().size_full().flex().flex_col().min_h_0().bg(theme.background)
-            .child(controls)
-            .child(div().px_3().pb_2().text_sm().text_color(if self.error.is_some() { theme.danger } else { label_c }).child(summary))
-            .child(board)
-            .child(div().id("graph-preview").h(px(72.)).flex_shrink_0().overflow_y_scroll().px_3().py_2().text_sm().text_color(label_c)
-                .child(self.peek.clone().unwrap_or_else(|| "Click a note to open · Tab selects a node · Enter opens · / filters · arrows pan · 0 fits · wheel zooms · drag a node to pin".into())))
-    }
 }
 
 pub fn open(opts: Options) -> Result<(), DesktopError> {
