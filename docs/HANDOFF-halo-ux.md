@@ -41,7 +41,7 @@ Read in this order, then work. Do not invent a new plan.
    - [docs/terminal-files.md](terminal-files.md)
    - [docs/pdf-runtime.md](pdf-runtime.md)
    - [docs/ux-performance.md](ux-performance.md)
-4. Eli mail_room handoff for Halo (Grok PM · Claude Code fullstack · Composer).
+4. Team handoff note for Halo (Grok PM · Claude Code fullstack · Composer).
 5. Stay on `feat/ux`. Push here. Update PR #18. **No merge. No retarget to `main` work.**
 
 ### Halo roles

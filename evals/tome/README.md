@@ -36,14 +36,20 @@ question's PDF, take the top 8, then replay lapis' shadow Jev rerank. Lapis sear
 no doc filter, which is why the harness filters. The rerank only reorders when every hit
 got a Jev judgement. Pages come from joining `chunk_id` against `data/chunk-pages.jsonl`.
 A join miss is recorded as a `chunk_join_miss` error and never dropped silently. Every
-result records the indexer provenance: `tome_indexer.py` sha256 (atrium-lattice has no git
+result records the indexer provenance: `tome_indexer.py` sha256 (the indexer project has no git
 commits yet), chunk size 2000/4000 chars, no overlap, nomic-embed-text 768d, and the
 rerank settings.
+
+PDF paths in `questions.jsonl`, `failclosed.jsonl`, `config.toml` and the chunk map
+use the neutral root `tomes/`. If your lattice service indexes the PDFs under a different
+vault folder, set `TOME_EVAL_DOC_ROOT` to that folder (for example
+`TOME_EVAL_DOC_ROOT=library/books`) so the same-PDF filter matches its hit paths. When you
+regenerate the chunk map, rewrite that folder back to `tomes/`.
 
 Regenerate the chunk map (read-only, never writes the live DB):
 
 ```sh
-cd "$VAULT/projects/atrium-lattice"
+cd "$VAULT/projects/lattice"
 sqlite3 -json "file:data/lattice.db?mode=ro" "SELECT c.chunk_id, d.path AS doc, c.chunk_index, c.page_start, c.page_end, c.chapter, c.section, c.char_count FROM chunks c JOIN documents d ON d.doc_id=c.doc_id WHERE d.doc_id IN (2065,2067,2086,2094) ORDER BY d.doc_id, c.chunk_index" \
   | jq -c '.[]' > /tmp/chunk-pages.jsonl
 # then add doc_sha256 (sha256 of the PDF, the same value as in questions.jsonl) to each row

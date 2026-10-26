@@ -76,14 +76,9 @@ async fn harness_writes_schema_valid_records_for_both_arms_and_the_probe() {
         tome: Arc::new(FakeTome::sample()),
         cfg: cfg(),
     };
-    let doc = "Archmagus-Stack/09-Tomes/fake/Fake Book.pdf";
+    let doc = "tomes/fake/Fake Book.pdf";
     let qs = vec![q("fake-01", doc, sample_doc().as_str(), true)];
-    let probes = vec![q(
-        "fake-fc-01",
-        "Archmagus-Stack/09-Tomes/fake/No Outline.pdf",
-        no_structure_doc().as_str(),
-        false,
-    )];
+    let probes = vec![q("fake-fc-01", "tomes/fake/No Outline.pdf", no_structure_doc().as_str(), false)];
     let opts = RunOpts {
         questions_file: qfile,
         out_dir: dir.clone(),
@@ -180,7 +175,7 @@ fn eight_root_index(dir: &Path) -> (TomeIndex, tome_eval::contract::DocMeta) {
         },
         title: "eight".into(),
     };
-    let meta = index.build(&pdf_path, "Archmagus-Stack/09-Tomes/fake/Eight.pdf", &opts).unwrap();
+    let meta = index.build(&pdf_path, "tomes/fake/Eight.pdf", &opts).unwrap();
     (index, meta)
 }
 
@@ -211,7 +206,7 @@ async fn one_jev_batch_judges_every_root_so_a_target_past_root_4_is_found() {
         tome: Arc::new(index),
         cfg: c,
     };
-    let mut question = q("roots-01", "Archmagus-Stack/09-Tomes/fake/Eight.pdf", meta.doc_id.as_str(), true);
+    let mut question = q("roots-01", "tomes/fake/Eight.pdf", meta.doc_id.as_str(), true);
     question.question = "where is the brass foundry?".into();
     question.gold_pages = vec![[7, 7]];
     let opts = RunOpts {

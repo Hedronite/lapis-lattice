@@ -26,10 +26,29 @@ pats = [
     r"\blathe\b",
     r"Omahedron",
     r"steam-run",
+    r"(?i)\bcastle\b",
+    r"(?i)\bcitadel\b",
+    # Bare host word only: the `tower` crate and `tower-*` crates stay allowed.
+    r"(?i)(?<![\w\"-])tower(?![\w\"-])",
+    r"(?i)atrium",
+    r"(?i)archmagus",
+    r"09-Tomes",
+    r"mail_room",
+    r"(?i)evanpincham",
 ]
 skip_dirs = {".git", "target", "testdata"}
 skip_files = {"docs/internal-history.md", "scripts/scrub-gate.sh"}
 allow_hedronite = {"CREDITS.md"}
+# Shipped vault defaults (RAG gate scope, task scan excludes, taxonomy folder).
+# Renaming them changes product behavior, so they are allowed here, per file
+# and per pattern only, until a separate change makes them configurable.
+allow_product = {
+    "src/rag_gate.rs": {r"mail_room"},
+    "src/write.rs": {r"mail_room"},
+    "src/cli.rs": {r"mail_room"},
+    "src/tasks.rs": {r"(?i)atrium", r"(?i)archmagus", r"09-Tomes"},
+    "src/taxonomy.rs": {r"(?i)atrium"},
+}
 # Longer forms first so a full URL and a markdown label both redact cleanly.
 canonical_slugs = (
     "https://raw.githubusercontent.com/Hedronite/lapis-lattice",
@@ -55,6 +74,8 @@ for dirpath, dirs, fnames in os.walk("."):
             if pat == r"Hedronite" and (
                 rel in allow_hedronite or os.path.basename(rel) == "LICENSE"
             ):
+                continue
+            if pat in allow_product.get(rel, ()):
                 continue
             for i, line in enumerate(text.splitlines(), 1):
                 if not re.search(pat, line):

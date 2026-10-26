@@ -129,7 +129,7 @@
       "properties": {
         "indexer": {
           "type": "string",
-          "description": "e.g. atrium-lattice/tome_indexer.py"
+          "description": "e.g. lattice/tome_indexer.py"
         },
         "indexer_git_commit": {
           "type": [
