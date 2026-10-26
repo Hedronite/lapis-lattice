@@ -140,8 +140,17 @@ impl Workspace {
                 let reader = if kind == FileKind::Html {
                     gpui_omarchy::html("reading", source.clone(), window, cx)
                 } else {
-                    gpui_omarchy::markdown("reading", source.clone(), window, cx)
+                    // Wikilinks arrive as `lapis-wiki:` links and route back through the vault.
+                    let workspace = cx.entity().downgrade();
+                    let text = crate::live::wiki::to_markdown_links(&source);
+                    gpui_omarchy::markdown("reading", text, window, cx).on_link_click(
+                        move |url, _, window, cx| {
+                            let _ =
+                                workspace.update(cx, |this, cx| this.follow_reading_link(url, window, cx));
+                        },
+                    )
                 };
+                let card = (kind == FileKind::Markdown).then(|| self.reading_card(index, cx)).flatten();
                 // A measure of about 72 characters, centred, however wide the pane is.
                 let pane = div()
                     .id(("reading-scroll", index))
@@ -152,12 +161,9 @@ impl Workspace {
                     .overflow_y_scroll()
                     .px_8()
                     .py_8()
-                    .child(
-                        div()
-                            .flex()
-                            .justify_center()
-                            .child(div().w_full().max_w(px(720.)).child(reader.text_size(px(16.)))),
-                    );
+                    .child(div().flex().justify_center().child(
+                        div().w_full().max_w(px(720.)).children(card).child(reader.text_size(px(16.))),
+                    ));
                 if view == View::Split {
                     split = split.child(resizable_panel().child(pane));
                 } else {

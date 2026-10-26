@@ -184,7 +184,12 @@ impl Workspace {
             .gap_0p5();
         for (index, hit) in p.hits.iter().enumerate() {
             let path = hit.path.clone();
-            let snippet = hit.snippet.clone().filter(|s| !s.trim().is_empty());
+            // One run of prose: the clamp counts wrapped lines, not the snippet's own newlines.
+            let snippet = hit
+                .snippet
+                .as_deref()
+                .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|s| !s.is_empty());
             let mut row = div()
                 .id(("result", index))
                 .role(Role::ListBoxOption)

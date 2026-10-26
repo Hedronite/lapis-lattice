@@ -612,6 +612,7 @@ impl Workspace {
                         return;
                     }
                     let text = document.text.clone();
+                    tab.live.update(cx, |s, cx| s.set_properties(document.properties.clone(), cx));
                     tab.document = document;
                     tab.editor.update(cx, |s, cx| {
                         let cursor = s.cursor().min(text.len());

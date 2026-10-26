@@ -87,6 +87,11 @@ pub trait WorkspaceServices: Send + Sync {
     fn search(&self, query: &str) -> Result<SearchPage, String>;
     fn reindex(&self, path: &str) -> Result<(), String>;
     fn build_index(&self) -> Result<u64, String>;
+    /// The vault path a `[[wikilink]]` target names, `None` when nothing matches.
+    /// More than one match is an error that lists the candidates.
+    fn resolve_link(&self, _target: &str) -> Result<Option<String>, String> {
+        Err("Links cannot be followed in this service".into())
+    }
     fn links(&self, _path: &str) -> Result<Vec<ContextLink>, String> {
         Err("Link context is unavailable in this service".into())
     }

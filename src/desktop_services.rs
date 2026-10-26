@@ -217,6 +217,28 @@ impl WorkspaceServices for Service {
         self.runtime.block_on(ops::reindex(&self.ctx, path)).map(|_| ()).map_err(|e| e.to_string())
     }
 
+    fn resolve_link(&self, target: &str) -> Result<Option<String>, String> {
+        // A link that already names a vault file skips the whole-vault scan.
+        let bare = target.split(['#', '|']).next().unwrap_or(target).trim();
+        for candidate in [bare.to_string(), format!("{bare}.md")] {
+            if let Ok(abs) = self.contained(&candidate)
+                && abs.is_file()
+                && let Ok(rel) =
+                    abs.strip_prefix(self.ctx.vault.root.canonicalize().map_err(|e| e.to_string())?)
+            {
+                return Ok(Some(rel.to_string_lossy().into_owned()));
+            }
+        }
+        let r = crate::resolve::resolve(&self.ctx.vault.root, target).map_err(|e| e.to_string())?;
+        match (r.path, r.how) {
+            (Some(path), _) => Ok(Some(path)),
+            (None, "collision") => {
+                Err(format!("{target} matches more than one note: {}", r.candidates.join(", ")))
+            }
+            (None, _) => Ok(None),
+        }
+    }
+
     fn links(&self, path: &str) -> Result<Vec<lapis_desktop::services::ContextLink>, String> {
         self.runtime.block_on(async {
             let neighbors =
