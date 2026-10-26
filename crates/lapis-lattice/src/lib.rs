@@ -12,6 +12,7 @@ mod embed;
 mod graph;
 mod index;
 mod kinds;
+mod scope;
 mod sqlite;
 
 #[cfg(test)]

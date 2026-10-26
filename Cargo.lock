@@ -4232,6 +4232,7 @@ dependencies = [
 name = "lapis-lattice"
 version = "0.4.2"
 dependencies = [
+ "ignore",
  "regex",
  "rusqlite",
  "serde",
