@@ -63,6 +63,26 @@ impl Service {
         saved
     }
 
+    fn search_with(&self, query: &str, embedder: Option<&str>) -> Result<SearchPage, String> {
+        self.runtime.block_on(async {
+            let backend = self.ctx.backend().map_err(|e| e.to_string())?;
+            let health = backend.health().await.map_err(|e| e.to_string())?;
+            let q = ops::SearchQuery {
+                query: query.into(),
+                limit: 30,
+                embedder: embedder.map(str::to_string),
+                ..Default::default()
+            };
+            let page = ops::search(&self.ctx, q).await.map_err(|e| e.to_string())?;
+            Ok(SearchPage {
+                hits: page.result.hits,
+                modalities: page.result.modalities,
+                indexed_documents: health.documents_indexed,
+                can_build_index: backend.mode() == "embedded",
+            })
+        })
+    }
+
     /// Status-bar text never shows where the vault lives on disk.
     fn vault_relative(&self, message: String) -> String {
         let mut message = message;
@@ -211,22 +231,12 @@ impl WorkspaceServices for Service {
     }
 
     fn search(&self, query: &str) -> Result<SearchPage, String> {
-        self.runtime.block_on(async {
-            let backend = self.ctx.backend().map_err(|e| e.to_string())?;
-            let health = backend.health().await.map_err(|e| e.to_string())?;
-            let page = ops::search(
-                &self.ctx,
-                ops::SearchQuery { query: query.into(), limit: 30, ..Default::default() },
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-            Ok(SearchPage {
-                hits: page.result.hits,
-                modalities: page.result.modalities,
-                indexed_documents: health.documents_indexed,
-                can_build_index: backend.mode() == "embedded",
-            })
-        })
+        self.search_with(query, None)
+    }
+
+    fn search_fast(&self, query: &str) -> Result<SearchPage, String> {
+        // `none`: BM25 and titles only, with no embedder round trip.
+        self.search_with(query, Some("none"))
     }
 
     fn reindex(&self, path: &str) -> Result<(), String> {

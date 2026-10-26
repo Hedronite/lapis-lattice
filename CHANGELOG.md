@@ -2,8 +2,16 @@
 
 ## [Unreleased]
 
+### Stale index
+
+- `search --json` carries `meta.stale`: how many notes the index has not caught up with. A note is stale when its file is newer than its index entry, when it sits in an indexed folder but has no entry, or when its entry names a file that is gone. Non-zero means a miss may be the index, not the vault. The MCP `search` tool reports it too, and human `search` output prints one line on stderr.
+- `vault info` reports `lattice.stale` with `count`, `changed`, `unindexed`, `removed` and up to 20 paths. `doctor` adds an `index_fresh` check.
+- The check reads the index through the configured backend, embedded or HTTP, and walks only folders that already hold indexed notes, so folders the index leaves out on purpose are never counted. Markdown only.
+- Listing about 9,300 documents from an HTTP lattice takes most of a second, so `search` and `vault info` reuse a check up to 60 s old from `$XDG_CACHE_HOME/lapis` (else `~/.cache/lapis`), never from the vault. A reindex through `lapis` drops the cached check, and `doctor` always checks afresh.
+
 ### Desktop
 
+- PDFs read as one continuous column of pages. Only pages near the viewport are rendered, one at a time, so a 1,300-page book opens and scrolls without rendering every page. The page field follows the scroll; typing a page, Previous/Next, j/k, Page Up/Down and Home/End jump to page tops, and zoom keeps your place.
 - The window opens in a Lapis palette (night navy, cream, gold) unless an Omarchy theme is present. `LAPIS_THEME=lapis` or `LAPIS_THEME=omarchy` overrides the choice.
 - The sidebar, toolbar, tabs, document views, search palette, command menu, context panel, PDF reader and status bar are restyled, with icons and shortcut hints.
 - Live and Reading keep text in a centred column of about 72 characters. Live sets H1/H2 in a serif, colours `[[wikilinks]]`, dims HTML comments, shows strikethrough and inline code, and draws a scroll thumb.
@@ -15,10 +23,17 @@
 - Frontmatter shows as a properties card above Live and Reading text: the first four keys (title, type, status, …), with `Show all` for the rest. Wikilinks in values, such as `parent` and `cross_refs`, follow like body links. The card is read-only; Properties in the command menu edits.
 - Reading view follows wikilinks too. Search snippets read as one run of prose and clamp to two lines.
 - The sidebar is a folder tree: folders open and close in place and load on first open, with indent guides and a collapse-all control. Opening a note opens the folders above it and scrolls its row into view. A Recent section lists the last five notes opened. The saved session format is unchanged.
+- The search palette shows keyword results as soon as they arrive (a fraction of a second) and replaces them with the hybrid ranking when the embedder answers, keeping the selected note selected. If vector search fails, the keyword results stay and say so.
 
 ### Phantom client
 
 - Lapis parses the JSON envelope that `phantom-fractal` prints and does not read Phantom's database.
+
+### Notes and the RAG gate
+
+- `lapis create` writes `title` beside `name`, so a new note passes the frontmatter gate it is checked against.
+- The gate resolves wikilinks against the index the vault actually uses: the HTTP lattice when the config says `mode = "http"`, otherwise the embedded one. It used to read the embedded index regardless and report notes as dangling that `lapis resolve` found.
+- A `/documents` row whose tags hold a number or a boolean (YAML reads `tags: [ops, 429]` that way) no longer fails the whole page. `lapis list` reported the lattice as down because of one such note.
 
 ### Dependencies
 
