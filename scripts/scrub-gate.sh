@@ -5,10 +5,23 @@
 # "Hedronite" is allowed in CREDITS.md, any LICENSE file, and the canonical
 # public repo URL (github.com/Hedronite/lapis-lattice). Other mentions stay banned.
 # Every other exception is an exact literal scoped to one file (ALLOW below).
+# testdata/ directories are scanned like everything else (no directory skip).
+# Fails closed: no file list, an empty list, or an unreadable tracked file is
+# a failure, never "clean".
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-git ls-files -z | python3 -c "$(cat <<'PY'
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "scrub-gate: not inside a git work tree" >&2
+    exit 1
+fi
+LIST="$(mktemp)"
+trap 'rm -f "$LIST"' EXIT
+if ! git ls-files -z >"$LIST"; then
+    echo "scrub-gate: git ls-files failed" >&2
+    exit 1
+fi
+python3 - "$LIST" <<'PY'
 import os, re, sys
 pats = [
     r"apiary",
@@ -35,6 +48,11 @@ pats = [
     r"09-Tomes",
     r"evanpincham",
     r"\bEvan\b",
+    # Tailscale CGNAT range 100.64.0.0/10 (100.64.x.x through 100.127.x.x).
+    r"(?<![\d.])100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}(?![\d.]*\d)",
+    r"ts\.net\b",
+    r"tailnet",
+    r"protonmail",
 ]
 pats = [(p, re.compile(p, re.IGNORECASE)) for p in pats]
 skip_files = {"docs/internal-history.md", "scripts/scrub-gate.sh"}
@@ -51,33 +69,53 @@ canonical_slugs = (
 # Shipped vault defaults (RAG gate scope, task scan excludes, taxonomy folder):
 # renaming them changes product behavior, so they stay until a separate change
 # makes them configurable.
-MAIL = "agents/mail_room/"
 ALLOW = {
-    "src/cli.rs": [MAIL],
-    "src/write.rs": [MAIL],
-    "src/rag_gate.rs": [MAIL, "agents/mail_room.md", "agents/mail_room/**"],
+    "src/cli.rs": ["`agents/mail_room/**`)"],
+    "src/write.rs": ["`agents/mail_room/**`)"],
+    "src/rag_gate.rs": [
+        "//! and `agents/mail_room/**`.",
+        "or `agents/mail_room/`. Other trees",
+        "rel.starts_with(\"agents/mail_room/\")",
+        "and agents/mail_room/** markdown create/touch\"",
+        "in_scope(\"agents/mail_room/notes/2026-09-21.md\")",
+        "in_scope(\"agents/mail_room.md\")",
+        "\"agents/mail_room/m.md\",",
+    ],
     "src/tasks.rs": ["\"projects/atrium-lattice/data/\"", "\"Archmagus-Stack/09-Tomes/\""],
-    # Public org site badge and the gate-result schema \$id (an identifier, not a host).
-    "README.md": ["https://hedronite.com", "org-hedronite.com"],
+    # Public org site badge and the gate-result schema $id (an identifier, not a host).
+    "README.md": ["href=\"https://hedronite.com\"", "/badge/org-hedronite.com-809DAF?"],
+    "crates/lapis-lattice/testdata/graph-snapshot.schema.json": [
+        "\"https://hedronite.local/lapis/schema/v0.3/graph-snapshot.schema.json\""
+    ],
     "schema/gate-result.schema.json": ["https://hedronite.local/foundry/rag-gate/gate-result.schema.json"],
     "src/taxonomy.rs": ["`projects/atrium-lattice/taxonomy.py`", "\"projects/atrium-lattice\""],
 }
-# The `tower` crate (an upstream Rust dependency) in lockfiles only.
+# The `tower` crate (an upstream Rust dependency) in the tracked workspace
+# lockfiles only (repo root and the vendored workspace root).
+LOCK_FILES = {"Cargo.lock", "vendor/gpui-base/Cargo.lock"}
 LOCK_ALLOW = ["name = \"tower\"", "\"tower\",", "\"tower ", "\"tower-"]
 ALLOW = {k: sorted(v, key=len, reverse=True) for k, v in ALLOW.items()}
 
-files = [f for f in sys.stdin.buffer.read().decode().split("\0") if f]
+files = [f for f in open(sys.argv[1], "rb").read().decode().split("\0") if f]
+if not files:
+    print("scrub-gate: git ls-files returned no files", file=sys.stderr)
+    sys.exit(1)
 hits = []
+unreadable = []
 for rel in files:
     rel = os.path.relpath(os.path.normpath(rel))
-    if rel in skip_files or "testdata" in rel.split(os.sep) or not os.path.isfile(rel):
+    if rel in skip_files:
         continue
+    if os.path.islink(rel) or os.path.isdir(rel):
+        continue  # a symlink or submodule entry: no file content of its own
     try:
-        text = open(rel, errors="replace").read()
-    except Exception:
+        with open(rel, errors="replace") as fh:
+            text = fh.read()
+    except Exception as e:
+        unreadable.append(f"{rel}: {e.__class__.__name__}: {e}")
         continue
     allow = ALLOW.get(rel, [])
-    if os.path.basename(rel) == "Cargo.lock":
+    if rel in LOCK_FILES:
         allow = allow + LOCK_ALLOW
     for i, line in enumerate(text.splitlines(), 1):
         redacted = line
@@ -92,12 +130,15 @@ for rel in files:
                     probe = probe.replace(slug, "")
             if rx.search(probe):
                 hits.append(f"{rel}:{i}: /{pat}/i {line.strip()[:120]}")
+if unreadable:
+    print(f"scrub-gate: {len(unreadable)} unreadable tracked file(s)")
+    print("\n".join(unreadable))
 if hits:
     print(f"scrub-gate: {len(hits)} hit(s)")
     print("\n".join(hits[:80]))
     if len(hits) > 80:
         print(f"... {len(hits)-80} more")
+if hits or unreadable:
     sys.exit(1)
-print("scrub-gate: clean")
+print(f"scrub-gate: clean ({len(files)} tracked files)")
 PY
-)"
