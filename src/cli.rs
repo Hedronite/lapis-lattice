@@ -338,12 +338,16 @@ pub struct CaptureArgs {
 #[derive(Debug, Args)]
 pub struct ReindexArgs {
     /// Vault-relative markdown path, e.g. `notes/STATUS.md`.
-    #[arg(value_name = "PATH", required_unless_present = "all", conflicts_with = "all")]
+    #[arg(value_name = "PATH", required_unless_present_any = ["all", "vectors"], conflicts_with_all = ["all", "vectors"])]
     pub path: Option<String>,
 
     /// Rebuild the whole embedded index, every note, with progress on stderr.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "vectors")]
     pub all: bool,
+
+    /// Embed only the chunks that have no vector yet: no walk, nothing cleared.
+    #[arg(long)]
+    pub vectors: bool,
 }
 
 #[derive(Debug, Args)]
@@ -425,9 +429,10 @@ pub struct SearchArgs {
     #[arg(long)]
     pub include_archives: bool,
 
-    /// Override the vault embedder for this query. `none` = BM25 only: no vector
-    /// arm and no connect to Ollama. `auto`/`ollama`/`onnx` use the index as stored
-    /// (`auto` is resolved at open, not per search).
+    /// Override `[embedder] provider` for this query (embedded index). `none` =
+    /// BM25 only: no vector arm and no connect to Ollama. `ollama` uses the
+    /// configured model; `auto` uses the space the index records. A dead
+    /// embedder drops the vector arm and BM25 still answers.
     #[arg(long, value_name = "PROVIDER", value_parser = ["none", "auto", "ollama", "onnx"])]
     pub embedder: Option<String>,
 
@@ -704,6 +709,9 @@ mod tests {
         assert!(matches!(c.command(), Command::Reindex(r) if r.path.is_none() && r.all));
         assert!(Cli::try_parse_from(["lapis", "reindex"]).is_err(), "a path or --all");
         assert!(Cli::try_parse_from(["lapis", "reindex", "a.md", "--all"]).is_err(), "not both");
+        let c = Cli::try_parse_from(["lapis", "reindex", "--vectors"]).unwrap();
+        assert!(matches!(c.command(), Command::Reindex(r) if r.vectors && r.path.is_none()));
+        assert!(Cli::try_parse_from(["lapis", "reindex", "--all", "--vectors"]).is_err());
     }
 
     #[test]

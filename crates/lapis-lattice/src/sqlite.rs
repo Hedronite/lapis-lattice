@@ -497,6 +497,9 @@ pub fn health(conn: &Connection, db_path: &Path) -> Result<Health> {
         _ => "none",
     };
     let embed_dim = meta_get(conn, "embed_dim").and_then(|d| d.parse::<u32>().ok());
+    let chunks = count("SELECT COUNT(*) FROM chunks")?;
+    let vectors =
+        if vec_table_exists(conn)? { count(&format!("SELECT COUNT(*) FROM {VEC_TABLE}"))? } else { 0 };
     Ok(Health {
         status: if built { "ok".into() } else { "degraded".into() },
         documents_indexed,
@@ -505,6 +508,8 @@ pub fn health(conn: &Connection, db_path: &Path) -> Result<Health> {
         embedder,
         embed_model,
         embed_dim,
+        chunks,
+        vectors,
         graph: Graph { built, edges, dangling_links },
     })
 }

@@ -32,6 +32,62 @@ pub struct Config {
     #[serde(default)]
     #[cfg_attr(not(feature = "tome"), allow(dead_code))]
     pub tome: TomeModelConfig,
+    /// `[embedder]`: the vector arm of the embedded index. Off unless named.
+    #[serde(default)]
+    pub embedder: EmbedderConfig,
+}
+
+/// `[embedder]`: who turns chunks into vectors for the embedded index.
+///
+/// `provider` is `ollama`, `auto` (use the space the index already records;
+/// probe Ollama only when `reindex --all` or `doctor` settles it), or `none`
+/// (keyword search only). Unset never touches the network and uses whatever
+/// Ollama space the index records. No setting here throws stored vectors away;
+/// only embedding with a different model or width does. The HTTP lattice owns
+/// its own embedder.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct EmbedderConfig {
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default = "default_embed_model")]
+    pub model: String,
+    #[serde(default = "default_ollama_url")]
+    pub ollama_url: String,
+    /// Vector width. Unset: read from the index, else asked of the model once.
+    #[serde(default)]
+    pub dim: Option<usize>,
+    /// Per request for a search query or a probe.
+    #[serde(default = "default_embed_timeout")]
+    pub timeout_ms: u64,
+    /// Per batch of chunks during indexing, which includes a cold model load.
+    #[serde(default = "default_embed_index_timeout")]
+    pub index_timeout_ms: u64,
+}
+
+fn default_embed_model() -> String {
+    "nomic-embed-text".into()
+}
+fn default_ollama_url() -> String {
+    "http://127.0.0.1:11434".into()
+}
+fn default_embed_timeout() -> u64 {
+    5000
+}
+fn default_embed_index_timeout() -> u64 {
+    120_000
+}
+
+impl Default for EmbedderConfig {
+    fn default() -> Self {
+        Self {
+            provider: None,
+            model: default_embed_model(),
+            ollama_url: default_ollama_url(),
+            dim: None,
+            timeout_ms: default_embed_timeout(),
+            index_timeout_ms: default_embed_index_timeout(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -547,6 +603,23 @@ mod tests {
         assert_eq!(c.lattice.timeout_ms, 250);
         let c: Config = toml::from_str("[lattice]\nmode = \"http\"\n").unwrap();
         assert!(!c.lattice.is_embedded());
+    }
+
+    #[test]
+    fn embedder_section_defaults_off_and_reads_ollama() {
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.embedder, EmbedderConfig::default());
+        assert_eq!(c.embedder.provider, None, "no network unless the operator names a provider");
+        let c: Config = toml::from_str(
+            "[embedder]\nprovider = \"ollama\"\nmodel = \"nomic-embed-text:v1.5\"\n\
+             ollama_url = \"http://127.0.0.1:11434\"\ntimeout_ms = 900\n",
+        )
+        .unwrap();
+        assert_eq!(c.embedder.provider.as_deref(), Some("ollama"));
+        assert_eq!(c.embedder.model, "nomic-embed-text:v1.5");
+        assert_eq!(c.embedder.timeout_ms, 900);
+        assert_eq!(c.embedder.index_timeout_ms, 120_000);
+        assert_eq!(c.embedder.dim, None);
     }
 
     #[test]

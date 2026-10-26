@@ -35,12 +35,17 @@ pub struct Health {
     #[serde(skip_serializing_if = "is_zero")]
     pub stale_documents: u64,
     pub db_path: String,
-    /// Resolved, not requested: `none` until vectors land (slice 2).
+    /// Recorded in the index (embedded) or reported by the service (HTTP).
     pub embedder: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embed_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embed_dim: Option<u32>,
+    /// Embedded only: indexed chunks, and how many carry a vector.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunks: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vectors: Option<u64>,
     pub graph: Graph,
 }
 
@@ -356,6 +361,8 @@ impl Backend {
                     embedder: h.embedder.to_string(),
                     embed_model: h.embed_model,
                     embed_dim: h.embed_dim,
+                    chunks: Some(h.chunks),
+                    vectors: Some(h.vectors),
                     graph: Graph {
                         built: h.graph.built,
                         edges: h.graph.edges,
@@ -379,6 +386,8 @@ impl Backend {
                         .to_string(),
                     embed_model: h.extra.get("embed_model").and_then(Value::as_str).map(str::to_string),
                     embed_dim: h.extra.get("embed_dim").and_then(Value::as_u64).map(|n| n as u32),
+                    chunks: None,
+                    vectors: None,
                     graph: Graph { built: true, edges: h.edges, dangling_links: h.dangling_links },
                 })
             }
@@ -407,6 +416,16 @@ impl Backend {
             }
             Backend::Http(_) => {
                 Err(LapisError::Usage("Full indexing is managed by the configured HTTP service".into()))
+            }
+        }
+    }
+
+    /// Embed the chunks that have no vector yet, without walking the vault.
+    pub fn embed_pending(&self) -> Result<u64> {
+        match self {
+            Backend::Embedded(engine) => lock(engine).embed_pending().map_err(LapisError::from),
+            Backend::Http(_) => {
+                Err(LapisError::Usage("Embedding is managed by the configured HTTP service".into()))
             }
         }
     }

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Vectors in the embedded index
+
+- `[embedder]` in the config turns on the vector arm of the embedded index. `provider = "ollama"` with `model` and `ollama_url` (defaults `nomic-embed-text`, `http://127.0.0.1:11434`); nomic models get their `search_query:` / `search_document:` prefixes. `timeout_ms` (5000) bounds a query, `index_timeout_ms` (120000) a batch of chunks.
+- `lapis reindex --all` embeds every chunk after the walk and reports `embedded`, `embedError`, `embedder` and `embedderNote`. A terminal sees `embedding N chunks` while it runs. A failing embedder is reported and the keyword index still lands.
+- Hybrid search fuses BM25 and vectors. When Ollama is down, hung, or slower than `timeout_ms`, search drops the vector arm and answers from BM25. `search --embedder none` is BM25 only and never connects; `--embedder ollama|auto` overrides the config for one query.
+- Stored vectors survive anything short of embedding with a different model or width. `lapis-lattice` no longer treats an open with no embedder as a change of space: the desktop graph view, a run with no `[embedder]` section, `provider = "none"`, `--embedder none`, a dead Ollama, or a new model that does not answer all leave the stored space and its vectors alone. Before this, any keyword-only open dropped the vector table. `auto` uses the space the index records and probes Ollama only during `reindex --all`, `doctor` or the TUI build.
+- `lapis reindex --vectors` embeds only the chunks that have no vector yet, with no walk and nothing cleared, so an Ollama outage or an interrupted run resumes instead of re-embedding the vault. `doctor` names it when vectors are missing.
+- A one-note reindex (every write) embeds only that note's chunks, so the first write after configuring an embedder does not embed the whole vault inline.
+- `doctor` reports the embedder: model, width, endpoint, chunks embedded out of chunks indexed, and one query round trip. Missing vectors and a dead Ollama warn; neither fails. Embedded `vault info --json` health carries `chunks` and `vectors`.
+
 ### Graph
 
 - The graph unfolds in view. The layout still settles off the UI thread, but it publishes positions about thirty times a second, so the board shows the vault taking shape instead of a loading card. Unlinked notes ride a belt that grows with the core, and the final separation pass slides in over about a third of a second. The camera keeps the graph framed as it grows until you pan or zoom; Fit hands it back. Panning and zooming work during the unfold.

@@ -116,6 +116,18 @@ There is **no implicit default vault**: nothing is guessed. A bare `lapis` with 
 
 Default search, list, neighbors (hop-1), and doctor talk to the embedded index. They open **no listening socket**. Hop-2 ego and `tree-retrieve` on embedded say they require `lattice.mode = http` rather than failing empty.
 
+Search is keyword (BM25) until you name an embedder. With [Ollama](https://ollama.com) running, add this to `~/.config/lapis/config.toml` and run `lapis reindex --all`; `search` is then hybrid (BM25 + vectors):
+
+```toml
+[embedder]
+provider = "ollama"            # or "auto", or "none"
+model = "nomic-embed-text"
+ollama_url = "http://127.0.0.1:11434"
+timeout_ms = 5000              # per query; index_timeout_ms (120000) per batch
+```
+
+If Ollama is down or slow, search falls back to BM25 and the stored vectors stay; `lapis reindex --vectors` later embeds whatever was missed. `search --embedder none` skips the vector arm for one query. `lapis doctor` reports the embedder, how many chunks have vectors, and one query round trip.
+
 ```text
 lapis init ~/Notes
 lapis --vault ~/Notes

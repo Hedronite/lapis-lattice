@@ -30,11 +30,25 @@ impl Ctx {
     /// The read path. Embedded by default (D-V02-BACKEND); HTTP only when the
     /// operator asked for it in config or passed `--lattice`.
     pub fn backend(&self) -> Result<Backend> {
+        self.backend_with(None, false).map(|(b, _)| b)
+    }
+
+    /// [`Ctx::backend`] with the embedded index's embedder chosen by
+    /// [`crate::embedder::resolve`]: `embedder` is a per-call override
+    /// (`search --embedder`), `settle` lets `auto` probe. The resolution is
+    /// `None` for the HTTP backend, which owns its own embedder.
+    pub fn backend_with(
+        &self,
+        embedder: Option<&str>,
+        settle: bool,
+    ) -> Result<(Backend, Option<crate::embedder::Resolved>)> {
         if self.cfg.lattice.is_embedded() && !self.force_http {
-            let engine = lapis_lattice::Engine::open(&self.vault.root).map_err(LapisError::from)?;
-            Ok(Backend::Embedded(std::sync::Arc::new(std::sync::Mutex::new(engine))))
+            let r = crate::embedder::resolve(&self.cfg.embedder, embedder, &self.vault.root, settle);
+            let engine =
+                lapis_lattice::Engine::open_with(&self.vault.root, r.embedder()).map_err(LapisError::from)?;
+            Ok((Backend::Embedded(std::sync::Arc::new(std::sync::Mutex::new(engine))), Some(r)))
         } else {
-            Ok(Backend::Http(self.client()?))
+            Ok((Backend::Http(self.client()?), None))
         }
     }
     /// `meta.stale` for search: notes the index has not caught up with, from a
@@ -259,7 +273,8 @@ fn prepare_search(q: SearchQuery) -> Result<(SearchParams, u32, u32)> {
 pub async fn search(ctx: &Ctx, q: SearchQuery) -> Result<SearchPage> {
     let rerank_jev = q.rerank_jev;
     let (params, limit, offset) = prepare_search(q)?;
-    let mut result = ctx.backend()?.search(&params).await?;
+    let (backend, _) = ctx.backend_with(params.embedder.as_deref(), false)?;
+    let mut result = backend.search(&params).await?;
     let total = result.hits.len();
     result.hits = result.hits.into_iter().skip(offset as usize).collect();
     result.count = result.hits.len();

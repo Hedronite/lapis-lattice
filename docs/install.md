@@ -96,7 +96,7 @@ or `$LAPIS_VAULT`. There is no `lapis config set vault`. There is no separate
 - binary version, OS/arch
 - vault path and whether it is a directory
 - lattice: `embedded` (sqlite at `<vault>/.lapis/lattice.sqlite`) or `http` URL, reachable?
-- embedder: `none` / `ollama` / `onnx`
+- embedder: `none` / `ollama`, with model, width, chunks embedded and a query round trip
 - PATH
 
 Exit codes stay: 0 ok, 1 usage, 2 lattice/index down, 3 path.

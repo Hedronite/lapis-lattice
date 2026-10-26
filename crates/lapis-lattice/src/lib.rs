@@ -161,6 +161,9 @@ pub struct Health {
     pub embedder: &'static str,
     pub embed_model: Option<String>,
     pub embed_dim: Option<u32>,
+    /// Chunks in the index, and how many of them carry a vector.
+    pub chunks: u64,
+    pub vectors: u64,
     pub graph: Graph,
 }
 
@@ -232,23 +235,29 @@ impl Engine {
     /// walk. Embedding missing vectors follows the last file and is not counted.
     pub fn reindex_with_progress(&mut self, progress: &mut dyn FnMut(u64, u64)) -> Result<IndexReport> {
         let mut r = index::reindex(&self.conn, &self.vault, progress)?;
-        self.embed_into(&mut r);
+        self.embed_into(&mut r, None);
         Ok(r)
     }
 
     /// Reindex exactly one vault-relative path, in place. A removed file is
-    /// dropped from the index. Costs one file read, not a vault walk.
+    /// dropped from the index. Costs one file read, not a vault walk, and
+    /// embeds only that path's chunks.
     pub fn reindex_path(&mut self, rel: &str) -> Result<IndexReport> {
-        let mut r = index::reindex_path(&self.conn, &self.vault, rel)?;
-        self.embed_into(&mut r);
+        let rel = rel.trim_start_matches("./").replace('\\', "/");
+        let mut r = index::reindex_path(&self.conn, &self.vault, &rel)?;
+        self.embed_into(&mut r, Some(&rel));
         Ok(r)
     }
 
     /// Best-effort embedding. A dead embedder must not fail a write — the note
     /// is already on disk and BM25 already finds it — so the error is carried
     /// in the report instead of returned.
-    fn embed_into(&mut self, r: &mut IndexReport) {
-        match self.embed_pending() {
+    fn embed_into(&mut self, r: &mut IndexReport, only: Option<&str>) {
+        let pending = match self.embedder.clone() {
+            Some(e) => embed::embed_missing(&self.conn, e.as_ref(), 32, only),
+            None => Ok(0),
+        };
+        match pending {
             Ok(n) => r.embedded = n,
             Err(e) => r.embed_error = Some(e.to_string()),
         }
@@ -271,7 +280,7 @@ impl Engine {
     /// An embedder error surfaces here rather than storing a placeholder.
     pub fn embed_pending(&mut self) -> Result<u64> {
         match self.embedder.clone() {
-            Some(e) => embed::embed_missing(&self.conn, e.as_ref(), 32),
+            Some(e) => embed::embed_missing(&self.conn, e.as_ref(), 32, None),
             None => Ok(0),
         }
     }
@@ -691,6 +700,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// A one-note reindex embeds that note, not every chunk still waiting for a
+    /// vector, and health counts what is embedded against what is indexed.
+    #[test]
+    fn reindex_path_embeds_only_its_own_chunks() {
+        let d = vault();
+        let mut e = Engine::open(&d).unwrap();
+        e.reindex().unwrap();
+        drop(e);
+        let bag = std::sync::Arc::new(BagEmbedder { model: "bag-v1", dim: 8 });
+        let mut e = Engine::open_with(&d, Some(bag)).unwrap();
+        let r = e.reindex_path("./Welcome.md").unwrap();
+        let welcome: u64 = e
+            .conn
+            .query_row("SELECT COUNT(*) FROM chunks WHERE path = 'Welcome.md'", [], |r| r.get::<_, i64>(0))
+            .unwrap() as u64;
+        assert_eq!(r.embedded, welcome, "only Welcome.md's chunks were embedded");
+        let h = e.health().unwrap();
+        assert_eq!(h.vectors, welcome);
+        assert!(h.chunks > h.vectors, "Alpha.md still waits for a full reindex");
+        assert_eq!(e.reindex().unwrap().embedded, h.chunks, "a full reindex embeds every chunk");
+        assert_eq!(e.health().unwrap().vectors, e.health().unwrap().chunks);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// v0.4: the extension is linked into this binary, not loaded from a file.
     /// If registration ever stopped happening, every vector path would fail at
     /// `CREATE VIRTUAL TABLE` instead of here.
@@ -905,15 +938,26 @@ mod tests {
                     .unwrap();
             assert_eq!(count(&e), 0, "a dimension change wipes incomparable rows");
         }
-        // Dropping the embedder entirely also clears the space and reports none.
+        // A keyword-only open is not a change of space: it searches BM25 alone
+        // and leaves the stored vectors for the next open that has an embedder.
         {
+            let mut e =
+                Engine::open_with(&d, Some(std::sync::Arc::new(BagEmbedder { model: "bag-v1", dim: 12 })))
+                    .unwrap();
+            let stored = e.reindex().unwrap().embedded as i64;
+            drop(e);
             let e = Engine::open(&d).unwrap();
-            assert_eq!(vectors(&e), None, "no embedder means no vector table, not an empty one");
-            assert_eq!(e.health().unwrap().embedder, "none");
+            assert_eq!(vectors(&e), Some(stored), "opening without an embedder keeps every vector");
+            assert_eq!(e.health().unwrap().embed_dim, Some(12), "and the recorded space");
             let res = e
                 .search_with(&SearchParams { query: "welcome".into(), limit: 5, ..Default::default() })
                 .unwrap();
             assert_eq!(res.modalities, ["bm25"]);
+            drop(e);
+            let e =
+                Engine::open_with(&d, Some(std::sync::Arc::new(BagEmbedder { model: "bag-v1", dim: 12 })))
+                    .unwrap();
+            assert_eq!(count(&e), stored, "the same space reopened finds them");
         }
         let _ = std::fs::remove_dir_all(&d);
     }

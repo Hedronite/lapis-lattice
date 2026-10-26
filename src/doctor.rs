@@ -38,7 +38,9 @@ pub async fn run(ctx: &Ctx) -> Result<()> {
     );
     check!("backend", "ok", if ctx.force_http { "http".to_string() } else { ctx.cfg.lattice.mode.clone() });
 
-    let health = ctx.backend()?.health().await;
+    // `doctor` is one of the moments `auto` may settle, so it probes.
+    let (backend, resolved) = ctx.backend_with(None, true)?;
+    let health = backend.health().await;
     let (embedder, health_val) = match &health {
         Ok(h) => {
             check!(
@@ -69,15 +71,8 @@ pub async fn run(ctx: &Ctx) -> Result<()> {
             Err(e) => check!("index_fresh", "warn", e.to_string()),
         }
     }
-    check!(
-        "embedder",
-        if embedder == "none" { "warn" } else { "ok" },
-        if embedder == "none" {
-            "none - keyword search only; vectors land in a later slice".to_string()
-        } else {
-            embedder.clone()
-        }
-    );
+    let (state, detail) = embedder_check(resolved.as_ref(), health.as_ref().ok(), &embedder, &mut notes);
+    check!("embedder", state, detail);
 
     // A probe that returns nothing is fine. A probe that errors is not.
     let probe = ops::search(
@@ -134,4 +129,44 @@ pub async fn run(ctx: &Ctx) -> Result<()> {
         println!("{}", if ok { "doctor: ok" } else { "doctor: FAILED" });
     }
     if ok { Ok(()) } else { Err(LapisError::LatticeDown("doctor found a failing check".into())) }
+}
+
+/// The `embedder` row. A dead or missing embedder warns: BM25 still answers.
+fn embedder_check(
+    resolved: Option<&crate::embedder::Resolved>,
+    health: Option<&crate::backend::Health>,
+    recorded: &str,
+    notes: &mut Vec<String>,
+) -> (&'static str, String) {
+    use lapis_lattice::Embedder;
+    // HTTP: the service owns its embedder; report what it says.
+    let Some(r) = resolved else {
+        return if recorded == "none" {
+            ("warn", "none - keyword search only".into())
+        } else {
+            ("ok", recorded.into())
+        };
+    };
+    let Some(o) = &r.ollama else {
+        let why = r.note.clone().unwrap_or_else(|| "none - keyword search only".into());
+        return ("warn", why);
+    };
+    let (chunks, vectors) = health.map(|h| (h.chunks.unwrap_or(0), h.vectors.unwrap_or(0))).unwrap_or((0, 0));
+    let space = format!("ollama {} {}d at {}", o.model(), o.dim(), o.endpoint());
+    let mut state = "ok";
+    if vectors < chunks {
+        state = "warn";
+        notes.push(format!(
+            "{} of {chunks} chunks have no vector; `lapis reindex --vectors` embeds them",
+            chunks - vectors
+        ));
+    }
+    if let Some(n) = &r.note {
+        state = "warn";
+        notes.push(n.clone());
+    }
+    match o.check() {
+        Ok(t) => (state, format!("{space}, {vectors}/{chunks} chunks embedded, query {} ms", t.as_millis())),
+        Err(e) => ("warn", format!("{space} did not answer ({e}) - keyword search until it does")),
+    }
 }
