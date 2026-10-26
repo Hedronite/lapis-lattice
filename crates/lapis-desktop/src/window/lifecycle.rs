@@ -42,6 +42,11 @@ impl Root {
             fitted_for: (0., 0.),
             draw_ms: Rc::new(Cell::new(0.)),
             skipped_tick: false,
+            unfolding: None,
+            unfolded: false,
+            camera_held: false,
+            camera_to: None,
+            glide: None,
             folders: vec![],
             focus: cx.focus_handle(),
         }
@@ -76,6 +81,11 @@ impl Root {
         self.hover = None;
         self.preview_epoch += 1;
         self.load_epoch += 1;
+        (self.unfolding, self.unfolded) = (None, false);
+        // A slide cut short lands at once, so the next show draws the real layout.
+        if self.glide.take().is_some() {
+            graph_data::sync_positions(&mut self.scene, &self.sim);
+        }
         if self.loading {
             self.snapshot = None;
         }
@@ -99,6 +109,9 @@ impl Root {
         self.preview_epoch += 1;
         self.peek = None;
         let (services, vault, cached) = (self.services.clone(), self.vault.clone(), self.snapshot.clone());
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(graph_data::Unfolding::default()));
+        (self.unfolding, self.unfolded, self.camera_held) = (Some(slot.clone()), false, false);
+        (self.glide, self.camera_to) = (None, None);
         let (seed, layout, depth) = (self.seed.clone().unwrap_or_default(), self.layout, self.depth);
         let task = cx.background_executor().spawn(async move {
             if layout == Layout::Rings {
@@ -122,8 +135,13 @@ impl Root {
             } else {
                 (*snapshot).clone()
             };
-            // Settle off-thread. Subsequent dragging uses the existing live simulation.
-            let laid = graph_data::lay_out(&scene, &seed, graph_data::SETTLE_TICKS);
+            // Settle off-thread, publishing as it goes so the board can show the graph
+            // unfolding. Subsequent dragging uses the existing live simulation.
+            let laid = graph_data::lay_out_streaming(&scene, &seed, graph_data::SETTLE_TICKS, &mut |u| {
+                if let Ok(mut latest) = slot.lock() {
+                    u.into_slot(&mut latest);
+                }
+            });
             Ok((Some(snapshot), laid))
         });
         cx.spawn_in(window, async move |this, cx| {
@@ -139,7 +157,10 @@ impl Root {
                         this.adopt(laid);
                         this.error = None;
                     }
-                    Err(error) => this.error = Some(error),
+                    Err(error) => {
+                        this.error = Some(graph_data::vault_relative(&this.vault, error));
+                        (this.unfolding, this.unfolded) = (None, false);
+                    }
                 }
                 cx.notify();
                 window.refresh();
@@ -154,18 +175,22 @@ impl Root {
         self.peek = None;
         let Some(id) = id else { return };
         if id.starts_with("dangling:") {
-            self.peek =
-                Some(format!("{} · Unresolved link; no note to open", id.trim_start_matches("dangling:")));
+            let note = id.trim_start_matches("dangling:").to_string();
+            self.peek = Some((note, "Unresolved link; no note to open".into()));
             return;
         }
-        self.peek = Some(format!("{id} · Loading preview…"));
+        self.peek = Some((id.clone(), "Loading preview…".into()));
         let services = self.services.clone();
         let vault = self.vault.clone();
         let task = cx.background_executor().spawn(async move {
-            match services {
-                Some(service) => service.graph_preview(&id).map(|text| format!("{id} · {text}")),
-                None => graph_data::peek(&vault, &id, 600).map(|text| format!("{id} · {text}")),
-            }
+            let text = match services {
+                Some(service) => service.graph_preview(&id),
+                None => graph_data::peek(&vault, &id, 600),
+            };
+            let text = text.unwrap_or_else(|e| {
+                format!("Preview unavailable: {}", graph_data::vault_relative(&vault, e))
+            });
+            (id, text)
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
@@ -173,7 +198,7 @@ impl Root {
                 if this.preview_epoch != epoch || !this.visible {
                     return;
                 }
-                this.peek = Some(result.unwrap_or_else(|e| format!("Preview unavailable: {e}")));
+                this.peek = Some(result);
                 cx.notify();
                 window.refresh();
             });

@@ -11,10 +11,12 @@ default = []
 gui-tests = ["gpui", "gpui-kit/test-support"]
 # Real window via gpui-omarchy (not Zed gpui 0.2). Heavy; everything else compiles without it.
 # Painting primitives (`canvas`, `paint_quad`) come through gpui-kit's `gpui` re-export.
-gpui = ["dep:gpui-omarchy", "dep:gpui-kit", "dep:image"]
+gpui = ["dep:gpui-omarchy", "dep:gpui-kit", "dep:image", "dep:log"]
 
 [dependencies]
 image = { version = "0.25", optional = true, default-features = false }
+# GPUI reports dropped frames through `log`; the shell prints its warnings.
+log = { version = "0.4", optional = true }
 pulldown-cmark = { version = "0.13", default-features = false }
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2"

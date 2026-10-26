@@ -152,7 +152,9 @@ pub(crate) struct Root {
     error: Option<String>,
     /// Node the operator clicked, and the head of that note.
     selected: Option<String>,
-    peek: Option<String>,
+    /// The previewed note's id and the text under it, kept apart so a path that
+    /// contains the card's separator still shows whole.
+    peek: Option<(String, String)>,
     filters: Filters,
     /// True while the query box has the keyboard: printable keys are text.
     typing: bool,
@@ -187,6 +189,18 @@ pub(crate) struct Root {
     draw_ms: Rc<Cell<f32>>,
     /// True when the last frame skipped physics to protect the frame slot.
     skipped_tick: bool,
+    /// A layout in progress: the background settle leaves its newest scene and
+    /// positions here, and the board draws them, so the graph unfolds in view.
+    unfolding: Option<std::sync::Arc<std::sync::Mutex<graph_data::Unfolding>>>,
+    /// True once the scene on the board came from the layout in progress.
+    unfolded: bool,
+    /// The operator moved the camera during this load, so it is theirs: the
+    /// board stops framing the graph for them.
+    camera_held: bool,
+    /// Where the camera is gliding to, if anywhere.
+    camera_to: Option<Camera>,
+    /// The finished layout sliding in: where each node started, and when.
+    glide: Option<(Vec<[f32; 2]>, Instant)>,
     /// The busiest top-level folders and their note counts; their order is their colour.
     folders: Vec<(String, usize)>,
     focus: FocusHandle,
@@ -203,14 +217,76 @@ impl Root {
                 laid.sim.set_pinned(i, true);
             }
         }
+        // After an unfold the board already shows this graph part way there: slide
+        // from what is on screen to the final places, and glide the camera to match.
+        let shown: Vec<[f32; 2]> = self.scene.nodes.iter().map(|n| [n.x, n.y]).collect();
+        let slide = self.unfolded && shown.len() == laid.scene.nodes.len();
         self.scene = laid.scene;
         self.sim = laid.sim;
         self.folders = crate::graph_style::top_folders(&self.scene);
         let board = self.board();
-        self.camera.fit(&self.scene, board);
-        self.fit_zoom = self.camera.zoom;
+        let mut framed = self.camera;
+        framed.fit(&self.scene, board);
+        self.fit_zoom = framed.zoom;
         self.fitted_for = (board[0], board[1]);
+        if slide {
+            for (n, p) in self.scene.nodes.iter_mut().zip(&shown) {
+                (n.x, n.y) = (p[0], p[1]);
+            }
+            self.glide = Some((shown, Instant::now()));
+            self.camera_to = (!self.camera_held).then_some(framed);
+        } else {
+            self.camera = framed;
+            self.camera_to = None;
+        }
+        self.unfolding = None;
+        self.unfolded = false;
         self.meter.idle();
+    }
+
+    /// Draw the newest of a layout in progress. Returns true while one is running,
+    /// which keeps frames coming until it lands.
+    fn unfold(&mut self) -> bool {
+        let Some(slot) = self.unfolding.clone() else { return false };
+        let (scene, positions) = match slot.lock() {
+            Ok(mut latest) => (latest.scene.take(), latest.positions.take()),
+            Err(_) => return true,
+        };
+        let board = self.board();
+        if let Some(mut scene) = scene {
+            scene.apply_pins(&self.pins);
+            self.scene = scene;
+            self.folders = crate::graph_style::top_folders(&self.scene);
+            self.unfolded = true;
+            if !self.camera_held {
+                self.camera.fit(&self.scene, board);
+                self.fit_zoom = self.camera.zoom;
+            }
+        }
+        if let Some(xy) = positions.filter(|xy| xy.len() == self.scene.nodes.len()) {
+            for (n, p) in self.scene.nodes.iter_mut().zip(&xy) {
+                (n.x, n.y) = (p[0], p[1]);
+            }
+            self.scene.apply_pins(&self.pins);
+            if !self.camera_held {
+                let mut framed = self.camera;
+                framed.fit(&self.scene, board);
+                self.fit_zoom = framed.zoom;
+                self.camera_to = Some(framed);
+            }
+        }
+        if let Some(to) = self.camera_to
+            && !crate::glide::camera_toward(&mut self.camera, &to, crate::glide::CAMERA_GLIDE)
+        {
+            self.camera_to = None;
+        }
+        true
+    }
+
+    /// The operator panned or zoomed: during a load, stop framing for them.
+    fn hold_camera(&mut self) {
+        self.camera_held = true;
+        self.camera_to = None;
     }
 
     /// One frame of physics. Returns true while the graph is still moving,
@@ -233,8 +309,26 @@ impl Root {
         for _ in 0..TICKS_PER_FRAME {
             moving |= self.sim.tick();
         }
-        if moving {
+        if let Some((from, start)) = &self.glide {
+            let t =
+                crate::glide::smooth(start.elapsed().as_secs_f32() * 1000.0 / crate::glide::SETTLE_GLIDE_MS);
+            let xy = crate::glide::blend(from, self.sim.positions(), t);
+            for (n, p) in self.scene.nodes.iter_mut().zip(&xy) {
+                (n.x, n.y) = (p[0], p[1]);
+            }
+            if t >= 1.0 {
+                self.glide = None;
+            }
+            moving = true;
+        } else if moving {
             graph_data::sync_positions(&mut self.scene, &self.sim);
+        }
+        if let Some(to) = self.camera_to {
+            if crate::glide::camera_toward(&mut self.camera, &to, crate::glide::CAMERA_GLIDE) {
+                moving = true;
+            } else {
+                self.camera_to = None;
+            }
         }
         self.meter.tick_ms = t0.elapsed().as_secs_f32() * 1000.0;
         moving
@@ -269,11 +363,12 @@ impl Root {
     }
 
     fn on_down(&mut self, ev: &MouseDownEvent, cx: &mut Context<Self>) {
-        if self.loading || self.error.is_some() {
+        if (self.loading && !self.unfolded) || self.error.is_some() {
             return;
         }
         let at = self.local(ev.position);
-        let node = self.node_at(at);
+        // While the graph unfolds a press only pans: nodes are still on the move.
+        let node = if self.loading { None } else { self.node_at(at) };
         if ev.button == MouseButton::Right {
             // Right-click a pinned node releases it; the force layout is
             // free to place it again on the next rebuild.
@@ -339,12 +434,15 @@ impl Root {
                 }
             }
             // Drag empty space: pan the camera. The layout does not move.
-            None => self.camera.pan_by(dx, dy),
+            None => {
+                self.hold_camera();
+                self.camera.pan_by(dx, dy);
+            }
         }
         // While the graph is moving the next animation frame is already
         // booked. Asking for a second render per pointer event on top of it
         // is how a drag loses frames it did not need to lose.
-        if !self.sim.is_running() {
+        if !self.sim.is_running() && !self.loading {
             cx.notify();
         }
     }
@@ -372,6 +470,7 @@ impl Root {
             return;
         }
         let at = self.local(ev.position);
+        self.hold_camera();
         self.camera.zoom_about(ZOOM_STEP.powf(lines), at, self.board());
         cx.notify();
     }
@@ -410,12 +509,21 @@ impl Root {
         let mut rebuild = false;
         match key_action(&ev.keystroke.key, shift, self.typing) {
             KeyAction::None => return,
-            KeyAction::Zoom(f) => self.camera.zoom_by(f, board),
-            KeyAction::Pan(dx, dy) => self.camera.pan_by(dx, dy),
+            KeyAction::Zoom(f) => {
+                self.hold_camera();
+                self.camera.zoom_by(f, board);
+            }
+            KeyAction::Pan(dx, dy) => {
+                self.hold_camera();
+                self.camera.pan_by(dx, dy);
+            }
             KeyAction::ResetCamera => {
+                // Fit hands the camera back: a load in progress frames it again.
                 let board = self.board();
                 self.camera.fit(&self.scene, board);
                 self.fit_zoom = self.camera.zoom;
+                self.camera_held = false;
+                self.camera_to = None;
             }
             KeyAction::StartQuery => self.typing = true,
             KeyAction::QueryPush(c) => self.filters.query.push(c),
@@ -578,6 +686,7 @@ fn with_alpha(mut c: Hsla, a: f32) -> Hsla {
 }
 
 pub fn open(opts: Options) -> Result<(), DesktopError> {
+    crate::log_to_stderr();
     gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx: &mut App| {
         gpui_omarchy::init(cx);
         crate::theme::init(cx);

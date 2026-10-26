@@ -12,6 +12,21 @@
 - A one-note reindex (every write) embeds only that note's chunks, so the first write after configuring an embedder does not embed the whole vault inline.
 - `doctor` reports the embedder: model, width, endpoint, chunks embedded out of chunks indexed, and one query round trip. Missing vectors and a dead Ollama warn; neither fails. Embedded `vault info --json` health carries `chunks` and `vectors`.
 
+### Graph
+
+- The graph unfolds in view. The layout still settles off the UI thread, but it publishes positions about thirty times a second, so the board shows the vault taking shape instead of a loading card. Unlinked notes ride a belt that grows with the core, and the final separation pass slides in over about a third of a second. The camera keeps the graph framed as it grows until you pan or zoom; Fit hands it back. Panning and zooming work during the unfold.
+- Big graphs draw again. Each hairline costs about 720 bytes of GPU instance data, and the renderer drops any frame past 256 MiB. A 20,000-note vault with thousands of long unresolved links needed 480 MiB, so the board froze on its loading card. Links are now clipped to the board before they are drawn, unresolved links are dashed only while a frame has room for the dashes (past 60,000 dash segments they are drawn solid), and a frame draws at most 120,000 segments.
+- The desktop prints GPUI's warnings and errors to stderr. The dropped frames above were reported all along, to a `log` call nothing printed.
+- Zoomed all the way out, hubs (discs of 4 px or more) and the hovered note keep their names.
+- Hovering a hub with more than 40 links draws its fan solid and with less gold ink, instead of hundreds of converging dashes that shimmered.
+
+### Hardening
+
+- A note path that resolves through an in-vault symlink to a file outside the vault is refused with exit 3 (`symlink escapes the vault`). This covers `read`, `check-note`, edits, task toggles and the MCP read tools, which all resolve paths the same way. Symlinks that stay inside the vault still work.
+- The `phantom-fractal` child is bounded. It is stopped after 5 s, its stdout is read up to 1 MiB and its stderr up to 64 KiB, and either limit is a typed error (shown as a Phantom row in the desktop), never a hang or an unbounded buffer. It sees only `PATH`, `HOME`, `XDG_DATA_HOME`, `TMPDIR`, `USER`, `LANG`, `TZ`, `LC_*` and `PHANTOM_*` from Lapis's environment.
+- `$LAPIS_PHANTOM_BINARY`, when set, is the only place Lapis looks for Phantom. A configured path that is missing, misnamed or not executable no longer falls back to `PATH`.
+- Graph preview: a note path containing ` · ` shows whole on the preview card. Without the desktop services, the preview reads at most what it shows and stays inside the vault. Errors on the graph board no longer show where the vault lives on disk.
+
 ### Reindex everything
 
 - `lapis reindex --all` rebuilds the whole embedded index in place: the same rebuild the TUI and the desktop run from their build-index actions, for a terminal or a script. A terminal sees `indexing N/M` on stderr while it runs; `--json` prints `documents`, `chunks`, `edges`, `embedded`, `embedError` and `elapsedMs`. Against an HTTP lattice it exits 1, because that service owns its own index. The stale-index hints in `search` and `doctor` name it.

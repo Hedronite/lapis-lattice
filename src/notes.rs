@@ -79,19 +79,31 @@ pub fn resolve(root: &Path, rel: &str) -> Result<(String, PathBuf)> {
     let clean = clean_rel(rel)?;
     let abs = root.join(&clean);
     if abs.is_file() {
-        return Ok((clean, abs));
+        return inside(root, clean, abs);
     }
     if Path::new(&clean).extension().is_none() {
         let with_md = format!("{clean}.md");
         let abs_md = root.join(&with_md);
         if abs_md.is_file() {
-            return Ok((with_md, abs_md));
+            return inside(root, with_md, abs_md);
         }
     }
     if abs.is_dir() {
         return Err(LapisError::Path(format!("{clean} is a directory, not a note")));
     }
     Err(LapisError::Path(format!("not found: {clean}")))
+}
+
+/// `abs` once it is known to canonicalize inside the vault. An in-vault symlink
+/// that points out of it is refused (exit 3), so no read, edit or index call
+/// reaches a file outside the vault through one.
+fn inside(root: &Path, rel: String, abs: PathBuf) -> Result<(String, PathBuf)> {
+    let root_canon = root.canonicalize().map_err(|e| LapisError::Path(format!("{rel}: {e}")))?;
+    let target = abs.canonicalize().map_err(|e| LapisError::Path(format!("{rel}: {e}")))?;
+    if !target.starts_with(&root_canon) {
+        return Err(LapisError::Path(format!("{rel}: symlink escapes the vault")));
+    }
+    Ok((rel, abs))
 }
 
 /// Note object per `schema/note.schema.json`.
@@ -431,6 +443,24 @@ mod tests {
         assert!(matches!(clean_rel("."), Err(LapisError::Path(_))));
         assert_eq!(clean_rel("./a/./b.md").unwrap(), "a/b.md");
         assert_eq!(clean_rel("a/b.md").unwrap(), "a/b.md");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_refuses_a_symlink_out_of_the_vault() {
+        let v = tmp_vault();
+        let outside = std::env::temp_dir().join(format!("lapis-notes-outside-{}.md", rand_suffix()));
+        std::fs::write(&outside, "secret").unwrap();
+        std::os::unix::fs::symlink(&outside, v.join("notes/leak.md")).unwrap();
+        std::os::unix::fs::symlink(v.join("notes/plain.md"), v.join("notes/alias.md")).unwrap();
+        let err = resolve(&v, "notes/leak.md").unwrap_err();
+        assert_eq!(err.exit_code(), 3);
+        assert!(err.to_string().contains("escapes the vault"), "{err}");
+        assert!(resolve(&v, "notes/leak").is_err(), "the .md fallback is checked too");
+        assert!(read(&v, "notes/leak.md").is_err(), "and so is a read");
+        assert_eq!(resolve(&v, "notes/alias.md").unwrap().0, "notes/alias.md", "a link inside is fine");
+        std::fs::remove_file(outside).unwrap();
+        std::fs::remove_dir_all(v).unwrap();
     }
 
     #[test]

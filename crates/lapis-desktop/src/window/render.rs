@@ -68,7 +68,7 @@ impl Render for Root {
         }
         // The graph keeps moving until it settles; each frame asks for the
         // next one, and a graph at rest stops asking.
-        let moving = self.visible && !self.loading && self.advance();
+        let moving = self.visible && if self.loading { self.unfold() } else { self.advance() };
         if moving {
             self.meter.frame();
             window.request_animation_frame();
@@ -204,7 +204,9 @@ impl Render for Root {
             );
         }
 
-        let summary = if self.loading {
+        let summary = if self.loading && self.unfolded {
+            format!("Laying out {} notes · {} links…", self.scene.nodes.len(), self.scene.edges.len())
+        } else if self.loading {
             "Loading graph… Notes remain available.".to_string()
         } else if let Some(error) = &self.error {
             format!("Graph unavailable: {error}")
@@ -221,7 +223,8 @@ impl Render for Root {
                 if self.scene.truncated { " · partial snapshot" } else { "" },
             )
         };
-        let quiet = self.loading || self.error.is_some() || seen.nodes.is_empty();
+        // An unfolding graph is its own progress report; the card is for a board with nothing on it.
+        let quiet = (self.loading && !self.unfolded) || self.error.is_some() || seen.nodes.is_empty();
         drop(seen);
         if quiet {
             // The centred card carries the message; the legend stays only for groups.
@@ -507,7 +510,7 @@ impl Root {
                  wheel zooms · drag a note to pin it",
             );
         };
-        let (path, text) = peek.split_once(" · ").map_or((peek.as_str(), ""), |(p, t)| (p, t));
+        let (path, text) = (peek.0.as_str(), peek.1.as_str());
         card.bg(theme.surface.opacity(0.92))
             .border_1()
             .border_color(theme.border)

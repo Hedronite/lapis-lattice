@@ -589,6 +589,7 @@ impl Workspace {
 
 pub fn open(opts: Options, services: Arc<dyn WorkspaceServices>) -> Result<(), DesktopError> {
     let code_graph = crate::CodeGraphOverlay::from_options(&opts);
+    crate::log_to_stderr();
     gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx: &mut App| {
         gpui_omarchy::init(cx);
         crate::theme::init(cx);

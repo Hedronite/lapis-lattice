@@ -70,6 +70,23 @@ fn finds_configured_path_named_phantom_fractal() {
     assert_eq!(discover::discover(None, Some(&configured)), Some(want));
 }
 
+/// #59: a configured binary wins over one on `PATH`, and a configured path that
+/// fails its checks does not fall back to `PATH`.
+#[test]
+fn configured_path_takes_precedence_over_path() {
+    let _g = serial();
+    let early = temp_dir("prec-path");
+    let chosen = temp_dir("prec-cfg");
+    stub(&early, discover::BINARY);
+    let configured = stub(&chosen, discover::BINARY);
+    let path = path_of(&[&early]);
+    assert_eq!(discover::discover(Some(&path), Some(&configured)), Some(found(&chosen, discover::BINARY)));
+    let missing = chosen.join("gone").join(discover::BINARY);
+    assert_eq!(discover::discover(Some(&path), Some(&missing)), None, "no fallback to PATH");
+    let wrong_name = stub(&chosen, "fract");
+    assert_eq!(discover::discover(Some(&path), Some(&wrong_name)), None, "no fallback to PATH");
+}
+
 #[test]
 fn configured_path_with_another_name_is_ignored() {
     let _g = serial();

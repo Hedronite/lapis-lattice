@@ -130,15 +130,77 @@ pub fn layout(snap: &GraphSnapshot, seed: &str, ticks: usize) -> Scene {
 /// graph that renormalised every tick would breathe as its extent changed.
 /// Fitting is the camera's job ([`crate::view::Camera::fit`]).
 pub fn lay_out(snap: &GraphSnapshot, seed: &str, ticks: usize) -> Laid {
+    lay_out_streaming(snap, seed, ticks, &mut |_| {})
+}
+
+/// What a layout in progress hands the window, newest wins.
+pub enum Unfold {
+    /// The scene, laid on its starting spiral, before the first tick.
+    Scene(Scene),
+    /// Every scene node's position, part way through the settle.
+    Positions(Vec<[f32; 2]>),
+}
+
+impl Unfold {
+    /// Fold this update into `latest`, the slot the window reads each frame.
+    pub fn into_slot(self, latest: &mut Unfolding) {
+        match self {
+            Unfold::Scene(scene) => {
+                latest.scene = Some(scene);
+                latest.positions = None;
+            }
+            Unfold::Positions(xy) => latest.positions = Some(xy),
+        }
+    }
+}
+
+/// The newest of a layout in progress that the window has not drawn yet.
+/// Positions it has not drawn are replaced, never queued.
+#[derive(Default)]
+pub struct Unfolding {
+    pub scene: Option<Scene>,
+    pub positions: Option<Vec<[f32; 2]>>,
+}
+
+/// How often a layout in progress publishes positions: about thirty a second.
+pub const UNFOLD_EVERY: std::time::Duration = std::time::Duration::from_millis(33);
+
+/// [`lay_out`], publishing as it goes so the window can show the graph
+/// unfolding instead of a card. The result is the same as [`lay_out`]'s.
+pub fn lay_out_streaming(
+    snap: &GraphSnapshot,
+    seed: &str,
+    ticks: usize,
+    publish: &mut dyn FnMut(Unfold),
+) -> Laid {
     let mut sim = ForceSim::from_snapshot(snap, ForceParams::default());
-    sim.settle(ticks);
+    let gap = sim.params.link_distance * SEPARATION;
+    // Isolated notes feel no force, so the belt can follow the core as it grows
+    // instead of waiting in the middle and jumping out at the end.
+    sim.place_isolates(gap);
+    let mut scene = scene_of(snap, seed, sim.positions());
+    publish(Unfold::Scene(scene.clone()));
+    let mut shown = std::time::Instant::now();
+    for _ in 0..ticks {
+        if !sim.tick() {
+            break;
+        }
+        if shown.elapsed() >= UNFOLD_EVERY {
+            sim.place_isolates(gap);
+            publish(Unfold::Positions(sim.positions().to_vec()));
+            shown = std::time::Instant::now();
+        }
+    }
     // Forces place the clusters; these two passes give every disc room of its own
     // and set isolated notes on a belt around the core.
-    let gap = sim.params.link_distance * SEPARATION;
     sim.separate(gap, SEPARATION_PASSES);
     sim.place_isolates(gap);
-    let xy = sim.positions().to_vec();
+    sync_positions(&mut scene, &sim);
+    Laid { scene, sim }
+}
 
+/// The drawable scene for `snap`, with nodes at `xy`.
+fn scene_of(snap: &GraphSnapshot, seed: &str, xy: &[[f32; 2]]) -> Scene {
     let index: std::collections::HashMap<&str, usize> =
         snap.nodes.iter().enumerate().map(|(i, n)| (n.id.as_str(), i)).collect();
     let mut edges = Vec::with_capacity(snap.edges.len());
@@ -169,7 +231,7 @@ pub fn lay_out(snap: &GraphSnapshot, seed: &str, ticks: usize) -> Laid {
         })
         .collect();
 
-    Laid { scene: Scene { nodes, edges, truncated: snap.truncated }, sim }
+    Scene { nodes, edges, truncated: snap.truncated }
 }
 
 /// Copy the sim's current positions onto the scene it laid out. The two are
@@ -258,9 +320,33 @@ pub fn scene_for(vault: &Path, seed: &str, hops: u32, resolved_only: bool) -> Re
 
 /// First lines of a note, for the pane that opens when a node is clicked.
 pub fn peek(vault: &Path, rel: &str, max_chars: usize) -> Result<String, String> {
-    let abs = vault.join(rel);
-    let text = std::fs::read_to_string(&abs).map_err(|e| format!("{rel}: {e}"))?;
-    Ok(text.chars().take(max_chars).collect())
+    use std::io::Read;
+    // The node id came from the index; it still has to land inside the vault, so
+    // an in-vault symlink pointing out of it is not followed.
+    let root = vault.canonicalize().map_err(|e| vault_relative(vault, e.to_string()))?;
+    let abs = vault.join(rel).canonicalize().map_err(|e| format!("{rel}: {e}"))?;
+    if !abs.starts_with(&root) {
+        return Err(format!("{rel}: outside the vault"));
+    }
+    // Four bytes per char at most: read no more than the preview can show.
+    let mut bytes = Vec::new();
+    std::fs::File::open(&abs)
+        .and_then(|f| f.take(max_chars as u64 * 4).read_to_end(&mut bytes))
+        .map_err(|e| format!("{rel}: {e}"))?;
+    Ok(String::from_utf8_lossy(&bytes).chars().take(max_chars).collect())
+}
+
+/// `message` with the vault's location replaced, so an error shown on the board
+/// names notes by their vault path and never says where the vault lives on disk.
+pub fn vault_relative(vault: &Path, message: String) -> String {
+    let mut message = message;
+    for root in [vault.canonicalize().ok(), Some(vault.to_path_buf())].into_iter().flatten() {
+        let root = root.to_string_lossy();
+        if !root.is_empty() {
+            message = message.replace(&format!("{root}/"), "").replace(root.as_ref(), "<vault>");
+        }
+    }
+    message
 }
 
 #[cfg(test)]
@@ -337,6 +423,39 @@ mod tests {
         assert_eq!(by("notes/Delta.md"), 1);
         assert_eq!(by("Orphan.md"), 0);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_streaming_layout_shows_the_scene_first_and_lands_where_lay_out_does() {
+        let d = vault();
+        let snap = snapshot_for(&d).unwrap();
+        let mut seen = Unfolding::default();
+        let mut first_was_scene = None;
+        let laid = lay_out_streaming(&snap, "Welcome.md", SETTLE_TICKS, &mut |u| {
+            first_was_scene.get_or_insert(matches!(u, Unfold::Scene(_)));
+            if let Unfold::Positions(xy) = &u {
+                assert_eq!(xy.len(), snap.nodes.len(), "every frame places every node");
+            }
+            u.into_slot(&mut seen);
+        });
+        assert_eq!(first_was_scene, Some(true), "the board gets the scene before any positions");
+        let shown = seen.scene.expect("the scene was published");
+        assert_eq!(shown.nodes.len(), laid.scene.nodes.len());
+        assert_eq!(shown.edges.len(), laid.scene.edges.len());
+        let plain = lay_out(&snap, "Welcome.md", SETTLE_TICKS);
+        let xy = |s: &Scene| s.nodes.iter().map(|n| [n.x, n.y]).collect::<Vec<_>>();
+        assert_eq!(xy(&laid.scene), xy(&plain.scene), "publishing does not change the result");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_newer_unfold_replaces_one_not_yet_drawn() {
+        let mut slot = Unfolding::default();
+        Unfold::Positions(vec![[1.0, 1.0]]).into_slot(&mut slot);
+        Unfold::Positions(vec![[2.0, 2.0]]).into_slot(&mut slot);
+        assert_eq!(slot.positions, Some(vec![[2.0, 2.0]]));
+        Unfold::Scene(Scene::default()).into_slot(&mut slot);
+        assert!(slot.scene.is_some() && slot.positions.is_none(), "a new scene drops stale positions");
     }
 
     #[test]
@@ -424,6 +543,21 @@ mod tests {
 
         let text = peek(&d, "notes/Alpha.md", 20).unwrap();
         assert!(text.starts_with("# Alpha"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn peek_stays_inside_the_vault_and_errors_hide_its_location() {
+        let d = vault();
+        let outside = d.with_extension("outside.md");
+        std::fs::write(&outside, "secret").unwrap();
+        std::os::unix::fs::symlink(&outside, d.join("notes/leak.md")).unwrap();
+        assert!(peek(&d, "notes/leak.md", 20).unwrap_err().contains("outside the vault"));
+        let raw = format!("unable to open {}/.lapis/lattice.sqlite", d.display());
+        assert_eq!(vault_relative(&d, raw), "unable to open .lapis/lattice.sqlite");
+        assert_eq!(vault_relative(&d, format!("vault {} is gone", d.display())), "vault <vault> is gone");
+        let _ = std::fs::remove_file(outside);
         let _ = std::fs::remove_dir_all(&d);
     }
 }
