@@ -507,7 +507,7 @@ impl Root {
                  wheel zooms · drag a note to pin it",
             );
         };
-        let (path, text) = peek.split_once(" · ").map_or((peek.as_str(), ""), |(p, t)| (p, t));
+        let (path, text) = (peek.0.as_str(), peek.1.as_str());
         card.bg(theme.surface.opacity(0.92))
             .border_1()
             .border_color(theme.border)

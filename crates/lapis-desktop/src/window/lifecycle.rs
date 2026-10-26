@@ -139,7 +139,7 @@ impl Root {
                         this.adopt(laid);
                         this.error = None;
                     }
-                    Err(error) => this.error = Some(error),
+                    Err(error) => this.error = Some(graph_data::vault_relative(&this.vault, error)),
                 }
                 cx.notify();
                 window.refresh();
@@ -154,18 +154,22 @@ impl Root {
         self.peek = None;
         let Some(id) = id else { return };
         if id.starts_with("dangling:") {
-            self.peek =
-                Some(format!("{} · Unresolved link; no note to open", id.trim_start_matches("dangling:")));
+            let note = id.trim_start_matches("dangling:").to_string();
+            self.peek = Some((note, "Unresolved link; no note to open".into()));
             return;
         }
-        self.peek = Some(format!("{id} · Loading preview…"));
+        self.peek = Some((id.clone(), "Loading preview…".into()));
         let services = self.services.clone();
         let vault = self.vault.clone();
         let task = cx.background_executor().spawn(async move {
-            match services {
-                Some(service) => service.graph_preview(&id).map(|text| format!("{id} · {text}")),
-                None => graph_data::peek(&vault, &id, 600).map(|text| format!("{id} · {text}")),
-            }
+            let text = match services {
+                Some(service) => service.graph_preview(&id),
+                None => graph_data::peek(&vault, &id, 600),
+            };
+            let text = text.unwrap_or_else(|e| {
+                format!("Preview unavailable: {}", graph_data::vault_relative(&vault, e))
+            });
+            (id, text)
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
@@ -173,7 +177,7 @@ impl Root {
                 if this.preview_epoch != epoch || !this.visible {
                     return;
                 }
-                this.peek = Some(result.unwrap_or_else(|e| format!("Preview unavailable: {e}")));
+                this.peek = Some(result);
                 cx.notify();
                 window.refresh();
             });

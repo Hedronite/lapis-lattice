@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Hardening
+
+- A note path that resolves through an in-vault symlink to a file outside the vault is refused with exit 3 (`symlink escapes the vault`). This covers `read`, `check-note`, edits, task toggles and the MCP read tools, which all resolve paths the same way. Symlinks that stay inside the vault still work.
+- The `phantom-fractal` child is bounded. It is stopped after 5 s, its stdout is read up to 1 MiB and its stderr up to 64 KiB, and either limit is a typed error (shown as a Phantom row in the desktop), never a hang or an unbounded buffer. It sees only `PATH`, `HOME`, `TMPDIR`, `USER`, `LANG`, `TZ`, `LC_*` and `PHANTOM_*` from Lapis's environment.
+- `$LAPIS_PHANTOM_BINARY`, when set, is the only place Lapis looks for Phantom. A configured path that is missing, misnamed or not executable no longer falls back to `PATH`.
+- Graph preview: a note path containing ` · ` shows whole on the preview card. Without the desktop services, the preview reads at most what it shows and stays inside the vault. Errors on the graph board no longer show where the vault lives on disk.
+
 ### Reindex everything
 
 - `lapis reindex --all` rebuilds the whole embedded index in place: the same rebuild the TUI and the desktop run from their build-index actions, for a terminal or a script. A terminal sees `indexing N/M` on stderr while it runs; `--json` prints `documents`, `chunks`, `edges`, `embedded`, `embedError` and `elapsedMs`. Against an HTTP lattice it exits 1, because that service owns its own index. The stale-index hints in `search` and `doctor` name it.

@@ -1,8 +1,10 @@
 //! Find the Phantom code-graph binary (D1).
 //!
-//! Only an executable named `phantom-fractal` counts: first on `PATH`, then a
-//! configured path whose file name is `phantom-fractal`. `fract` is never looked
-//! up, so another tool by that name cannot shadow Phantom. Nothing here runs the
+//! Only an executable named `phantom-fractal` counts. A configured path
+//! (`$LAPIS_PHANTOM_BINARY`) is used exclusively when set, so a writable folder
+//! early on `PATH` cannot override the binary the operator chose; `PATH` is
+//! searched only when nothing is configured. `fract` is never looked up, so
+//! another tool by that name cannot shadow Phantom. Nothing here runs the
 //! binary or reads Phantom's data; absence is `None`, not an error.
 //!
 //! A found path is always absolute (G0a, G0b): relative `PATH` entries and a
@@ -34,21 +36,22 @@ pub fn discover(path_var: Option<&OsStr>, configured: Option<&Path>) -> Option<P
     discover_from(std::env::current_dir().ok().as_deref(), path_var, configured)
 }
 
-/// `phantom-fractal` on `path_var` (a `PATH`-style list), else `configured` when
-/// its file name is `phantom-fractal`. Relative entries are joined to `cwd`;
-/// with no `cwd` they are skipped. `None` when nothing is an executable file.
+/// `configured` when set, if its file name is `phantom-fractal` and it is an
+/// executable file; otherwise, with nothing configured, `phantom-fractal` on
+/// `path_var` (a `PATH`-style list). A configured path that fails its checks is
+/// `None`: it never falls back to `PATH`. Relative entries are joined to `cwd`;
+/// with no `cwd` they are skipped.
 pub fn discover_from(
     cwd: Option<&Path>,
     path_var: Option<&OsStr>,
     configured: Option<&Path>,
 ) -> Option<PathBuf> {
-    on_path(cwd, path_var).or_else(|| {
-        let p = absolute(cwd, configured?)?;
-        if !named(&p) {
-            return None;
-        }
-        settle(&p).filter(|p| is_executable(p))
-    })
+    let Some(configured) = configured else { return on_path(cwd, path_var) };
+    let p = absolute(cwd, configured)?;
+    if !named(&p) {
+        return None;
+    }
+    settle(&p).filter(|p| is_executable(p))
 }
 
 fn on_path(cwd: Option<&Path>, path_var: Option<&OsStr>) -> Option<PathBuf> {

@@ -258,9 +258,33 @@ pub fn scene_for(vault: &Path, seed: &str, hops: u32, resolved_only: bool) -> Re
 
 /// First lines of a note, for the pane that opens when a node is clicked.
 pub fn peek(vault: &Path, rel: &str, max_chars: usize) -> Result<String, String> {
-    let abs = vault.join(rel);
-    let text = std::fs::read_to_string(&abs).map_err(|e| format!("{rel}: {e}"))?;
-    Ok(text.chars().take(max_chars).collect())
+    use std::io::Read;
+    // The node id came from the index; it still has to land inside the vault, so
+    // an in-vault symlink pointing out of it is not followed.
+    let root = vault.canonicalize().map_err(|e| vault_relative(vault, e.to_string()))?;
+    let abs = vault.join(rel).canonicalize().map_err(|e| format!("{rel}: {e}"))?;
+    if !abs.starts_with(&root) {
+        return Err(format!("{rel}: outside the vault"));
+    }
+    // Four bytes per char at most: read no more than the preview can show.
+    let mut bytes = Vec::new();
+    std::fs::File::open(&abs)
+        .and_then(|f| f.take(max_chars as u64 * 4).read_to_end(&mut bytes))
+        .map_err(|e| format!("{rel}: {e}"))?;
+    Ok(String::from_utf8_lossy(&bytes).chars().take(max_chars).collect())
+}
+
+/// `message` with the vault's location replaced, so an error shown on the board
+/// names notes by their vault path and never says where the vault lives on disk.
+pub fn vault_relative(vault: &Path, message: String) -> String {
+    let mut message = message;
+    for root in [vault.canonicalize().ok(), Some(vault.to_path_buf())].into_iter().flatten() {
+        let root = root.to_string_lossy();
+        if !root.is_empty() {
+            message = message.replace(&format!("{root}/"), "").replace(root.as_ref(), "<vault>");
+        }
+    }
+    message
 }
 
 #[cfg(test)]
@@ -424,6 +448,21 @@ mod tests {
 
         let text = peek(&d, "notes/Alpha.md", 20).unwrap();
         assert!(text.starts_with("# Alpha"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn peek_stays_inside_the_vault_and_errors_hide_its_location() {
+        let d = vault();
+        let outside = d.with_extension("outside.md");
+        std::fs::write(&outside, "secret").unwrap();
+        std::os::unix::fs::symlink(&outside, d.join("notes/leak.md")).unwrap();
+        assert!(peek(&d, "notes/leak.md", 20).unwrap_err().contains("outside the vault"));
+        let raw = format!("unable to open {}/.lapis/lattice.sqlite", d.display());
+        assert_eq!(vault_relative(&d, raw), "unable to open .lapis/lattice.sqlite");
+        assert_eq!(vault_relative(&d, format!("vault {} is gone", d.display())), "vault <vault> is gone");
+        let _ = std::fs::remove_file(outside);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

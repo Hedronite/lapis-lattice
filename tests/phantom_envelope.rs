@@ -241,6 +241,68 @@ fn g0c_failed_recheck_does_not_spawn() {
     }
 }
 
+// ------------------------------------------------------- bounded child
+
+/// A stub `phantom-fractal` with `body` after the shebang.
+fn script(name: &str, body: &str) -> PathBuf {
+    let bin = temp_dir(name).join(discover::BINARY);
+    std::fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin
+}
+
+#[test]
+fn a_hung_binary_is_stopped_at_the_time_limit() {
+    let _g = serial();
+    let bin = script("hang", "exec sleep 30");
+    let t0 = std::time::Instant::now();
+    let r = run::run_within(&bin, &["version"], std::time::Duration::from_millis(300));
+    assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
+    assert!(t0.elapsed() < std::time::Duration::from_secs(5), "stopped near the limit, not at sleep's end");
+}
+
+#[test]
+fn endless_output_is_cut_at_the_cap() {
+    let _g = serial();
+    let bin = script("flood", "while :; do printf '%s' 0123456789abcdef0123456789abcdef; done");
+    let r = run::run_within(&bin, &["version"], std::time::Duration::from_secs(20));
+    assert!(matches!(r, Err(RunError::Overflow { stream: "stdout", cap: run::STDOUT_CAP })), "{r:?}");
+    let bin = script("flood-err", "while :; do printf '%s' 0123456789abcdef0123456789abcdef >&2; done");
+    let r = run::run_within(&bin, &["version"], std::time::Duration::from_secs(20));
+    assert!(matches!(r, Err(RunError::Overflow { stream: "stderr", cap: run::STDERR_CAP })), "{r:?}");
+}
+
+#[test]
+fn the_child_sees_only_allowlisted_environment() {
+    let _g = serial();
+    let dir = temp_dir("env");
+    let seen = dir.join("seen");
+    let bin = script(
+        "env-stub",
+        &format!(
+            "printf '%s|%s|%s' \"$LAPIS_TEST_SECRET\" \"$PHANTOM_TEST_SETTING\" \"$PATH\" > '{}'\nprintf '%s' '{SUCCESS}'",
+            seen.display()
+        ),
+    );
+    // SAFETY: the test holds `serial()`, so no other test thread reads the
+    // environment while it changes.
+    unsafe {
+        std::env::set_var("LAPIS_TEST_SECRET", "token-should-not-pass");
+        std::env::set_var("PHANTOM_TEST_SETTING", "kept");
+    }
+    let r = run::run(&bin, &["version"]);
+    unsafe {
+        std::env::remove_var("LAPIS_TEST_SECRET");
+        std::env::remove_var("PHANTOM_TEST_SETTING");
+    }
+    assert!(r.unwrap().envelope.ok);
+    let seen = std::fs::read_to_string(seen).unwrap();
+    let parts: Vec<&str> = seen.split('|').collect();
+    assert_eq!(parts[0], "", "a secret in Lapis's environment does not reach the child");
+    assert_eq!(parts[1], "kept", "PHANTOM_* settings do");
+    assert!(!parts[2].is_empty(), "and so does PATH");
+}
+
 // ------------------------------------------------------------------ T1
 
 /// An absolute path in the JSON is a FIFO with no writer: opening it to read
