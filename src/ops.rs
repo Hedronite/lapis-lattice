@@ -37,6 +37,19 @@ impl Ctx {
             Ok(Backend::Http(self.client()?))
         }
     }
+    /// `meta.stale` for search: notes the index has not caught up with, from a
+    /// check up to [`crate::stale::TTL`] old. `None` when the check cannot run.
+    pub async fn stale(&self) -> Option<u64> {
+        crate::stale::cached(&self.backend().ok()?, &self.vault.root).await.map(|s| s.count)
+    }
+
+    /// Index one path, and drop the cached stale check that may now overcount.
+    pub async fn reindex(&self, rel: &str) -> Result<Reindex> {
+        let r = self.backend()?.reindex(rel).await;
+        crate::stale::forget(&self.vault.root);
+        r
+    }
+
     pub fn inbox(&self) -> Result<String> {
         Ok(overlay::load(&self.vault.root)?.0.buckets.inbox)
     }
@@ -69,6 +82,9 @@ pub struct LatticeInfo {
     pub reachable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health: Option<crate::backend::Health>,
+    /// Notes newer than their index entry, missing from it, or gone from disk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale: Option<crate::stale::Stale>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -81,9 +97,19 @@ pub async fn vault_info(ctx: &Ctx) -> Result<(VaultInfo, Option<crate::error::La
     let source = backend.source();
     let mode = backend.mode();
     let (lattice, err) = match backend.health().await {
-        Ok(h) => (LatticeInfo { mode, url: source, reachable: true, health: Some(h), error: None }, None),
+        Ok(h) => {
+            let stale = crate::stale::cached(&backend, &ctx.vault.root).await;
+            (LatticeInfo { mode, url: source, reachable: true, health: Some(h), stale, error: None }, None)
+        }
         Err(e) => (
-            LatticeInfo { mode, url: source, reachable: false, health: None, error: Some(e.to_string()) },
+            LatticeInfo {
+                mode,
+                url: source,
+                reachable: false,
+                health: None,
+                stale: None,
+                error: Some(e.to_string()),
+            },
             Some(e),
         ),
     };
@@ -277,7 +303,7 @@ pub async fn neighbors(
 
 pub async fn reindex(ctx: &Ctx, path: &str) -> Result<Reindex> {
     let (rel, _) = notes::resolve(&ctx.vault.root, path)?;
-    ctx.backend()?.reindex(&rel).await
+    ctx.reindex(&rel).await
 }
 
 #[derive(Serialize)]
@@ -299,7 +325,7 @@ pub async fn kick(ctx: &Ctx, written: write::Written, no_reindex: bool) -> Resul
     let (reindex, reindex_error) = if no_reindex || written.dry_run {
         (None, None)
     } else {
-        match ctx.backend()?.reindex(&written.path).await {
+        match ctx.reindex(&written.path).await {
             Ok(r) => (Some(r), None),
             Err(e) => (None, Some(e.to_string())),
         }
@@ -328,7 +354,7 @@ pub async fn toggle_task_with(
     let (reindex, reindex_error) = if no_reindex || guard.dry_run {
         (None, None)
     } else {
-        match ctx.backend()?.reindex(&task.source_path).await {
+        match ctx.reindex(&task.source_path).await {
             Ok(r) => (Some(r), None),
             Err(e) => (None, Some(e.to_string())),
         }
@@ -356,7 +382,7 @@ pub async fn periodic(
     let (reindex, reindex_error) = if no_reindex || !d.created {
         (None, None)
     } else {
-        match ctx.backend()?.reindex(&d.path).await {
+        match ctx.reindex(&d.path).await {
             Ok(r) => (Some(r), None),
             Err(e) => (None, Some(e.to_string())),
         }
@@ -386,7 +412,7 @@ pub async fn restore(
     let (reindex, err) = if no_reindex {
         (None, None)
     } else {
-        match ctx.backend()?.reindex(&t.path).await {
+        match ctx.reindex(&t.path).await {
             Ok(r) => (Some(r), None),
             Err(e) => (None, Some(e.to_string())),
         }

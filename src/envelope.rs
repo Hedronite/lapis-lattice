@@ -25,6 +25,10 @@ pub struct Meta {
     pub limit: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<u32>,
+    /// Search only: notes the index has not caught up with (newer on disk, or
+    /// missing). Non-zero means a miss may be the index, not the vault.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale: Option<u64>,
 }
 
 impl Meta {
