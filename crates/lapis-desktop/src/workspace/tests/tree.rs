@@ -13,6 +13,9 @@ fn file(path: &str) -> FileEntry {
     FileEntry { path: path.into(), name: path.rsplit('/').next().unwrap().into(), directory: false }
 }
 impl WorkspaceServices for TreeFixture {
+    fn load_session(&self) -> Result<Option<crate::session::Session>, String> {
+        Ok(Some(crate::session::Session { folder: "notes/deep".into(), ..Default::default() }))
+    }
     fn directory(&self, p: &str) -> Result<Vec<FileEntry>, String> {
         self.listings.fetch_add(1, Ordering::SeqCst);
         Ok(match p {
@@ -92,4 +95,28 @@ fn folders_expand_in_place_and_an_opened_note_is_revealed(cx: &mut TestAppContex
     handle.update(cx, |this, w, cx| this.refresh_tree(w, cx)).unwrap();
     cx.run_until_parked();
     assert_eq!(services.listings.load(Ordering::SeqCst) - before, 3);
+}
+
+#[gpui_kit::test]
+fn a_restored_folder_opens_the_tree_down_to_it(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::base::init(cx);
+        init_workspace(cx);
+        gpui_omarchy::Theme::tokyo_night().apply(cx);
+    });
+    let services = Arc::new(TreeFixture { base: Fixture::new(false), listings: 0.into() });
+    let handle = cx.add_window(move |w, cx| Workspace::new(services, w, cx));
+    handle.update(cx, |this, w, cx| this.restore_session(None, w, cx)).unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        shown(handle, cx),
+        [
+            row("notes", 0),
+            row("notes/deep", 1),
+            row("notes/deep/b.md", 2),
+            row("notes/a.md", 1),
+            row("top.md", 0)
+        ]
+    );
+    assert_eq!(handle.read_with(cx, |this, _| this.folder.clone()).unwrap(), "notes/deep");
 }
