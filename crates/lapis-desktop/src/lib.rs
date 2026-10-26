@@ -16,6 +16,7 @@
 
 mod code_graph;
 pub mod file_tree;
+pub mod glide;
 pub mod graph_data;
 pub mod graph_style;
 pub mod html;
@@ -29,6 +30,7 @@ pub mod scene;
 pub mod services;
 pub mod session;
 pub mod sim;
+pub mod strokes;
 #[cfg(feature = "gpui")]
 mod theme;
 pub mod view;
@@ -117,6 +119,30 @@ pub fn run(_opts: Options) -> Result<(), DesktopError> {
 #[cfg(feature = "gpui")]
 pub fn run(opts: Options) -> Result<(), DesktopError> {
     window::open(opts)
+}
+
+/// GPUI reports a frame it could not render, or a window it could not open,
+/// through `log`, and nothing prints it unless a logger is installed. A board
+/// that silently kept its last frame is how a too-large graph went unnoticed,
+/// so warnings and errors go to stderr.
+#[cfg(feature = "gpui")]
+pub(crate) fn log_to_stderr() {
+    struct Stderr;
+    impl log::Log for Stderr {
+        fn enabled(&self, meta: &log::Metadata) -> bool {
+            meta.level() <= log::Level::Warn
+        }
+        fn log(&self, record: &log::Record) {
+            if self.enabled(record.metadata()) {
+                eprintln!("lapis desktop: {} {}: {}", record.level(), record.target(), record.args());
+            }
+        }
+        fn flush(&self) {}
+    }
+    static STDERR: Stderr = Stderr;
+    if log::set_logger(&STDERR).is_ok() {
+        log::set_max_level(log::LevelFilter::Warn);
+    }
 }
 
 #[cfg(test)]

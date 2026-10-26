@@ -130,15 +130,77 @@ pub fn layout(snap: &GraphSnapshot, seed: &str, ticks: usize) -> Scene {
 /// graph that renormalised every tick would breathe as its extent changed.
 /// Fitting is the camera's job ([`crate::view::Camera::fit`]).
 pub fn lay_out(snap: &GraphSnapshot, seed: &str, ticks: usize) -> Laid {
+    lay_out_streaming(snap, seed, ticks, &mut |_| {})
+}
+
+/// What a layout in progress hands the window, newest wins.
+pub enum Unfold {
+    /// The scene, laid on its starting spiral, before the first tick.
+    Scene(Scene),
+    /// Every scene node's position, part way through the settle.
+    Positions(Vec<[f32; 2]>),
+}
+
+impl Unfold {
+    /// Fold this update into `latest`, the slot the window reads each frame.
+    pub fn into_slot(self, latest: &mut Unfolding) {
+        match self {
+            Unfold::Scene(scene) => {
+                latest.scene = Some(scene);
+                latest.positions = None;
+            }
+            Unfold::Positions(xy) => latest.positions = Some(xy),
+        }
+    }
+}
+
+/// The newest of a layout in progress that the window has not drawn yet.
+/// Positions it has not drawn are replaced, never queued.
+#[derive(Default)]
+pub struct Unfolding {
+    pub scene: Option<Scene>,
+    pub positions: Option<Vec<[f32; 2]>>,
+}
+
+/// How often a layout in progress publishes positions: about thirty a second.
+pub const UNFOLD_EVERY: std::time::Duration = std::time::Duration::from_millis(33);
+
+/// [`lay_out`], publishing as it goes so the window can show the graph
+/// unfolding instead of a card. The result is the same as [`lay_out`]'s.
+pub fn lay_out_streaming(
+    snap: &GraphSnapshot,
+    seed: &str,
+    ticks: usize,
+    publish: &mut dyn FnMut(Unfold),
+) -> Laid {
     let mut sim = ForceSim::from_snapshot(snap, ForceParams::default());
-    sim.settle(ticks);
+    let gap = sim.params.link_distance * SEPARATION;
+    // Isolated notes feel no force, so the belt can follow the core as it grows
+    // instead of waiting in the middle and jumping out at the end.
+    sim.place_isolates(gap);
+    let mut scene = scene_of(snap, seed, sim.positions());
+    publish(Unfold::Scene(scene.clone()));
+    let mut shown = std::time::Instant::now();
+    for _ in 0..ticks {
+        if !sim.tick() {
+            break;
+        }
+        if shown.elapsed() >= UNFOLD_EVERY {
+            sim.place_isolates(gap);
+            publish(Unfold::Positions(sim.positions().to_vec()));
+            shown = std::time::Instant::now();
+        }
+    }
     // Forces place the clusters; these two passes give every disc room of its own
     // and set isolated notes on a belt around the core.
-    let gap = sim.params.link_distance * SEPARATION;
     sim.separate(gap, SEPARATION_PASSES);
     sim.place_isolates(gap);
-    let xy = sim.positions().to_vec();
+    sync_positions(&mut scene, &sim);
+    Laid { scene, sim }
+}
 
+/// The drawable scene for `snap`, with nodes at `xy`.
+fn scene_of(snap: &GraphSnapshot, seed: &str, xy: &[[f32; 2]]) -> Scene {
     let index: std::collections::HashMap<&str, usize> =
         snap.nodes.iter().enumerate().map(|(i, n)| (n.id.as_str(), i)).collect();
     let mut edges = Vec::with_capacity(snap.edges.len());
@@ -169,7 +231,7 @@ pub fn lay_out(snap: &GraphSnapshot, seed: &str, ticks: usize) -> Laid {
         })
         .collect();
 
-    Laid { scene: Scene { nodes, edges, truncated: snap.truncated }, sim }
+    Scene { nodes, edges, truncated: snap.truncated }
 }
 
 /// Copy the sim's current positions onto the scene it laid out. The two are
@@ -361,6 +423,39 @@ mod tests {
         assert_eq!(by("notes/Delta.md"), 1);
         assert_eq!(by("Orphan.md"), 0);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_streaming_layout_shows_the_scene_first_and_lands_where_lay_out_does() {
+        let d = vault();
+        let snap = snapshot_for(&d).unwrap();
+        let mut seen = Unfolding::default();
+        let mut first_was_scene = None;
+        let laid = lay_out_streaming(&snap, "Welcome.md", SETTLE_TICKS, &mut |u| {
+            first_was_scene.get_or_insert(matches!(u, Unfold::Scene(_)));
+            if let Unfold::Positions(xy) = &u {
+                assert_eq!(xy.len(), snap.nodes.len(), "every frame places every node");
+            }
+            u.into_slot(&mut seen);
+        });
+        assert_eq!(first_was_scene, Some(true), "the board gets the scene before any positions");
+        let shown = seen.scene.expect("the scene was published");
+        assert_eq!(shown.nodes.len(), laid.scene.nodes.len());
+        assert_eq!(shown.edges.len(), laid.scene.edges.len());
+        let plain = lay_out(&snap, "Welcome.md", SETTLE_TICKS);
+        let xy = |s: &Scene| s.nodes.iter().map(|n| [n.x, n.y]).collect::<Vec<_>>();
+        assert_eq!(xy(&laid.scene), xy(&plain.scene), "publishing does not change the result");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_newer_unfold_replaces_one_not_yet_drawn() {
+        let mut slot = Unfolding::default();
+        Unfold::Positions(vec![[1.0, 1.0]]).into_slot(&mut slot);
+        Unfold::Positions(vec![[2.0, 2.0]]).into_slot(&mut slot);
+        assert_eq!(slot.positions, Some(vec![[2.0, 2.0]]));
+        Unfold::Scene(Scene::default()).into_slot(&mut slot);
+        assert!(slot.scene.is_some() && slot.positions.is_none(), "a new scene drops stale positions");
     }
 
     #[test]

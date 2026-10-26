@@ -257,9 +257,11 @@ pub const LABEL_HEIGHT_PX: f32 = 20.0;
 /// Clearance kept around every drawn label. Two labels are never merely
 /// touching; they are always this far apart.
 pub const LABEL_PAD_PX: f32 = 5.0;
-/// Below this zoom nothing is labelled: the text would be unreadable and the
-/// board would be a wall of grey.
+/// Below this zoom only hubs (discs of [`HUB_LABEL_PX`] or more) and the
+/// focused note are labelled: every name would be a wall of grey.
 pub const LABEL_MIN_ZOOM: f32 = 0.12;
+/// Disc radius at which a note counts as a hub for labelling when zoomed out.
+pub const HUB_LABEL_PX: f32 = 4.0;
 /// Longest label drawn; the rest is elided.
 pub const LABEL_MAX_CHARS: usize = 22;
 
@@ -396,7 +398,7 @@ pub fn paint(
 
 /// Which labels survive at this zoom, in order of importance.
 ///
-/// Three rules, in order: nothing at all below [`LABEL_MIN_ZOOM`]; nothing that
+/// Three rules, in order: only hubs and the focus below [`LABEL_MIN_ZOOM`]; nothing that
 /// has scrolled off the board; and nothing that would overlap a label already
 /// placed. Busy nodes and the hovered neighbourhood get first claim, so what
 /// you lose when the board is crowded is always the least useful label.
@@ -408,9 +410,10 @@ pub fn labels(
     board: [f32; 2],
     hi: &Highlight,
 ) -> Vec<Prim> {
-    if cam.zoom < LABEL_MIN_ZOOM || scene.nodes.is_empty() {
+    if scene.nodes.is_empty() {
         return Vec::new();
     }
+    let far = cam.zoom < LABEL_MIN_ZOOM;
     let mut order: Vec<usize> = (0..scene.nodes.len()).collect();
     order.sort_by(|&a, &b| {
         let key = |i: usize| {
@@ -427,6 +430,9 @@ pub fn labels(
     let mut placed: Vec<[f32; 4]> = Vec::new();
     let mut out = Vec::new();
     for i in order {
+        if far && rad[i] < HUB_LABEL_PX && hi.focus != Some(i) {
+            continue;
+        }
         let at = [pos[i][0], pos[i][1] + rad[i] + 2.0];
         if at[0] + widest < 0.0
             || at[0] - widest > board[0]
@@ -914,7 +920,12 @@ mod tests {
         while far.zoom >= super::LABEL_MIN_ZOOM {
             far.zoom_by(0.5, BOARD);
         }
-        assert!(shown(&far).0.is_empty(), "below the readability floor, nothing is named");
+        assert!(shown(&far).0.is_empty(), "below the readability floor, only hubs are named");
+        let mut hub = s.clone();
+        hub.nodes[5].degree = 2_000;
+        let lit = paint(&hub, &far, BOARD, &Highlight::default(), &|_| false, &[]);
+        let name = label_stem(&hub.nodes[5].label);
+        assert!(lit.iter().any(|p| matches!(p, Prim::Label { text, .. } if *text == name)), "hub named");
     }
 
     #[test]
