@@ -11,8 +11,11 @@ use serde::{Deserialize, Serialize};
 /// Bumped when the file shape changes; any other version is ignored.
 pub const VERSION: u32 = 1;
 
-/// Share of a snapshot's notes that must have a remembered place before the
-/// layout starts warm from memory instead of from scratch.
+/// The layout starts warm only when the memory and the graph mostly agree: at
+/// least this share of the graph's notes is remembered, and at least this
+/// share of the remembered notes is still in the graph. A vault that lost half
+/// its notes (say, to a new ignore rule) gets a fresh map, not the old one
+/// with holes in it.
 pub const WARM_COVERAGE: f32 = 0.5;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -36,6 +39,17 @@ impl Remembered {
             return 0.0;
         }
         ids.filter(|id| self.nodes.contains_key(*id)).count() as f32 / total as f32
+    }
+
+    /// True when this memory fits a graph of `ids` well enough to start warm:
+    /// see [`WARM_COVERAGE`].
+    pub fn fits<'a>(&self, ids: impl ExactSizeIterator<Item = &'a str>) -> bool {
+        let total = ids.len();
+        if total == 0 || self.nodes.is_empty() {
+            return false;
+        }
+        let known = ids.filter(|id| self.nodes.contains_key(*id)).count() as f32;
+        known / total as f32 >= WARM_COVERAGE && known / self.nodes.len() as f32 >= WARM_COVERAGE
     }
 }
 
@@ -134,6 +148,15 @@ mod tests {
         let memory = Remembered::new(nodes, BTreeMap::new());
         assert_eq!(memory.coverage(["a", "b"].into_iter()), 0.5);
         assert_eq!(memory.coverage(std::iter::empty()), 0.0);
+        assert!(memory.fits(["a", "b"].into_iter()), "half the graph remembered, all the memory present");
+        assert!(!memory.fits(["a", "b", "c"].into_iter()), "too little of the graph remembered");
+        let mut big = memory.clone();
+        for k in ["b", "c", "d"] {
+            big.nodes.insert(k.to_string(), [0.0, 0.0]);
+        }
+        assert!(big.fits(["a", "b"].into_iter()), "half the memory still in the graph");
+        assert!(!big.fits(["a"].into_iter()), "the graph shrank to a quarter of the memory");
+        assert!(!Remembered::default().fits(["a"].into_iter()));
         let _ = std::fs::remove_dir_all(cache.parent().unwrap());
     }
 }

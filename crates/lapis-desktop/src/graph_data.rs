@@ -197,9 +197,7 @@ pub fn lay_out_remembered(
 ) -> Laid {
     let mut sim = ForceSim::from_snapshot(snap, ForceParams::default());
     let gap = sim.params.link_distance * SEPARATION;
-    let warm = memory.filter(|m| {
-        m.coverage(snap.nodes.iter().map(|n| n.id.as_str())) >= crate::graph_memory::WARM_COVERAGE
-    });
+    let warm = memory.filter(|m| m.fits(snap.nodes.iter().map(|n| n.id.as_str())));
     let cold_decay = sim.params.alpha_decay;
     if let Some(memory) = warm {
         seed_from(&mut sim, snap, memory);
