@@ -12,7 +12,7 @@ Do not wait for Codex. Do not restart the goal. Do not merge `feat/ux` to
 | Branch | `feat/ux` |
 | Tip | UX code `3e94191` (`perf(tui): redraw only when workspace state changes`); this file sits on top |
 | Ahead of `main` | **24 UX commits** plus this handoff (`39bfa65`… search merge) |
-| PR | [#18](https://github.com/VirtualMachinist/lapis-lattice/pull/18) — same branch; **do not merge** until Evan GO |
+| PR | [#18](https://github.com/VirtualMachinist/lapis-lattice/pull/18) — same branch; **do not merge** until the maintainer approves |
 | Formal checklist | **0 / 32 IDs closed** |
 | Ownership | Halo: **Grok PM** · **Claude Code fullstack** · **Composer** |
 | Previous owner | Codex (paused for handoff; usage was ~9%) |
@@ -41,7 +41,7 @@ Read in this order, then work. Do not invent a new plan.
    - [docs/terminal-files.md](terminal-files.md)
    - [docs/pdf-runtime.md](pdf-runtime.md)
    - [docs/ux-performance.md](ux-performance.md)
-4. Eli mail_room handoff for Halo (Grok PM · Claude Code fullstack · Composer).
+4. Team handoff note for Halo (Grok PM · Claude Code fullstack · Composer).
 5. Stay on `feat/ux`. Push here. Update PR #18. **No merge. No retarget to `main` work.**
 
 ### Halo roles
@@ -182,7 +182,7 @@ Indexed TUI idle redraw is a start. Missing-index remains a blocker.
 
 Already decided or already landed. Do not spend a Halo turn relitigating:
 
-1. **No merge to `main`.** PR #18 stays a checkpoint until Evan GO.
+1. **No merge to `main`.** PR #18 stays a checkpoint until the maintainer approves.
 2. **Do not rewrite** the `v0.4.0` GitHub Release or the `0.1.0` crate inside
    that asset. Version truth lives on `main` (0.4.1 line); this branch is UX.
 3. **Do not reopen search G1–G4 / sqlite-vec / DiskANN.** That is `main`
@@ -225,7 +225,7 @@ only that gate. Suggested order if the vault CHECKLIST agrees:
 
 1. **Native Linux smoke** for the desktop workspace (files, Live, save, pane
    focus, clipboard, IME) — write evidence, do not close IDs from memory.
-2. **CUA matrix** (Linux + whatever seat Evan names): which shortcuts win,
+2. **CUA matrix** (Linux + whatever seat the maintainer names): which shortcuts win,
    and what the UI says when they do not.
 3. **GPUI idle CPU** on a release `--features desktop` binary; keep the
    trace even if it fails.
@@ -307,6 +307,6 @@ f678a21 Start GPUI notes workspace with shared file and search services
   one file in two panes, or call HTTP graph “fixed” via embedded fallback →
   **stop**.
 - Codex comes back with a conflicting tip → keep `feat/ux` @ newest honest
-  SHA and update this file; do not fork a second UX branch unless Evan says so.
+  SHA and update this file; do not fork a second UX branch unless the maintainer says so.
 
 Halo owns the next honest increment on `feat/ux`. Codex is paused.

@@ -502,12 +502,12 @@ mod tests {
         assert!(c.theme.is_omarchy());
         assert!(c.agent.task_exclude.is_empty());
         let c: Config = toml::from_str(
-            "[agent]\ntask_exclude = [\"assets/\", \"Archmagus-Stack/Sovereign-Bootcamp/\"]\n[theme]\nname = \"parchment\"\n[theme.custom]\ngold = \"#FFD700\"\n",
+            "[agent]\ntask_exclude = [\"assets/\", \"library/bootcamp/\"]\n[theme]\nname = \"parchment\"\n[theme.custom]\ngold = \"#FFD700\"\n",
         )
         .unwrap();
         assert_eq!(c.theme.name.as_deref(), Some("parchment"));
         assert_eq!(c.theme.custom.get("gold").map(String::as_str), Some("#FFD700"));
-        assert_eq!(c.agent.task_exclude, ["assets/", "Archmagus-Stack/Sovereign-Bootcamp/"]);
+        assert_eq!(c.agent.task_exclude, ["assets/", "library/bootcamp/"]);
         // mode is independent of name: pinning brand palettes opts out of Omarchy
         let pinned: Config = toml::from_str("[theme]\nmode = \"lapis\"\n").unwrap();
         assert!(!pinned.theme.is_omarchy());
