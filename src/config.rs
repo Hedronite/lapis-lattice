@@ -41,10 +41,10 @@ pub struct Config {
 ///
 /// `provider` is `ollama`, `auto` (use the space the index already records;
 /// probe Ollama only when `reindex --all` or `doctor` settles it), or `none`
-/// (keyword search only, and stored vectors are dropped). Unset never touches
-/// the network and keeps whatever space the index records, so a run without
-/// this section cannot throw away vectors another config built. The HTTP
-/// lattice owns its own embedder.
+/// (keyword search only). Unset never touches the network and uses whatever
+/// Ollama space the index records. No setting here throws stored vectors away;
+/// only embedding with a different model or width does. The HTTP lattice owns
+/// its own embedder.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct EmbedderConfig {
     #[serde(default)]

@@ -89,32 +89,29 @@ pub fn adopt_legacy(conn: &Connection, dim: usize) -> Result<u64> {
 
 /// Drop every stored vector when the embedding space changes. Keeping rows from
 /// a different model or dimension would silently compare incomparable numbers.
+///
+/// Opening with no embedder is not a change of space. A keyword-only open (a
+/// graph view, a script, a config with no embedder) neither reads nor writes
+/// vectors, and re-embedding a vault costs a model run per chunk, so the
+/// stored space and its rows are left exactly as they were. Notes reindexed
+/// meanwhile lose their vectors with their chunks and are embedded again by
+/// the next open that has an embedder.
 pub fn reconcile_space(conn: &Connection, e: Option<&dyn Embedder>) -> Result<()> {
+    let Some(e) = e else { return Ok(()) };
     let cur_model = crate::sqlite::meta_get(conn, "embed_model").unwrap_or_else(|| "none".into());
     let cur_dim = crate::sqlite::meta_get(conn, "embed_dim").unwrap_or_default();
-    let (want_model, want_dim, provider) = match e {
-        Some(e) => (e.model().to_string(), e.dim().to_string(), e.provider()),
-        None => ("none".to_string(), String::new(), "none"),
-    };
+    let (want_model, want_dim) = (e.model().to_string(), e.dim().to_string());
     if cur_model != want_model || cur_dim != want_dim {
         crate::sqlite::drop_vec_table(conn)?;
         conn.execute_batch(&format!("DROP TABLE IF EXISTS {LEGACY_TABLE};"))?;
     }
-    match e {
-        // The width is fixed at creation, so the table can only exist once an
-        // embedder has said how wide.
-        Some(e) => {
-            crate::sqlite::create_vec_table(conn, e.dim())?;
-            adopt_legacy(conn, e.dim())?;
-        }
-        // No embedder: nothing will write vectors and nothing can read the old
-        // blobs, so the retired table goes rather than sitting there looking
-        // like a store.
-        None => conn.execute_batch(&format!("DROP TABLE IF EXISTS {LEGACY_TABLE};"))?,
-    }
+    // The width is fixed at creation, so the table can only exist once an
+    // embedder has said how wide.
+    crate::sqlite::create_vec_table(conn, e.dim())?;
+    adopt_legacy(conn, e.dim())?;
     crate::sqlite::meta_set(conn, "embed_model", &want_model)?;
     crate::sqlite::meta_set(conn, "embed_dim", &want_dim)?;
-    crate::sqlite::meta_set(conn, "embedder", provider)?;
+    crate::sqlite::meta_set(conn, "embedder", e.provider())?;
     Ok(())
 }
 

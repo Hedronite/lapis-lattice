@@ -938,15 +938,26 @@ mod tests {
                     .unwrap();
             assert_eq!(count(&e), 0, "a dimension change wipes incomparable rows");
         }
-        // Dropping the embedder entirely also clears the space and reports none.
+        // A keyword-only open is not a change of space: it searches BM25 alone
+        // and leaves the stored vectors for the next open that has an embedder.
         {
+            let mut e =
+                Engine::open_with(&d, Some(std::sync::Arc::new(BagEmbedder { model: "bag-v1", dim: 12 })))
+                    .unwrap();
+            let stored = e.reindex().unwrap().embedded as i64;
+            drop(e);
             let e = Engine::open(&d).unwrap();
-            assert_eq!(vectors(&e), None, "no embedder means no vector table, not an empty one");
-            assert_eq!(e.health().unwrap().embedder, "none");
+            assert_eq!(vectors(&e), Some(stored), "opening without an embedder keeps every vector");
+            assert_eq!(e.health().unwrap().embed_dim, Some(12), "and the recorded space");
             let res = e
                 .search_with(&SearchParams { query: "welcome".into(), limit: 5, ..Default::default() })
                 .unwrap();
             assert_eq!(res.modalities, ["bm25"]);
+            drop(e);
+            let e =
+                Engine::open_with(&d, Some(std::sync::Arc::new(BagEmbedder { model: "bag-v1", dim: 12 })))
+                    .unwrap();
+            assert_eq!(count(&e), stored, "the same space reopened finds them");
         }
         let _ = std::fs::remove_dir_all(&d);
     }

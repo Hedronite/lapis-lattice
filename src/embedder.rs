@@ -5,11 +5,11 @@
 //! reports it as `embedError` and search drops the vector arm, so keyword
 //! search keeps answering.
 //!
-//! The engine wipes stored vectors whenever it is opened in a different
-//! embedding space, and "no embedder" is a space. So [`resolve`] never answers
-//! "none" just because Ollama is slow or a query asked for `--embedder none`:
-//! when the index already records an Ollama space, it gets an embedder for
-//! that space, whose calls may fail but whose vectors stay put.
+//! The engine wipes stored vectors when it is opened with a different model or
+//! width. So [`resolve`] never swaps the space just because Ollama is slow or a
+//! newly configured model does not answer: when the index already records an
+//! Ollama space, it gets an embedder for that space, whose calls may fail but
+//! whose vectors stay put. Opening with no embedder leaves the space alone.
 
 use std::path::Path;
 use std::sync::Arc;

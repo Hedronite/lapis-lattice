@@ -255,7 +255,7 @@ async fn resolution_rules() {
     assert!(resolve(&cfg(&f.url, Some("auto")), None, &d, true).ollama.is_some(), "settle may probe");
 
     let chunks = build(&d, &f).await;
-    // With an Ollama space stored, nothing short of an explicit `none` leaves it,
+    // With an Ollama space stored, every one of these keeps it,
     // and none of these touch the network.
     for (provider, requested) in [(None, None), (Some("auto"), None), (Some("ollama"), Some("none"))] {
         let r = resolve(&cfg(&dead, provider), requested, &d, false);
@@ -272,6 +272,7 @@ async fn resolution_rules() {
     assert!(r.note.unwrap().contains("other-model"));
 
     let c = ctx(&d, cfg(&dead, Some("none")));
-    assert_eq!(vectors(&c).await, (0, chunks), "an explicit none drops the space, as the engine documents");
+    assert!(resolve(&cfg(&dead, Some("none")), None, &d, true).ollama.is_none());
+    assert_eq!(vectors(&c).await, (chunks, chunks), "even an explicit none only stops using the vectors");
     let _ = std::fs::remove_dir_all(&d);
 }
