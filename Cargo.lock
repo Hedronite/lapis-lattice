@@ -4220,6 +4220,7 @@ dependencies = [
  "gpui-omarchy",
  "image",
  "lapis-lattice",
+ "log",
  "pulldown-cmark",
  "serde",
  "serde_json",

@@ -3,6 +3,7 @@
 //! theme swap restyles the graph with no restart.
 use super::*;
 use crate::graph_style::{FOLDER_HUES, STAR_PARALLAX, STARS, star};
+use crate::strokes;
 
 /// What one frame of the board needs, captured so the canvas can paint it.
 pub(super) struct Board {
@@ -36,6 +37,10 @@ const BUCKETS: usize = 6;
 /// with the square root of the count, down to a quarter.
 const EDGE_INK_FULL: f32 = 1_500.0;
 
+/// Up to this many lit links around a focused note keep their dashes and full
+/// gold; past it they are drawn solid, and their ink falls with the count.
+const HOT_DASHED_MAX: usize = 40;
+
 impl Board {
     pub(super) fn paint(self, bounds: Bounds<Pixels>, window: &mut Window) {
         let t_draw = Instant::now();
@@ -60,27 +65,44 @@ impl Board {
             window.paint_quad(dot(at(x, y), 0.5 + b * 0.6, with_alpha(theme.foreground, 0.05 + b * 0.22)));
         }
 
+        // A hub's gold fan: hundreds of converging dashes shimmer, so past a handful
+        // the lit links are drawn solid and thinner in ink, like the resting ones.
+        let lit = if self.focus.is_some() {
+            self.prims
+                .iter()
+                .filter(|p| matches!(p, Prim::Stroke { alpha, .. } if *alpha >= FULL_ALPHA))
+                .count()
+        } else {
+            0
+        };
+        let fan = lit > HOT_DASHED_MAX;
+        let [on, off] = crate::view::DASH_PX;
+        let (mut used, mut dashed_used) = (0usize, 0usize);
         let mut batch: [Vec<[f32; 4]>; BUCKETS] = Default::default();
         for p in &self.prims {
-            if let Prim::Stroke { x0, y0, x1, y1, dashed, alpha, .. } = p {
-                let tone = if *alpha < FULL_ALPHA {
-                    1
-                } else if self.focus.is_some() {
-                    2
-                } else {
-                    0
-                };
-                let slot = tone * 2 + usize::from(*dashed);
-                if *dashed {
-                    dashes(
-                        [*x0, *y0, *x1, *y1],
-                        crate::view::DASH_PX[0],
-                        crate::view::DASH_PX[1],
-                        &mut batch[slot],
-                    );
-                } else {
-                    batch[slot].push([*x0, *y0, *x1, *y1]);
-                }
+            let Prim::Stroke { x0, y0, x1, y1, dashed, alpha, .. } = p else { continue };
+            // Only what is on the board is drawn: a link that runs off it is cut at
+            // the edge, and one that never crosses it costs nothing.
+            let Some(seg) = strokes::clip([*x0, *y0, *x1, *y1], [w, h], 2.0) else { continue };
+            if used >= strokes::SEGMENT_BUDGET {
+                break;
+            }
+            let tone = if *alpha < FULL_ALPHA {
+                1
+            } else if self.focus.is_some() {
+                2
+            } else {
+                0
+            };
+            let cost = strokes::dash_count((seg[2] - seg[0]).hypot(seg[3] - seg[1]), on, off);
+            let dashed = *dashed && !(fan && tone == 2) && dashed_used + cost <= strokes::DASH_BUDGET;
+            let slot = tone * 2 + usize::from(dashed);
+            if dashed {
+                dashes(seg, on, off, &mut batch[slot]);
+                (used, dashed_used) = (used + cost, dashed_used + cost);
+            } else {
+                batch[slot].push(seg);
+                used += 1;
             }
         }
         // Thousands of hairlines at full ink wash a big vault's core white, so the
@@ -91,7 +113,10 @@ impl Board {
             let (colour, width) = match slot / 2 {
                 0 => (with_alpha(theme.foreground, ink), crate::view::STROKE_PX),
                 1 => (with_alpha(theme.border, DIM_ALPHA * 2.5), crate::view::STROKE_PX),
-                _ => (with_alpha(theme.accent, 0.8), crate::view::STROKE_PX * 1.4),
+                _ => {
+                    let hot = 0.8 * (HOT_DASHED_MAX as f32 / lit.max(1) as f32).sqrt().clamp(0.35, 1.0);
+                    (with_alpha(theme.accent, hot), crate::view::STROKE_PX * if fan { 1.0 } else { 1.4 })
+                }
             };
             if let Some(path) = segments_path(segs, width, bounds.origin) {
                 window.paint_path(path, colour);
