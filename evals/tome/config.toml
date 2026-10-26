@@ -1,5 +1,5 @@
 # tome-eval configuration (tome-tree spike, Jupi). Rulings: Eli GO R0–R2, 2026-09-28.
-# Every model / budget / provenance value lives here, never in code. Evan: swap the model here.
+# Every model / budget / provenance value lives here, never in code. Swap the model here.
 
 [answer]
 # One shared answerer for BOTH arms (and, later, node summaries). Jev never answers.
@@ -8,7 +8,7 @@ model = "opencode-go/deepseek-v4.1-flash"      # DeepSeek V4.1 Flash via OpenCod
 agent = "tome-answerer"                        # generated into a scratch OpenCode project; pins temperature, no tools
 temperature = 0.0
 max_output_tokens = 400
-opencode_bin = "opencode"                      # castle: ~/.opencode/bin/opencode (pass an absolute path if not on PATH)
+opencode_bin = "opencode"                      # pass an absolute path if not on PATH
 timeout_s = 180
 
 [budget]
@@ -31,21 +31,21 @@ rerank_jev = true
 chunk_map = "data/chunk-pages.jsonl"           # chunk_id → page_start/page_end, exported read-only from lattice.db
 
 [baseline.domain]                              # PDF → lattice documents.domain (read-only lookup)
-"Archmagus-Stack/09-Tomes/01-Earth-DevOps/Site Reliability Engineering.pdf" = "01-Earth-DevOps"
-"Archmagus-Stack/09-Tomes/01-Earth-DevOps/The Kubernetes Book - Poulton.pdf" = "01-Earth-DevOps"
-"Archmagus-Stack/09-Tomes/06-Wood-DataOps/Database Internals - Petrov.pdf" = "06-Wood-DataOps"
-"Archmagus-Stack/09-Tomes/07-Aether-QuantOps/Applied-Finance/Advances in Financial Machine Learning - Lopez de Prado.pdf" = "07-Aether-QuantOps"
+"tomes/01-Earth-DevOps/Site Reliability Engineering.pdf" = "01-Earth-DevOps"
+"tomes/01-Earth-DevOps/The Kubernetes Book - Poulton.pdf" = "01-Earth-DevOps"
+"tomes/06-Wood-DataOps/Database Internals - Petrov.pdf" = "06-Wood-DataOps"
+"tomes/07-Aether-QuantOps/Applied-Finance/Advances in Financial Machine Learning - Lopez de Prado.pdf" = "07-Aether-QuantOps"
 
 [baseline.indexer]
-path = "projects/atrium-lattice/tome_indexer.py"   # vault-relative, on the host that runs the lattice service
-# git_commit omitted: atrium-lattice has no commits (branch master, 0 commits) → recorded as null; see sha256
+path = "projects/lattice/tome_indexer.py"   # vault-relative, on the host that runs the lattice service
+# git_commit omitted: the indexer project has no commits (branch master, 0 commits) → recorded as null; see sha256
 sha256 = "6cfd27756d32ae1d7dfb70dfd7e73a862f8a387b1866e3a76f98a40fd78c8d01"
 chunk_target_chars = 2000                      # CHUNK_SIZE_TARGET_CHARS (~500 tokens)
 chunk_max_chars = 4000                         # CHUNK_SIZE_MAX_CHARS
 chunk_overlap_chars = 0                        # paragraph packing, no overlap; tiny chunks merged (R-029)
 embedding_model = "nomic-embed-text"           # index_state.embedding_model (Ollama)
 embedding_dim = 768
-lattice_db_fingerprint = "atrium-lattice/data/lattice.db; 4 docs indexed 2026-07-23T00:55:55Z..01:13:13Z; 1658 chunks"
+lattice_db_fingerprint = "lattice/data/lattice.db; 4 docs indexed 2026-07-23T00:55:55Z..01:13:13Z; 1658 chunks"
 
 [tome]
 index_dir = ".lapis/tomes"                   # vault-relative (joined to --vault / $LAPIS_VAULT); trees from `lapis tome build`

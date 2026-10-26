@@ -674,7 +674,7 @@ mod tests {
     fn scope_is_vault_relative_markdown_only() {
         assert!(in_scope("foundry/note.md"));
         assert!(in_scope("foundry/a/b.markdown"));
-        assert!(in_scope("agents/mail_room/Merci/2026-09-21.md"));
+        assert!(in_scope("agents/mail_room/notes/2026-09-21.md"));
         assert!(!in_scope("foundry/pic.png"));
         assert!(!in_scope("notes/Alpha.md"));
         assert!(!in_scope("agents/mail_room.md"));

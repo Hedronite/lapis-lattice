@@ -261,7 +261,7 @@ mod tests {
         let api = Unopened("must not be reached".into());
         for bad in [
             "../../../etc/passwd".to_string(),
-            "Archmagus-Stack/09-Tomes/x.pdf".into(),
+            "tomes/x.pdf".into(),
             "A".repeat(64),
             format!(" {}", "a".repeat(64)),
             format!("{}\n", "a".repeat(64)),

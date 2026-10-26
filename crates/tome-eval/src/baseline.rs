@@ -213,6 +213,26 @@ pub fn parse_search_envelope(stdout: &[u8]) -> Result<Vec<Hit>, BaselineError> {
     serde_json::from_value(hits).map_err(|e| BaselineError::Internal(format!("hits: {e}")))
 }
 
+/// Neutral prefix the committed fixtures use for every PDF path.
+pub const FIXTURE_DOC_ROOT: &str = "tomes/";
+
+/// Env var naming the vault-relative folder the lattice service indexes the
+/// PDFs under. Unset keeps the fixture paths as they are (`tomes/...`).
+pub const DOC_ROOT_ENV: &str = "TOME_EVAL_DOC_ROOT";
+
+/// The path the lattice service reports for a fixture `doc`: the leading
+/// `tomes/` swapped for `$TOME_EVAL_DOC_ROOT` when that is set.
+pub fn lattice_doc_path(doc: &str) -> String {
+    map_doc_root(doc, std::env::var(DOC_ROOT_ENV).ok().as_deref())
+}
+
+fn map_doc_root(doc: &str, root: Option<&str>) -> String {
+    match (root.filter(|r| !r.is_empty()), doc.strip_prefix(FIXTURE_DOC_ROOT)) {
+        (Some(r), Some(rest)) => format!("{}/{rest}", r.trim_end_matches('/')),
+        _ => doc.to_string(),
+    }
+}
+
 /// Same-PDF filter, keep retrieve order, cap at `top_k`.
 pub fn same_pdf(hits: Vec<Hit>, doc: &str, top_k: u32) -> Vec<Hit> {
     hits.into_iter().filter(|h| h.path == doc).take(top_k as usize).collect()
@@ -315,6 +335,15 @@ mod tests {
         let ok = br#"{"ok":true,"data":{"hits":[{"path":"d.pdf","kind":"pdf","title":"t","rank":1,"score":0.1,"domain":null,"doc_type":"tome","chunk_id":7}]},"meta":{}}"#;
         let hs = parse_search_envelope(ok).unwrap();
         assert_eq!(hs[0].chunk_id, Some(7));
+    }
+
+    #[test]
+    fn doc_root_env_maps_only_the_fixture_prefix() {
+        assert_eq!(map_doc_root("tomes/a/b.pdf", None), "tomes/a/b.pdf");
+        assert_eq!(map_doc_root("tomes/a/b.pdf", Some("")), "tomes/a/b.pdf");
+        assert_eq!(map_doc_root("tomes/a/b.pdf", Some("lib/books/")), "lib/books/a/b.pdf");
+        assert_eq!(map_doc_root("tomes/a/b.pdf", Some("lib/books")), "lib/books/a/b.pdf");
+        assert_eq!(map_doc_root("other/b.pdf", Some("lib")), "other/b.pdf");
     }
 
     #[test]

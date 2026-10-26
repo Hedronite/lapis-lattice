@@ -1,5 +1,5 @@
 //! Bakes the git sha into `tome-eval` so result records carry it even when the
-//! binary runs on a machine without the checkout (castle).
+//! binary runs on a machine without the checkout.
 use std::process::Command;
 
 fn git(args: &[&str]) -> Option<String> {
