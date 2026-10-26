@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Notes and the RAG gate
+
+- `lapis create` writes `title` beside `name`, so a new note passes the frontmatter gate it is checked against.
+- The gate resolves wikilinks against the index the vault actually uses: the HTTP lattice when the config says `mode = "http"`, otherwise the embedded one. It used to read the embedded index regardless and report notes as dangling that `lapis resolve` found.
+- A `/documents` row whose tags hold a number or a boolean (YAML reads `tags: [ops, 429]` that way) no longer fails the whole page. `lapis list` reported the lattice as down because of one such note.
+
 ### Desktop
 
 - The window opens in a Lapis palette (night navy, cream, gold) unless an Omarchy theme is present. `LAPIS_THEME=lapis` or `LAPIS_THEME=omarchy` overrides the choice.

@@ -379,7 +379,7 @@ pub struct Document {
     pub status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_tags")]
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtime: Option<f64>,
@@ -481,6 +481,24 @@ fn int_or_bool<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<bo
         Value::Bool(b) => b,
         Value::Number(n) => n.as_i64().unwrap_or(0) != 0,
         _ => false,
+    })
+}
+
+/// YAML reads `tags: [ops, 429]` as a number. One such note must not fail a whole
+/// `/documents` page: numbers and booleans become strings, anything else is dropped.
+fn lenient_tags<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Vec<String>, D::Error> {
+    Ok(match Value::deserialize(d)? {
+        Value::Array(items) => items
+            .into_iter()
+            .filter_map(|t| match t {
+                Value::String(s) => Some(s),
+                Value::Number(n) => Some(n.to_string()),
+                Value::Bool(b) => Some(b.to_string()),
+                _ => None,
+            })
+            .collect(),
+        Value::String(s) => vec![s],
+        _ => vec![],
     })
 }
 
@@ -715,6 +733,16 @@ fn describe_reqwest(url: &str, e: &reqwest::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_numeric_tag_does_not_fail_the_documents_page() {
+        let page: Vec<Document> = serde_json::from_str(
+            r#"[{"path":"a.md","tags":["ops",429,true,null,{"x":1}]},{"path":"b.md","tags":null},{"path":"c.md"}]"#,
+        )
+        .unwrap();
+        assert_eq!(page[0].tags, ["ops", "429", "true"]);
+        assert!(page[1].tags.is_empty() && page[2].tags.is_empty());
+    }
 
     #[test]
     fn mode_wire_names() {
