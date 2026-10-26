@@ -1,16 +1,23 @@
 //! Formatted source projection over the existing native text/undo owner.
+mod card;
 mod input;
 mod layout;
 use super::{Bias, Projection};
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::{
-    Bounds, Context, ElementInputHandler, Entity, Focusable, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Point, Render, Styled, Subscription, Window,
-    canvas, div, point, px,
+    Bounds, Context, CursorStyle, ElementInputHandler, Entity, EventEmitter, Focusable, InteractiveElement,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Point, Render, Styled,
+    Subscription, Window, canvas, div, point, px,
 };
 use gpui_omarchy::ActiveTheme;
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
+
+/// Asks the workspace to follow a link clicked in the note or its properties card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LiveEvent {
+    Follow { target: String, wiki: bool },
+}
 
 pub struct LiveEditor {
     pub source: Entity<TextareaState>,
@@ -33,6 +40,12 @@ pub struct LiveEditor {
     restored_scroll: Option<Pixels>,
     height: Pixels,
     anchor: Option<usize>,
+    /// Frontmatter shown in the card above the text, and whether every row shows.
+    properties: serde_json::Value,
+    card_open: bool,
+    card: Option<card::Card>,
+    /// The pointer is over something clickable: a link or the card toggle.
+    hovering_link: bool,
     _changes: Subscription,
     _observe: Subscription,
 }
@@ -81,6 +94,10 @@ impl LiveEditor {
             restored_scroll: None,
             height: px(0.),
             anchor: None,
+            properties: serde_json::Value::Null,
+            card_open: false,
+            card: None,
+            hovering_link: false,
             _changes: changes,
             _observe: observe,
         }
@@ -92,6 +109,38 @@ impl LiveEditor {
     /// width, font or palette change keeps its lines.
     pub fn layout_generation(&self) -> u32 {
         self.generation
+    }
+    /// The note's frontmatter, as parsed by the services. Redrawn only when it changes.
+    pub fn set_properties(&mut self, properties: serde_json::Value, cx: &mut Context<Self>) {
+        if self.properties != properties {
+            self.properties = properties;
+            self.relayout = true;
+            cx.notify();
+        }
+    }
+    /// Whether the properties card shows every row. Reading view shares this.
+    pub fn card_open(&self) -> bool {
+        self.card_open
+    }
+    pub fn toggle_card(&mut self, cx: &mut Context<Self>) {
+        self.card_open = !self.card_open;
+        self.relayout = true;
+        cx.notify();
+    }
+    /// The link a click at `position` would follow, in the text or the card.
+    pub fn link_at(&self, position: Point<Pixels>) -> Option<LiveEvent> {
+        if let Some(card::Hit::Link(target)) = self.card_hit(position) {
+            return Some(LiveEvent::Follow { target, wiki: true });
+        }
+        let line = self
+            .lines
+            .iter()
+            .find(|l| position.y >= l.origin.y && position.y < l.origin.y + l.shaped.size(l.height).height)?;
+        let block = &self.projection.blocks[line.block];
+        let index = line.shaped.index_for_position(position - line.origin, line.height).ok()?;
+        block
+            .link_at(line.display + index)
+            .map(|l| LiveEvent::Follow { target: l.target.clone(), wiki: l.wiki })
     }
     pub fn restore_scroll(&mut self, value: f32, cx: &mut Context<Self>) {
         self.restored_scroll = Some(px(value.max(0.)));
@@ -172,6 +221,25 @@ impl LiveEditor {
         None
     }
     fn down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // A plain click follows a link; Alt-click places the caret inside it instead.
+        if event.click_count == 1 && !event.modifiers.shift && !event.modifiers.alt {
+            if let Some(card::Hit::Toggle) = self.card_hit(event.position) {
+                self.card_open = !self.card_open;
+                self.relayout = true;
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+            if let Some(follow) = self.link_at(event.position) {
+                cx.emit(follow);
+                cx.stop_propagation();
+                return;
+            }
+        }
+        if self.on_card(event.position) {
+            cx.stop_propagation();
+            return;
+        }
         let p = self.source_at_point(event.position);
         let current = self.source.read(cx).selected_range();
         let (anchor, head) = if event.click_count >= 2 {
@@ -191,6 +259,15 @@ impl LiveEditor {
         });
         cx.stop_propagation();
         cx.notify();
+    }
+    fn hover(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let hovering = self.anchor.is_none()
+            && (self.link_at(event.position).is_some()
+                || matches!(self.card_hit(event.position), Some(card::Hit::Toggle)));
+        if hovering != self.hovering_link {
+            self.hovering_link = hovering;
+            cx.notify();
+        }
     }
     fn drag(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(anchor) = self.anchor else {
@@ -212,6 +289,7 @@ impl LiveEditor {
         cx.notify();
     }
 }
+impl EventEmitter<LiveEvent> for LiveEditor {}
 impl Render for LiveEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let source = self.source.clone();
@@ -223,6 +301,7 @@ impl Render for LiveEditor {
             .relative()
             .size_full()
             .overflow_hidden()
+            .cursor(if self.hovering_link { CursorStyle::PointingHand } else { CursorStyle::IBeam })
             // Retain the widget's native key actions and history without using its source layout.
             .child(
                 div()
@@ -258,7 +337,10 @@ impl Render for LiveEditor {
                     .child(self.input_error.clone().unwrap_or_default()),
             )
             .on_mouse_down(MouseButton::Left, cx.listener(|this, e, w, cx| this.down(e, w, cx)))
-            .on_mouse_move(cx.listener(|this, e, w, cx| this.drag(e, w, cx)))
+            .on_mouse_move(cx.listener(|this, e, w, cx| {
+                this.hover(e, cx);
+                this.drag(e, w, cx);
+            }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {

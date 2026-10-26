@@ -1,11 +1,13 @@
 //! Native notes shell. Files load independently from the optional graph/index.
 
+mod card;
 mod chrome;
 mod command;
 mod context;
 mod document;
 mod graph;
 mod history;
+mod links;
 mod menu;
 mod palette;
 mod pane_view;
@@ -45,6 +47,7 @@ struct Tab {
     live: Entity<crate::live::LiveEditor>,
     pdf: Option<Entity<crate::pdf_reader::PdfReader>>,
     _events: Subscription,
+    _follow: Subscription,
     view: View,
     split: Entity<gpui_kit::base::ResizableState>,
     split_width: Option<f32>,
@@ -351,6 +354,7 @@ impl Workspace {
                             this.open_file(path.clone(), window, cx);
                             this.directory(this.folder.clone(), window, cx);
                         } else {
+                            tab.live.update(cx, |s, cx| s.set_properties(document.properties.clone(), cx));
                             tab.document = document;
                         }
                         if close {

@@ -1,4 +1,4 @@
-use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, Event, LinkType, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
 use unicode_width::UnicodeWidthStr;
 
@@ -34,14 +34,29 @@ pub struct Span {
     /// Exact spans differ only in presentation. Replacements are indivisible source units.
     exact: bool,
 }
+/// A followable link in a closed block: a `[[wikilink]]`, an `![[embed]]` or a Markdown link.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Link {
+    /// Byte range in the block's display text.
+    pub display: Range<usize>,
+    /// The destination as written: a wikilink target (with any `#anchor`) or a URL/path.
+    pub target: String,
+    pub wiki: bool,
+}
 #[derive(Clone, Debug)]
 pub struct Block {
     pub source: Range<usize>,
     pub kind: Kind,
     pub spans: Vec<Span>,
     pub revealed: bool,
+    /// Empty while revealed: the raw source is shown and edited instead.
+    pub links: Vec<Link>,
 }
 impl Block {
+    /// The link under a display offset, if the block is closed.
+    pub fn link_at(&self, display: usize) -> Option<&Link> {
+        self.links.iter().find(|l| l.display.contains(&display))
+    }
     pub fn text(&self) -> String {
         self.spans.iter().map(|s| s.text.as_str()).collect()
     }
@@ -102,7 +117,10 @@ pub struct Projection {
 }
 impl Projection {
     pub fn new(source: &str, selection: Range<usize>) -> Self {
-        let options = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
+        let options = Options::ENABLE_TABLES
+            | Options::ENABLE_TASKLISTS
+            | Options::ENABLE_STRIKETHROUGH
+            | Options::ENABLE_WIKILINKS;
         let mut ranges = Vec::new();
         let mut depth = 0usize;
         let mut pending = None;
@@ -166,26 +184,31 @@ impl Projection {
             selection.start < range.end && selection.end > range.start
         };
         let raw = &source[range.clone()];
-        let spans = if revealed || kind == Kind::Blank {
-            vec![Span {
+        let (spans, links) = if revealed || kind == Kind::Blank {
+            let span = Span {
                 text: raw.into(),
                 source: range.clone(),
                 style: Style { code: kind == Kind::Code, ..Style::default() },
                 exact: true,
-            }]
+            };
+            (vec![span], vec![])
         } else if kind == Kind::Table {
-            table_spans(raw, range.start, options)
+            (table_spans(raw, range.start, options), vec![])
         } else {
             formatted(raw, range.start, options)
         };
-        Block { source: range, kind, spans, revealed }
+        Block { source: range, kind, spans, revealed, links }
     }
 }
-fn formatted(raw: &str, base: usize, options: Options) -> Vec<Span> {
-    let mut spans = Vec::new();
+fn formatted(raw: &str, base: usize, options: Options) -> (Vec<Span>, Vec<Link>) {
+    let mut spans: Vec<Span> = Vec::new();
     let mut style = Style::default();
     let mut stack = Vec::new();
     let mut lists = Vec::new();
+    let mut links = Vec::new();
+    // Open links: display start, destination, wiki, opened by an embed.
+    let mut open: Vec<(usize, String, bool, bool)> = Vec::new();
+    let shown = |spans: &[Span]| spans.iter().map(|s| s.text.len()).sum::<usize>();
     for (event, range) in Parser::new_ext(raw, options).into_offset_iter() {
         let global = base + range.start..base + range.end;
         match event {
@@ -195,7 +218,15 @@ fn formatted(raw: &str, base: usize, options: Options) -> Vec<Span> {
                     Tag::Strong => style.strong = true,
                     Tag::Emphasis => style.emphasis = true,
                     Tag::Strikethrough => style.strike = true,
-                    Tag::Link { .. } => style.link = true,
+                    Tag::Link { link_type, dest_url, .. } => {
+                        style.link = true;
+                        let wiki = matches!(link_type, LinkType::WikiLink { .. });
+                        open.push((shown(&spans), dest_url.to_string(), wiki, false));
+                    }
+                    Tag::Image { link_type: LinkType::WikiLink { .. }, dest_url, .. } => {
+                        style.link = true;
+                        open.push((shown(&spans), dest_url.to_string(), true, true));
+                    }
                     Tag::CodeBlock(_) => style.code = true,
                     Tag::List(start) => lists.push(start),
                     Tag::Item => {
@@ -221,6 +252,15 @@ fn formatted(raw: &str, base: usize, options: Options) -> Vec<Span> {
                 match tag {
                     TagEnd::List(_) => {
                         lists.pop();
+                    }
+                    TagEnd::Link | TagEnd::Image
+                        if open.last().is_some_and(|o| o.3 == matches!(tag, TagEnd::Image)) =>
+                    {
+                        let (start, target, wiki, _) = open.pop().unwrap();
+                        let end = shown(&spans);
+                        if end > start {
+                            links.push(Link { display: start..end, target, wiki });
+                        }
                     }
                     TagEnd::Item | TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::CodeBlock
                         if !spans.last().is_some_and(|s| s.text.ends_with('\n')) =>
@@ -266,7 +306,7 @@ fn formatted(raw: &str, base: usize, options: Options) -> Vec<Span> {
     while spans.last().is_some_and(|s| s.source.is_empty() && s.text == "\n") {
         spans.pop();
     }
-    spans
+    (spans, links)
 }
 fn push_text(spans: &mut Vec<Span>, text: &str, raw: &str, range: &Range<usize>, base: usize, style: Style) {
     let slice = &raw[range.clone()];
@@ -501,5 +541,34 @@ mod tests {
         let open = Projection::new(s, 2..2);
         assert!(open.blocks[0].revealed);
         assert!(open.blocks[0].text().contains("| name |"));
+    }
+    #[test]
+    fn wikilinks_show_their_label_and_keep_a_followable_target() {
+        let s = "See [[notes/alpha|Alpha]] and [[beta#Part]], ![[img.png]], [web](https://x.org).\n";
+        let p = closed(s);
+        let b = &p.blocks[0];
+        let t = b.text();
+        assert_eq!(t, "See Alpha and beta#Part, img.png, web.");
+        let targets: Vec<(&str, &str, bool)> =
+            b.links.iter().map(|l| (&t[l.display.clone()], l.target.as_str(), l.wiki)).collect();
+        assert_eq!(
+            targets,
+            [
+                ("Alpha", "notes/alpha", true),
+                ("beta#Part", "beta#Part", true),
+                ("img.png", "img.png", true),
+                ("web", "https://x.org", false)
+            ]
+        );
+        let a = t.find("Alpha").unwrap();
+        assert_eq!(b.link_at(a + 2).unwrap().target, "notes/alpha");
+        assert!(b.link_at(0).is_none());
+        // The label maps back into the source, inside the brackets.
+        let r = b.source_at(a, Bias::After)..b.source_at(a + 5, Bias::Before);
+        assert_eq!(&s[r], "Alpha");
+        // Open, the block shows the raw link and offers nothing to follow.
+        let open = Projection::new(s, 2..2);
+        assert!(open.blocks[0].text().contains("[[notes/alpha|Alpha]]"));
+        assert!(open.blocks[0].links.is_empty());
     }
 }
