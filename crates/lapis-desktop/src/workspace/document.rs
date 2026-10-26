@@ -60,7 +60,15 @@ impl Workspace {
                 pdf.update(cx, |s, cx| s.restore_position(saved.pdf_page, saved.pdf_zoom, window, cx));
             }
         }
-        let live = cx.new(|cx| crate::live::LiveEditor::new(editor.clone(), cx));
+        let live = cx.new(|cx| {
+            let mut live = crate::live::LiveEditor::new(editor.clone(), cx);
+            live.set_properties(document.properties.clone(), cx);
+            live
+        });
+        let follow = cx.subscribe_in(&live, window, |this, _, event: &crate::live::LiveEvent, window, cx| {
+            let crate::live::LiveEvent::Follow { target, wiki } = event;
+            this.follow_link(target.clone(), *wiki, window, cx);
+        });
         editor.update(cx, |s, cx| s.set_cursor_blink(view != View::Live, cx));
         if let Some(saved) = &restored {
             live.update(cx, |s, cx| s.restore_scroll(saved.live_scroll, cx));
@@ -75,6 +83,7 @@ impl Workspace {
             live,
             pdf,
             _events: events,
+            _follow: follow,
             split_width: restored.and_then(|t| t.split_width),
             reading_scroll,
             view,

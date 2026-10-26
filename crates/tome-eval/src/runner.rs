@@ -128,7 +128,7 @@ impl Harness {
             _ => baseline::http_search(b, &q.question, domain).await,
         }
         .map_err(err)?;
-        let mut page = baseline::same_pdf(hits, &q.doc, b.top_k);
+        let mut page = baseline::same_pdf(hits, &baseline::lattice_doc_path(&q.doc), b.top_k);
         if page.is_empty() {
             return Err(err(baseline::BaselineError::NoHitsForDoc(b.retrieve_limit)));
         }

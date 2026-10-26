@@ -12,6 +12,10 @@
 - Arrow keys keep the palette and menu selection in view. A new PDF page opens at its top.
 - The `Phantom not found` notice moved from a banner above every document to the status bar.
 - Tabs with the same file name show their parent folder, not the full path. Opening a note scrolls its tab into view.
+- Live shows `[[target|Label]]` as `Label`, and a click follows it: wikilinks resolve through the vault (exact path first, then the same rules as `lapis resolve`), Markdown links open in the browser. Alt-click places the caret instead. A link that names nothing, or more than one note, says so in the status bar.
+- Frontmatter shows as a properties card above Live and Reading text: the first four keys (title, type, status, …), with `Show all` for the rest. Wikilinks in values, such as `parent` and `cross_refs`, follow like body links. The card is read-only; Properties in the command menu edits.
+- Reading view follows wikilinks too. Search snippets read as one run of prose and clamp to two lines.
+- The sidebar is a folder tree: folders open and close in place and load on first open, with indent guides and a collapse-all control. Opening a note opens the folders above it and scrolls its row into view. A Recent section lists the last five notes opened. The saved session format is unchanged.
 
 ### Phantom client
 

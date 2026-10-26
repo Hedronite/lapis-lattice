@@ -564,8 +564,7 @@ impl Workspace {
     }
 
     fn refresh_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let folder = self.folder.clone();
-        self.directory(folder, window, cx);
+        self.refresh_tree(window, cx);
     }
 
     /// Poll the service for files changed outside the workspace: reload clean open
@@ -612,6 +611,7 @@ impl Workspace {
                         return;
                     }
                     let text = document.text.clone();
+                    tab.live.update(cx, |s, cx| s.set_properties(document.properties.clone(), cx));
                     tab.document = document;
                     tab.editor.update(cx, |s, cx| {
                         let cursor = s.cursor().min(text.len());

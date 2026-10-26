@@ -81,7 +81,8 @@ impl LiveEditor {
     fn shape(&mut self, width: Pixels, theme: &gpui_omarchy::Theme, window: &mut Window) {
         self.generation = self.generation.wrapping_add(1);
         self.lines.clear();
-        let mut y = px(32.);
+        self.card = self.shape_card(width, theme, window, px(28.));
+        let mut y = self.card.as_ref().map_or(px(32.), |c| c.top + c.height + px(28.));
         for (index, block) in self.projection.blocks.iter().enumerate() {
             let font_size = match block.kind {
                 Kind::Heading(level) => px((32.0 - f32::from(level) * 3.).max(17.)),
@@ -177,6 +178,7 @@ impl LiveEditor {
         let selection = self.source.read(cx).selected_range();
         let cursor = self.source.read(cx).cursor();
         window.paint_layer(self.bounds, |window| {
+            self.paint_card(&theme, window, cx);
             for line in &self.lines {
                 if line.origin.y + line.shaped.size(line.height).height < self.bounds.top()
                     || line.origin.y > self.bounds.bottom()

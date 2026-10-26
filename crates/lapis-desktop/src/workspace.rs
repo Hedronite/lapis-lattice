@@ -1,23 +1,27 @@
 //! Native notes shell. Files load independently from the optional graph/index.
 
+mod card;
 mod chrome;
 mod command;
 mod context;
 mod document;
 mod graph;
 mod history;
+mod links;
 mod menu;
 mod palette;
 mod pane_view;
 mod panes;
 mod render;
 mod session;
+mod sidebar;
 #[cfg(all(test, feature = "gui-tests"))]
 mod tests;
+mod tree;
 
 use crate::{
     DesktopError, Options,
-    services::{Document, FileEntry, FileKind, WorkspaceServices},
+    services::{Document, FileKind, WorkspaceServices},
 };
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::{
@@ -45,6 +49,7 @@ struct Tab {
     live: Entity<crate::live::LiveEditor>,
     pdf: Option<Entity<crate::pdf_reader::PdfReader>>,
     _events: Subscription,
+    _follow: Subscription,
     view: View,
     split: Entity<gpui_kit::base::ResizableState>,
     split_width: Option<f32>,
@@ -58,10 +63,13 @@ struct Workspace {
     services: Arc<dyn WorkspaceServices>,
     layout: Entity<gpui_kit::base::ResizableState>,
     context_layout: Entity<gpui_kit::base::ResizableState>,
-    files: Vec<FileEntry>,
+    /// The sidebar tree, the folder new notes go to, and notes opened lately.
+    tree: crate::file_tree::Tree,
     folder: String,
-    files_loading: bool,
-    file_epoch: u64,
+    recent: Vec<String>,
+    /// A path to bring into view in the tree once its folders have loaded.
+    reveal: Option<String>,
+    file_scroll: gpui_kit::ScrollHandle,
     open_epoch: u64,
     opening: Option<String>,
     tabs: Vec<Tab>,
@@ -105,10 +113,11 @@ impl Workspace {
             services,
             layout: cx.new(|_| gpui_kit::base::ResizableState::default()),
             context_layout: cx.new(|_| gpui_kit::base::ResizableState::default()),
-            files: vec![],
+            tree: Default::default(),
             folder: String::new(),
-            files_loading: false,
-            file_epoch: 0,
+            recent: vec![],
+            reveal: None,
+            file_scroll: gpui_kit::ScrollHandle::new(),
             open_epoch: 0,
             opening: None,
             tabs: vec![],
@@ -186,50 +195,6 @@ impl Workspace {
         tab.editor.read(cx).value().as_ref() != tab.document.text
     }
 
-    fn directory(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.file_epoch += 1;
-        let epoch = self.file_epoch;
-        self.files_loading = true;
-        let service = self.services.clone();
-        let folder = path.clone();
-        let task = cx.background_executor().spawn(async move { service.directory(&path) });
-        cx.spawn_in(window, async move |this, cx| {
-            let result = task.await;
-            if std::env::var_os("LAPIS_UI_TRACE").is_some() {
-                eprintln!(
-                    "lapis workspace: directory completed: {}",
-                    result.as_ref().map_or_else(|e| e.clone(), |v| format!("{} entries", v.len()))
-                );
-            }
-            let applied = this.update_in(cx, |this, window, cx| {
-                if std::env::var_os("LAPIS_UI_TRACE").is_some() {
-                    eprintln!("lapis workspace: directory apply epoch {epoch}/{}", this.file_epoch);
-                }
-                if this.file_epoch != epoch {
-                    return;
-                }
-                this.files_loading = false;
-                match result {
-                    Ok(files) => {
-                        this.files = files;
-                        this.folder = folder;
-                    }
-                    Err(e) => {
-                        this.status = e;
-                        this.error = true;
-                    }
-                }
-                cx.notify();
-                window.refresh();
-            });
-            if let Err(error) = applied {
-                eprintln!("lapis workspace: directory callback unavailable: {error}");
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
     fn navigate(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((index, visit)) = self.history.target(forward) {
             match visit {
@@ -243,6 +208,7 @@ impl Workspace {
         self.active = index;
         self.panes.assign(self.tabs[index].document.path.clone());
         self.history.commit(self.tabs[index].document.path.clone().into(), travel);
+        self.note_opened(self.tabs[index].document.path.clone(), window, cx);
         if let Some(ordinal) = self.tab_order.iter().position(|p| *p == self.tabs[index].document.path) {
             self.tab_scroll.scroll_to_item(ordinal);
         }
@@ -349,8 +315,9 @@ impl Workspace {
                             close_requested && !copy && tab.editor.read(cx).value().as_ref() == document.text;
                         if copy {
                             this.open_file(path.clone(), window, cx);
-                            this.directory(this.folder.clone(), window, cx);
+                            this.refresh_tree(window, cx);
                         } else {
+                            tab.live.update(cx, |s, cx| s.set_properties(document.properties.clone(), cx));
                             tab.document = document;
                         }
                         if close {

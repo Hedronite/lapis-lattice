@@ -1,6 +1,6 @@
 //! Headless GPUI dispatch tests complement, but never replace, native host smoke.
 use super::*;
-use crate::services::SearchPage;
+use crate::services::{FileEntry, SearchPage};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{ClipboardItem, TestAppContext, VisualTestContext, WindowHandle};
 
@@ -43,7 +43,7 @@ impl WorkspaceServices for Fixture {
             kind: FileKind::Markdown,
             text: text.clone(),
             original: text,
-            properties: serde_json::json!({"custom":"keep"}),
+            properties: links::fixture_properties(path),
             readonly: false,
         })
     }
@@ -76,6 +76,9 @@ impl WorkspaceServices for Fixture {
     }
     fn search(&self, _: &str) -> Result<SearchPage, String> {
         Err("offline fixture".into())
+    }
+    fn resolve_link(&self, target: &str) -> Result<Option<String>, String> {
+        Ok((target != "nowhere").then(|| format!("{target}.md")))
     }
     fn links(&self, path: &str) -> Result<Vec<crate::services::ContextLink>, String> {
         Ok(vec![crate::services::ContextLink {
@@ -727,6 +730,10 @@ fn closing_loaded_tab_can_activate_lazy_neighbor_and_dirty_tabs_stay(cx: &mut Te
 mod graph;
 
 mod panes;
+
+mod links;
+
+mod tree;
 
 #[gpui_kit::test]
 fn commands_menu_creates_a_note_from_a_template_and_opens_it(cx: &mut TestAppContext) {
