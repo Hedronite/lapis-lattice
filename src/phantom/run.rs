@@ -47,9 +47,11 @@ pub const STDOUT_CAP: usize = 1 << 20;
 pub const STDERR_CAP: usize = 64 << 10;
 
 /// The environment a child keeps. Everything else, tokens included, is cleared.
+/// Phantom finds its data under `$PHANTOM_FRACTAL_DATA`, else `$HOME` (macOS)
+/// or `$XDG_DATA_HOME` (elsewhere), so those pass.
 fn keep_env(name: &OsStr) -> bool {
     let name = name.to_string_lossy();
-    matches!(name.as_ref(), "PATH" | "HOME" | "TMPDIR" | "USER" | "LANG" | "TZ")
+    matches!(name.as_ref(), "PATH" | "HOME" | "XDG_DATA_HOME" | "TMPDIR" | "USER" | "LANG" | "TZ")
         || name.starts_with("LC_")
         || name.starts_with("PHANTOM_")
 }

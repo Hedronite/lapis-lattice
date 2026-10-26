@@ -280,7 +280,7 @@ fn the_child_sees_only_allowlisted_environment() {
     let bin = script(
         "env-stub",
         &format!(
-            "printf '%s|%s|%s' \"$LAPIS_TEST_SECRET\" \"$PHANTOM_TEST_SETTING\" \"$PATH\" > '{}'\nprintf '%s' '{SUCCESS}'",
+            "printf '%s|%s|%s|%s' \"$LAPIS_TEST_SECRET\" \"$PHANTOM_TEST_SETTING\" \"$PATH\" \"$XDG_DATA_HOME\" > '{}'\nprintf '%s' '{SUCCESS}'",
             seen.display()
         ),
     );
@@ -290,10 +290,16 @@ fn the_child_sees_only_allowlisted_environment() {
         std::env::set_var("LAPIS_TEST_SECRET", "token-should-not-pass");
         std::env::set_var("PHANTOM_TEST_SETTING", "kept");
     }
+    let xdg = std::env::var_os("XDG_DATA_HOME");
+    unsafe { std::env::set_var("XDG_DATA_HOME", "/phantom-data") };
     let r = run::run(&bin, &["version"]);
     unsafe {
         std::env::remove_var("LAPIS_TEST_SECRET");
         std::env::remove_var("PHANTOM_TEST_SETTING");
+        match xdg {
+            Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
     }
     assert!(r.unwrap().envelope.ok);
     let seen = std::fs::read_to_string(seen).unwrap();
@@ -301,6 +307,7 @@ fn the_child_sees_only_allowlisted_environment() {
     assert_eq!(parts[0], "", "a secret in Lapis's environment does not reach the child");
     assert_eq!(parts[1], "kept", "PHANTOM_* settings do");
     assert!(!parts[2].is_empty(), "and so does PATH");
+    assert_eq!(parts[3], "/phantom-data", "and Phantom's data home");
 }
 
 // ------------------------------------------------------------------ T1
