@@ -11,6 +11,7 @@
 
 ### Desktop
 
+- PDFs read as one continuous column of pages. Only pages near the viewport are rendered, one at a time, so a 1,300-page book opens and scrolls without rendering every page. The page field follows the scroll; typing a page, Previous/Next, j/k, Page Up/Down and Home/End jump to page tops, and zoom keeps your place.
 - The window opens in a Lapis palette (night navy, cream, gold) unless an Omarchy theme is present. `LAPIS_THEME=lapis` or `LAPIS_THEME=omarchy` overrides the choice.
 - The sidebar, toolbar, tabs, document views, search palette, command menu, context panel, PDF reader and status bar are restyled, with icons and shortcut hints.
 - Live and Reading keep text in a centred column of about 72 characters. Live sets H1/H2 in a serif, colours `[[wikilinks]]`, dims HTML comments, shows strikethrough and inline code, and draws a scroll thumb.
@@ -22,10 +23,17 @@
 - Frontmatter shows as a properties card above Live and Reading text: the first four keys (title, type, status, …), with `Show all` for the rest. Wikilinks in values, such as `parent` and `cross_refs`, follow like body links. The card is read-only; Properties in the command menu edits.
 - Reading view follows wikilinks too. Search snippets read as one run of prose and clamp to two lines.
 - The sidebar is a folder tree: folders open and close in place and load on first open, with indent guides and a collapse-all control. Opening a note opens the folders above it and scrolls its row into view. A Recent section lists the last five notes opened. The saved session format is unchanged.
+- The search palette shows keyword results as soon as they arrive (a fraction of a second) and replaces them with the hybrid ranking when the embedder answers, keeping the selected note selected. If vector search fails, the keyword results stay and say so.
 
 ### Phantom client
 
 - Lapis parses the JSON envelope that `phantom-fractal` prints and does not read Phantom's database.
+
+### Notes and the RAG gate
+
+- `lapis create` writes `title` beside `name`, so a new note passes the frontmatter gate it is checked against.
+- The gate resolves wikilinks against the index the vault actually uses: the HTTP lattice when the config says `mode = "http"`, otherwise the embedded one. It used to read the embedded index regardless and report notes as dangling that `lapis resolve` found.
+- A `/documents` row whose tags hold a number or a boolean (YAML reads `tags: [ops, 429]` that way) no longer fails the whole page. `lapis list` reported the lattice as down because of one such note.
 
 ### Dependencies
 

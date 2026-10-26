@@ -5,9 +5,10 @@
 //! is logged and the write proceeds. `LAPIS_RAG_GATE=hard` refuses `fail` and
 //! `cannot_tell`. Reads never enter this module.
 //!
-//! Wikilinks resolve through [`lapis_lattice::Engine::documents`] plus the
-//! same `resolve_in` rules as `lapis resolve`. The vault tree is not the
-//! source of truth for a hit.
+//! Wikilinks resolve against the index the rest of `lapis` reads: the HTTP
+//! lattice when the config asks for it, otherwise the embedded
+//! [`lapis_lattice::Engine`], with the same `resolve_in` rules as `lapis
+//! resolve`. The vault tree is not the source of truth for a hit.
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -36,6 +37,8 @@ pub enum Mode {
 #[cfg(test)]
 thread_local! {
     static MODE_OVERRIDE: Cell<Option<Mode>> = const { Cell::new(None) };
+    /// Tests choose the index explicitly, never from the developer's own config.
+    static LATTICE_OVERRIDE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Restores the previous process-local mode override when dropped.
@@ -225,7 +228,54 @@ fn today() -> String {
     jiff::Zoned::now().strftime("%Y-%m-%d").to_string()
 }
 
+/// The HTTP lattice to read, when that is what the vault uses. Mirrors `Ctx::backend`:
+/// config `mode = "http"` selects it, and `LAPIS_LATTICE_URL` overrides the URL.
+fn http_lattice() -> Option<(String, std::time::Duration)> {
+    #[cfg(test)]
+    {
+        LATTICE_OVERRIDE.with(|c| c.borrow().clone()).map(|url| (url, std::time::Duration::from_secs(2)))
+    }
+    #[cfg(not(test))]
+    {
+        let cfg = crate::config::load().unwrap_or_default();
+        if cfg.lattice.is_embedded() {
+            return None;
+        }
+        let url = std::env::var("LAPIS_LATTICE_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| cfg.lattice.url.clone());
+        Some((url, cfg.lattice.timeout()))
+    }
+}
+
+/// Point the gate at an HTTP lattice for the life of the guard.
+#[cfg(test)]
+pub fn force_lattice(url: &str) -> LatticeOverride {
+    let prev = LATTICE_OVERRIDE.with(|c| c.replace(Some(url.to_string())));
+    LatticeOverride { prev }
+}
+#[cfg(test)]
+#[must_use = "the override lasts until this guard is dropped"]
+pub struct LatticeOverride {
+    prev: Option<String>,
+}
+#[cfg(test)]
+impl Drop for LatticeOverride {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        LATTICE_OVERRIDE.with(|c| c.replace(prev));
+    }
+}
+
 fn indexed_markdown_paths(root: &Path) -> Result<Vec<String>> {
+    match http_lattice() {
+        Some((url, timeout)) => http_markdown_paths(&url, timeout),
+        None => embedded_markdown_paths(root),
+    }
+}
+
+fn embedded_markdown_paths(root: &Path) -> Result<Vec<String>> {
     let engine = lapis_lattice::Engine::open(root)?;
     let mut out = Vec::new();
     let mut offset = 0u32;
@@ -244,6 +294,36 @@ fn indexed_markdown_paths(root: &Path) -> Result<Vec<String>> {
         offset = offset.saturating_add(n);
     }
     Ok(out)
+}
+
+/// Page through the HTTP lattice's documents. Write paths are synchronous and may
+/// already run inside a runtime, so the requests run on a short-lived thread with
+/// its own. HTTP documents carry no kind; markdown is the `.md` paths.
+fn http_markdown_paths(url: &str, timeout: std::time::Duration) -> Result<Vec<String>> {
+    let client = crate::http::Client::new(url, timeout)?;
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+                runtime.block_on(async {
+                    let mut out = Vec::new();
+                    let mut offset = 0u32;
+                    loop {
+                        let params = crate::http::ListParams { limit: 1000, offset, ..Default::default() };
+                        let page = client.documents(&params).await?;
+                        let n = u32::try_from(page.len()).unwrap_or(u32::MAX);
+                        out.extend(page.into_iter().map(|d| d.path).filter(|p| p.ends_with(".md")));
+                        if n < 1000 {
+                            break;
+                        }
+                        offset = offset.saturating_add(n);
+                    }
+                    Ok(out)
+                })
+            })
+            .join()
+            .unwrap_or_else(|_| Err(LapisError::Usage("lattice listing thread panicked".into())))
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -786,6 +866,38 @@ mod tests {
         assert_eq!(text, original);
         assert!(!blocks(Mode::Hard, &result));
         assert_schema(&result);
+    }
+
+    /// Serve one `GET /documents` with `body`, then close.
+    fn one_shot_lattice(body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let n = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..n]).starts_with("GET /documents?"));
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(reply.as_bytes()).unwrap();
+        });
+        url
+    }
+
+    #[test]
+    fn links_resolve_against_the_http_lattice_when_the_vault_uses_one() {
+        // No embedded index exists here: the only index is the HTTP lattice.
+        let root = std::env::temp_dir().join(format!("lapis-gate-http-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let url = one_shot_lattice(r#"[{"path":"notes/hub.md","title":"Hub"},{"path":"notes/a.pdf"}]"#);
+        let _lattice = force_lattice(&url);
+        let review = review(&root, "foundry/use.md", &format!("{FM}See [[notes/hub]].\n"));
+        assert_eq!(review.result.status, GateStatus::Ok, "{:?}", review.result.reasons);
+        assert_schema(&review.result);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

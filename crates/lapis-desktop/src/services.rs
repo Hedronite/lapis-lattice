@@ -85,6 +85,11 @@ pub trait WorkspaceServices: Send + Sync {
     fn save(&self, document: &Document, text: &str) -> Result<Document, String>;
     fn save_copy(&self, document: &Document, text: &str) -> Result<Document, String>;
     fn search(&self, query: &str) -> Result<SearchPage, String>;
+    /// Keyword-only search that never waits on an embedder. The palette shows it
+    /// first and replaces it with [`Self::search`] when that arrives.
+    fn search_fast(&self, query: &str) -> Result<SearchPage, String> {
+        self.search(query)
+    }
     fn reindex(&self, path: &str) -> Result<(), String>;
     fn build_index(&self) -> Result<u64, String>;
     /// The vault path a `[[wikilink]]` target names, `None` when nothing matches.
