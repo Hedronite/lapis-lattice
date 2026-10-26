@@ -152,7 +152,9 @@ pub(crate) struct Root {
     error: Option<String>,
     /// Node the operator clicked, and the head of that note.
     selected: Option<String>,
-    peek: Option<String>,
+    /// The previewed note's id and the text under it, kept apart so a path that
+    /// contains the card's separator still shows whole.
+    peek: Option<(String, String)>,
     filters: Filters,
     /// True while the query box has the keyboard: printable keys are text.
     typing: bool,
