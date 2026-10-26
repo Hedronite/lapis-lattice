@@ -1,5 +1,5 @@
 # tome-eval configuration (tome-tree spike, Jupi). Rulings: Eli GO R0–R2, 2026-09-28.
-# Every model / budget / provenance value lives here, never in code. Evan: swap the model here.
+# Every model / budget / provenance value lives here, never in code. Swap the model here.
 
 [answer]
 # One shared answerer for BOTH arms (and, later, node summaries). Jev never answers.
