@@ -4,6 +4,7 @@
 
 ### Desktop
 
+- PDFs read as one continuous column of pages. Only pages near the viewport are rendered, one at a time, so a 1,300-page book opens and scrolls without rendering every page. The page field follows the scroll; typing a page, Previous/Next, j/k, Page Up/Down and Home/End jump to page tops, and zoom keeps your place.
 - The window opens in a Lapis palette (night navy, cream, gold) unless an Omarchy theme is present. `LAPIS_THEME=lapis` or `LAPIS_THEME=omarchy` overrides the choice.
 - The sidebar, toolbar, tabs, document views, search palette, command menu, context panel, PDF reader and status bar are restyled, with icons and shortcut hints.
 - Live and Reading keep text in a centred column of about 72 characters. Live sets H1/H2 in a serif, colours `[[wikilinks]]`, dims HTML comments, shows strikethrough and inline code, and draws a scroll thumb.
@@ -20,6 +21,12 @@
 ### Phantom client
 
 - Lapis parses the JSON envelope that `phantom-fractal` prints and does not read Phantom's database.
+
+### Notes and the RAG gate
+
+- `lapis create` writes `title` beside `name`, so a new note passes the frontmatter gate it is checked against.
+- The gate resolves wikilinks against the index the vault actually uses: the HTTP lattice when the config says `mode = "http"`, otherwise the embedded one. It used to read the embedded index regardless and report notes as dangling that `lapis resolve` found.
+- A `/documents` row whose tags hold a number or a boolean (YAML reads `tags: [ops, 429]` that way) no longer fails the whole page. `lapis list` reported the lattice as down because of one such note.
 
 ### Dependencies
 

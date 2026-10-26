@@ -183,6 +183,8 @@ fn create_set(rel: &str, opts: &CreateOpts, root: &Path) -> (Map<String, Value>,
     let today = today();
     let mut m = Map::new();
     m.insert("name".into(), Value::String(opts.title.clone()));
+    // The RAG gate requires `title`; `name` stays for readers that key on it.
+    m.insert("title".into(), Value::String(opts.title.clone()));
     m.insert("type".into(), Value::String(doc_type.clone()));
     m.insert("doc_type".into(), Value::String(doc_type));
     if let Some(d) = domain {
@@ -798,7 +800,9 @@ mod tests {
         assert_eq!(w.path, "notes/lapis-status.md");
         let raw = std::fs::read_to_string(v.join(&w.path)).unwrap();
         assert!(
-            raw.starts_with("---\nname: Lapis status\ntype: status\ndoc_type: status\ndomain: notes\n"),
+            raw.starts_with(
+                "---\nname: Lapis status\ntitle: Lapis status\ntype: status\ndoc_type: status\ndomain: notes\n"
+            ),
             "{raw}"
         );
         assert!(raw.contains("hal_version: '1.0'") || raw.contains("hal_version: \"1.0\""), "{raw}");
@@ -904,7 +908,24 @@ mod tests {
         let text = std::fs::read_to_string(v.join(&w.path)).unwrap();
         assert!(text.contains("[[notes/Alpha]]"), "{text}");
         assert!(!text.contains("[[Alpha]]"), "{text}");
-        assert!(v.join(&w.path).is_file(), "shadow logs the missing title and still writes");
+        assert!(text.contains("\ntitle: New\n"), "{text}");
+        assert!(v.join(&w.path).is_file());
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn create_writes_title_and_passes_the_hard_gate() {
+        let v = vault();
+        {
+            let mut engine = lapis_lattice::Engine::open(&v).unwrap();
+            engine.reindex().unwrap();
+        }
+        let _mode = crate::rag_gate::force_mode(crate::rag_gate::Mode::Hard);
+        let mut o = opts("Passes");
+        o.path = Some("foundry/passes.md".into());
+        let w = create(&v, &o).unwrap();
+        let raw = std::fs::read_to_string(v.join(&w.path)).unwrap();
+        assert!(raw.contains("\ntitle: Passes\n"), "{raw}");
         let _ = std::fs::remove_dir_all(&v);
     }
 
@@ -914,10 +935,11 @@ mod tests {
         let _mode = crate::rag_gate::force_mode(crate::rag_gate::Mode::Hard);
         let mut o = opts("Blocked");
         o.path = Some("foundry/blocked.md".into());
+        o.body = Some("See [[Nowhere]].".into());
         let err = create(&v, &o).unwrap_err();
         assert_eq!(err.exit_code(), 1);
         assert!(err.to_string().contains("rag-fm-wikilink-gate@0.1.0"), "{err}");
-        assert!(err.to_string().contains("title"), "{err}");
+        assert!(err.to_string().contains("Nowhere"), "{err}");
         assert!(!v.join("foundry/blocked.md").exists());
         let _ = std::fs::remove_dir_all(&v);
     }
