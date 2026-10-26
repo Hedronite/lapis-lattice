@@ -4,6 +4,7 @@
 
 ### Desktop
 
+- The search palette shows keyword results as soon as they arrive (a fraction of a second) and replaces them with the hybrid ranking when the embedder answers, keeping the selected note selected. If vector search fails, the keyword results stay and say so.
 - The window opens in a Lapis palette (night navy, cream, gold) unless an Omarchy theme is present. `LAPIS_THEME=lapis` or `LAPIS_THEME=omarchy` overrides the choice.
 - The sidebar, toolbar, tabs, document views, search palette, command menu, context panel, PDF reader and status bar are restyled, with icons and shortcut hints.
 - Live and Reading keep text in a centred column of about 72 characters. Live sets H1/H2 in a serif, colours `[[wikilinks]]`, dims HTML comments, shows strikethrough and inline code, and draws a scroll thumb.

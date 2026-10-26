@@ -20,6 +20,18 @@ pub(super) struct Palette {
     pub(super) selected: usize,
     state: State,
     modalities: Vec<String>,
+    /// Keyword hits are showing and the hybrid ranking is still on its way.
+    pub(super) refining: bool,
+    /// The hybrid ranking has answered (or failed); later keyword replies are stale.
+    ranked: bool,
+    pub(super) vector_note: Option<String>,
+}
+
+/// Which of the two searches an answer came from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Arm {
+    Keyword,
+    Hybrid,
 }
 
 impl Workspace {
@@ -37,6 +49,8 @@ impl Workspace {
                     p.state = State::Draft;
                     p.hits.clear();
                     p.selected = 0;
+                    p.refining = false;
+                    p.vector_note = None;
                 }
                 cx.notify();
             }
@@ -50,6 +64,9 @@ impl Workspace {
             selected: 0,
             state: State::Draft,
             modalities: vec![],
+            refining: false,
+            ranked: false,
+            vector_note: None,
         });
         cx.notify();
     }
@@ -69,36 +86,77 @@ impl Workspace {
             return;
         }
         p.state = State::Loading;
+        p.refining = false;
+        p.ranked = false;
+        p.vector_note = None;
         self.query_epoch += 1;
         let epoch = self.query_epoch;
-        let service = self.services.clone();
-        let task = cx.background_executor().spawn(async move { service.search(&query) });
-        cx.spawn_in(window, async move |this, cx| {
-            let result = task.await;
-            let _ = this.update_in(cx, |this, _, cx| {
-                if this.query_epoch != epoch {
-                    return;
+        // Both searches start now: keyword hits show in a fraction of a second,
+        // the hybrid ranking replaces them when the embedder has answered.
+        for arm in [Arm::Keyword, Arm::Hybrid] {
+            let service = self.services.clone();
+            let query = query.clone();
+            let task = cx.background_executor().spawn(async move {
+                match arm {
+                    Arm::Keyword => service.search_fast(&query),
+                    Arm::Hybrid => service.search(&query),
                 }
-                let Some(p) = this.palette.as_mut() else { return };
-                match result {
-                    Ok(page) => {
-                        let empty_index = page.indexed_documents == 0 && page.hits.is_empty();
-                        p.hits = page.hits;
-                        p.modalities = page.modalities;
-                        p.selected = 0;
-                        this.list_scroll.scroll_to_item(0);
-                        p.state =
-                            if empty_index { State::NeedsIndex(page.can_build_index) } else { State::Ready };
-                    }
-                    Err(e) => {
-                        p.hits.clear();
-                        p.state = State::Error(e);
-                    }
-                }
-                cx.notify();
             });
-        })
-        .detach();
+            cx.spawn_in(window, async move |this, cx| {
+                let result = task.await;
+                let _ = this.update_in(cx, |this, _, cx| this.apply_search(epoch, arm, result, cx));
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// Merge one search answer into the open palette. Whichever arrives first shows;
+    /// the hybrid answer wins once it lands, keeping the selection on the same note.
+    pub(super) fn apply_search(
+        &mut self,
+        epoch: u64,
+        arm: Arm,
+        result: Result<crate::services::SearchPage, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.query_epoch != epoch {
+            return;
+        }
+        let Some(p) = self.palette.as_mut() else { return };
+        if arm == Arm::Keyword && p.ranked {
+            return;
+        }
+        match result {
+            Ok(page) => {
+                let keep = p.hits.get(p.selected).map(|h| h.path.clone());
+                let empty_index = page.indexed_documents == 0 && page.hits.is_empty();
+                p.hits = page.hits;
+                p.modalities = page.modalities;
+                p.selected = keep.and_then(|path| p.hits.iter().position(|h| h.path == path)).unwrap_or(0);
+                self.list_scroll.scroll_to_item(p.selected);
+                p.state = if empty_index { State::NeedsIndex(page.can_build_index) } else { State::Ready };
+                p.refining = arm == Arm::Keyword;
+            }
+            Err(e) if arm == Arm::Hybrid && matches!(p.state, State::Ready) => {
+                // Keyword hits are already showing; keep them and say why they stay.
+                p.refining = false;
+                p.vector_note = Some(e);
+            }
+            Err(e) if arm == Arm::Keyword => {
+                // The hybrid answer may still arrive; only show the error if it already failed.
+                if p.ranked && !matches!(p.state, State::Ready) {
+                    p.state = State::Error(e);
+                }
+            }
+            Err(e) => {
+                p.hits.clear();
+                p.state = State::Error(e);
+            }
+        }
+        if arm == Arm::Hybrid {
+            p.ranked = true;
+        }
         cx.notify();
     }
 
@@ -166,7 +224,18 @@ impl Workspace {
             }
             State::Ready if p.hits.is_empty() => "No matching notes. Change the query and try again.".into(),
             State::Ready => {
-                format!("{} results · {} · ↑ ↓ choose · Enter open", p.hits.len(), p.modalities.join(" + "))
+                let status = if p.refining {
+                    " · refining with vectors…".to_string()
+                } else if p.vector_note.is_some() {
+                    " · keyword only (vector ranking unavailable)".to_string()
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{} results · {}{status} · ↑ ↓ choose · Enter open",
+                    p.hits.len(),
+                    p.modalities.join(" + ")
+                )
             }
             State::Error(e) => format!("Search failed: {e}. Enter retries."),
         };
