@@ -17,6 +17,7 @@
 mod code_graph;
 pub mod file_tree;
 pub mod graph_data;
+pub mod graph_style;
 pub mod html;
 pub use code_graph::{CodeGraphOverlay, PHANTOM_NOT_FOUND};
 pub mod live;
@@ -146,7 +147,13 @@ mod tests {
 
     #[test]
     fn window_paints_shipped_draw_on_gpui_omarchy() {
-        let src = format!("{}{}", include_str!("window.rs"), include_str!("window/lifecycle.rs"));
+        let src = [
+            include_str!("window.rs"),
+            include_str!("window/lifecycle.rs"),
+            include_str!("window/board.rs"),
+            include_str!("window/render.rs"),
+        ]
+        .concat();
         assert!(src.contains("key_action, paint"), "window consumes the view paint list");
         assert!(src.contains("gpui_omarchy::init"), "window is gpui-omarchy, not Zed-gpui");
         assert!(src.contains("Prim::Stroke"), "edges are strokes, not dot runs");
@@ -201,7 +208,9 @@ mod tests {
         // reads "global". Nothing in the default view can say hop-2 unless the
         // operator has cycled to the rings debug layout.
         assert!(src.contains("Layout::Global => \"global\""), "the default chrome says global");
-        assert!(src.contains("format!(\"local d{}\""), "local mode shows its depth");
+        // Local mode puts its depth on a chip of its own, beside the layout.
+        assert!(src.contains("format!(\"Depth {}\""), "local mode shows its depth");
+        assert!(src.contains("if self.layout == Layout::Local"), "the depth chip belongs to local mode");
         let toml = include_str!("../Cargo.toml");
         assert!(toml.contains("gpui-omarchy"));
         assert!(!toml.contains("gpui = \"0.2"));

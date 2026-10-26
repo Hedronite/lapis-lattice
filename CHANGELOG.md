@@ -39,6 +39,12 @@
 
 - `lapis-lattice` moved to rusqlite 0.40, and its behavior is unchanged.
 
+### Graph
+
+- The graph has the Lapis look: a lapis glow and a quiet starfield that drifts slightly with a pan, notes coloured by their top-level folder (six soft hues rotated from the theme accent, so the accent stays for the focused note and seeds), a faint halo on hubs, and hollow rings for unresolved links.
+- Hovering or selecting a note gives it a gold ring and a label pill, draws its links in gold, and fades the rest of the board, labels included.
+- The controls are a floating toolbar over the board (filter, layout, depth in local mode, orphans, unresolved, domain, colour group; fit, unpin, refresh, reset). A legend lists folder colours, colour groups and the counts, and a preview card shows the hovered note's title, path and opening lines. Loading, empty and failed boards say so in a card in the middle.
+
 ### In-place edit
 
 - `lapis replace PATH --old TEXT --new TEXT` and `lapis insert PATH (--after|--before) ANCHOR (--text|--stdin)` edit one note by an exact raw-byte match. Zero or many matches, including overlaps, exit 1, leave the file unchanged, and report the hit count as JSON `error.matches`.
