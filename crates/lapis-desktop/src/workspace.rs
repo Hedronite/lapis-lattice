@@ -144,7 +144,7 @@ impl Workspace {
             indexing: false,
             register: crate::vim::Register::default(),
             command: None,
-            code_graph: crate::CodeGraphOverlay::Absent,
+            code_graph: crate::CodeGraphOverlay::absent(),
         };
         workspace.focus.focus(window, cx);
         workspace
