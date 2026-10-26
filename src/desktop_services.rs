@@ -104,7 +104,7 @@ impl WorkspaceServices for Service {
     fn directory(&self, rel: &str) -> Result<Vec<FileEntry>, String> {
         let directory = self.contained(rel)?;
         let mut entries = vec![];
-        for entry in std::fs::read_dir(directory).map_err(|e| e.to_string())? {
+        for entry in std::fs::read_dir(&directory).map_err(|e| e.to_string())? {
             let entry = entry.map_err(|e| e.to_string())?;
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.starts_with('.') || matches!(name.as_str(), "target" | "node_modules") {
@@ -112,6 +112,10 @@ impl WorkspaceServices for Service {
             }
             let path = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
             let Ok(abs) = self.contained(&path) else { continue };
+            // A link back to this folder or one above it would nest forever in the tree.
+            if abs.is_dir() && directory.starts_with(&abs) {
+                continue;
+            }
             let directory = abs.is_dir();
             entries.push(FileEntry { path, name, directory });
         }
@@ -726,6 +730,20 @@ mod tests {
         std::os::unix::fs::symlink(std::env::temp_dir(), root.join("outside")).unwrap();
         assert!(service.directory("outside").is_err());
         assert!(service.directory("").unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn directory_skips_links_back_to_an_enclosing_folder() {
+        let (root, service) = fixture();
+        std::fs::create_dir_all(root.join("notes/deep")).unwrap();
+        std::fs::write(root.join("notes/deep/a.md"), "# A\n").unwrap();
+        std::os::unix::fs::symlink(root.join("notes"), root.join("notes/deep/up")).unwrap();
+        std::os::unix::fs::symlink(root.join("notes/deep"), root.join("notes/deep/again")).unwrap();
+        let names: Vec<String> =
+            service.directory("notes/deep").unwrap().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, ["a.md"]);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

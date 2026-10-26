@@ -11,7 +11,7 @@ impl Workspace {
         let task = cx.background_executor().spawn(async move { service.directory(&path) });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
-            let _ = this.update_in(cx, |this, window, cx| {
+            let applied = this.update_in(cx, |this, window, cx| {
                 if let (true, Err(e)) = (folder.is_empty(), &result) {
                     this.status = e.clone();
                     this.error = true;
@@ -21,6 +21,9 @@ impl Workspace {
                     window.refresh();
                 }
             });
+            if let Err(error) = applied {
+                eprintln!("lapis workspace: folder listing dropped: {error}");
+            }
         })
         .detach();
         cx.notify();

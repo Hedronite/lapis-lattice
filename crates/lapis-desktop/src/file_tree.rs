@@ -3,6 +3,10 @@
 use crate::services::FileEntry;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Deeper rows are not walked. The lister already skips links back up the tree;
+/// this is the backstop for any cycle it cannot see.
+pub const MAX_DEPTH: usize = 48;
+
 #[derive(Default)]
 pub struct Tree {
     /// Loaded listings by folder path; `""` is the vault root.
@@ -104,7 +108,7 @@ impl Tree {
                 expanded,
                 loading: entry.directory && self.is_loading(&entry.path),
             });
-            if expanded {
+            if expanded && depth + 1 < MAX_DEPTH {
                 self.walk(&entry.path, depth + 1, out);
             }
         }
@@ -160,5 +164,19 @@ mod tests {
         let mut tree = Tree::default();
         tree.expand("a/b");
         assert_eq!(tree.visible_folders(), ["", "a/b"]);
+    }
+
+    #[test]
+    fn a_cycle_the_lister_missed_stops_at_the_depth_cap() {
+        let mut tree = Tree::default();
+        let mut folder = String::new();
+        for _ in 0..MAX_DEPTH + 10 {
+            let child = if folder.is_empty() { "loop".to_string() } else { format!("{folder}/loop") };
+            let g = tree.request(&folder);
+            tree.receive(&folder, g, Ok(vec![entry(&child, true)]));
+            tree.expand(&child);
+            folder = child;
+        }
+        assert_eq!(tree.rows().len(), MAX_DEPTH);
     }
 }
