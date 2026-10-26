@@ -32,6 +32,10 @@ pub(super) fn folder_hsla(theme: &gpui_omarchy::Theme, slot: usize) -> Hsla {
 /// Edge buckets: (solid | dashed) × (lit | dimmed | hot). Each is one path.
 const BUCKETS: usize = 6;
 
+/// Up to this many drawn links, resting links get full ink; past it, ink falls
+/// with the square root of the count, down to a quarter.
+const EDGE_INK_FULL: f32 = 1_500.0;
+
 impl Board {
     pub(super) fn paint(self, bounds: Bounds<Pixels>, window: &mut Window) {
         let t_draw = Instant::now();
@@ -79,9 +83,13 @@ impl Board {
                 }
             }
         }
+        // Thousands of hairlines at full ink wash a big vault's core white, so the
+        // resting links thin out as their count grows; a focus still lights its own.
+        let strokes = self.prims.iter().filter(|p| matches!(p, Prim::Stroke { .. })).count();
+        let ink = 0.16 * (EDGE_INK_FULL / strokes.max(1) as f32).sqrt().clamp(0.25, 1.0);
         for (slot, segs) in batch.iter().enumerate() {
             let (colour, width) = match slot / 2 {
-                0 => (with_alpha(theme.foreground, 0.16), crate::view::STROKE_PX),
+                0 => (with_alpha(theme.foreground, ink), crate::view::STROKE_PX),
                 1 => (with_alpha(theme.border, DIM_ALPHA * 2.5), crate::view::STROKE_PX),
                 _ => (with_alpha(theme.accent, 0.8), crate::view::STROKE_PX * 1.4),
             };
