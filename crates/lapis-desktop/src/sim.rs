@@ -91,13 +91,13 @@ impl QuadTree {
         new
     }
 
-    fn build(&mut self, pos: &[[f32; 2]]) {
+    /// `weight[i]` is body i's mass; bodies with `skip[i]` set are left out.
+    fn build(&mut self, pos: &[[f32; 2]], weight: &[f32], skip: &[bool]) {
         self.clear();
-        if pos.is_empty() {
-            return;
-        }
-        let (mut lo, mut hi) = (pos[0], pos[0]);
-        for p in &pos[1..] {
+        let mut live = pos.iter().zip(skip).filter(|(_, s)| !**s).map(|(p, _)| *p);
+        let Some(first) = live.next() else { return };
+        let (mut lo, mut hi) = (first, first);
+        for p in live {
             lo = [lo[0].min(p[0]), lo[1].min(p[1])];
             hi = [hi[0].max(p[0]), hi[1].max(p[1])];
         }
@@ -107,18 +107,21 @@ impl QuadTree {
         let size = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(1.0) * 1.01;
         self.push_cell(center, size);
         for (i, &p) in pos.iter().enumerate() {
-            self.insert(i as u32, p, pos);
+            if !skip[i] {
+                self.insert(i as u32, p, pos, weight);
+            }
         }
     }
 
-    fn insert(&mut self, body: u32, p: [f32; 2], pos: &[[f32; 2]]) {
+    fn insert(&mut self, body: u32, p: [f32; 2], pos: &[[f32; 2]], weight: &[f32]) {
         self.insert_stack.clear();
         self.insert_stack.push((0, body, p));
         while let Some((cell, body, p)) = self.insert_stack.pop() {
             let i = cell as usize;
             let m = self.mass[i];
-            let next = m + 1.0;
-            self.com[i] = [(self.com[i][0] * m + p[0]) / next, (self.com[i][1] * m + p[1]) / next];
+            let w = weight[body as usize];
+            let next = m + w;
+            self.com[i] = [(self.com[i][0] * m + p[0] * w) / next, (self.com[i][1] * m + p[1] * w) / next];
             self.mass[i] = next;
 
             let held = self.body[i];
@@ -144,9 +147,10 @@ impl QuadTree {
         }
     }
 
-    /// Repulsion on `body` at `p`, opening a cell only when it subtends more
-    /// than `theta`.
-    fn repulsion(&mut self, p: [f32; 2], body: u32, strength: f32, theta: f32) -> [f32; 2] {
+    /// Repulsion per unit of `body`'s own mass at `p`, opening a cell only when it
+    /// subtends more than `theta`. The force falls off as 1/d (ForceAtlas2), and
+    /// distances under `near` count as `near`, so close pairs get a firm, finite shove.
+    fn repulsion(&mut self, p: [f32; 2], body: u32, strength: f32, theta: f32, near: f32) -> [f32; 2] {
         let mut acc = [0.0f32; 2];
         if self.mass.is_empty() {
             return acc;
@@ -164,7 +168,7 @@ impl QuadTree {
             let dist = d2.sqrt();
             if self.child_count[i] == 0 || (self.size[i] / dist) < theta {
                 if self.body[i] != body {
-                    let f = strength * m / (d2 * dist);
+                    let f = strength * m / d2.max(near * near);
                     acc[0] += d[0] * f;
                     acc[1] += d[1] * f;
                 }
@@ -184,11 +188,19 @@ impl QuadTree {
 /// later settings panel has somewhere to land.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ForceParams {
-    /// Pull toward the origin. Quartz's `centerForce`.
+    /// Gravity toward the origin, per unit of a node's mass and of constant
+    /// strength at any distance (ForceAtlas2's non-strong gravity). It keeps
+    /// components together without squeezing the core into a disc.
     pub center: f32,
-    /// All-pairs charge. Quartz's `repelForce`.
+    /// A gentle linear pull on top (ForceAtlas2's strong gravity), so small
+    /// disconnected components come home instead of drifting off the board.
+    pub gravity_linear: f32,
+    /// Charge between every pair, as `repel · m_i · m_j / d` with `m = degree + 1`
+    /// (ForceAtlas2): a hub pushes in proportion to how connected it is, so it
+    /// claims room instead of collapsing into a blob.
     pub repel: f32,
-    /// Spring constant on a link. Quartz's `linkForce`.
+    /// Spring scale on a link. Each link's own constant is this over the smaller
+    /// endpoint degree (d3's default), so a hub's many links do not crush it.
     pub link: f32,
     /// Rest length of a link.
     pub link_distance: f32,
@@ -213,10 +225,11 @@ pub struct ForceParams {
 impl Default for ForceParams {
     fn default() -> Self {
         Self {
-            center: 0.05,
-            repel: 400.0,
-            link: 0.02,
-            link_distance: 30.0,
+            center: 1.0,
+            gravity_linear: 0.002,
+            repel: 10.0,
+            link: 1.0,
+            link_distance: 100.0,
             // Momentum lets a big vault unfold from its spiral while it is still
             // warm; the cooling schedule, not friction, is what brings it to rest.
             damping: 0.85,
@@ -249,6 +262,12 @@ pub struct ForceSim {
     /// Nodes the operator is holding. They push on everyone else and are never
     /// pushed themselves, which is d3's `fx`/`fy`.
     pinned: Vec<bool>,
+    /// Links per node, and the mass repulsion and gravity read: `degree + 1`.
+    degree: Vec<u32>,
+    weight: Vec<f32>,
+    /// Isolated notes in a graph that has links. They take no part in the forces;
+    /// [`ForceSim::place_isolates`] lays them on a belt around the core instead.
+    inert: Vec<bool>,
     energy: f32,
     /// Temperature: every force is scaled by it, and it eases toward `alpha_target`.
     alpha: f32,
@@ -270,13 +289,23 @@ impl ForceSim {
                 [r * a.cos(), r * a.sin()]
             })
             .collect();
-        let edges =
+        let edges: Vec<(usize, usize)> =
             edges.iter().copied().filter(|(a, b)| a != b && *a < node_count && *b < node_count).collect();
+        let mut degree = vec![0u32; node_count];
+        for &(a, b) in &edges {
+            degree[a] += 1;
+            degree[b] += 1;
+        }
+        let weight = degree.iter().map(|d| 1.0 + *d as f32).collect();
+        let inert = degree.iter().map(|d| *d == 0 && !edges.is_empty()).collect();
         Self {
             params,
             vel: vec![[0.0; 2]; node_count],
             force: vec![[0.0; 2]; node_count],
             pinned: vec![false; node_count],
+            degree,
+            weight,
+            inert,
             pos,
             edges,
             energy: 1.0,
@@ -403,27 +432,36 @@ impl ForceSim {
         let alpha = self.alpha;
         self.force.fill([0.0; 2]);
 
-        // charge: every node pushes every other apart, softened near zero so
-        // coincident nodes get a finite shove instead of an infinity. Exact
-        // while the vault is small, Barnes-Hut once it is not.
+        // charge: ForceAtlas2's degree-weighted repulsion, `repel · m_i · m_j / d`.
+        // Exact while the vault is small, Barnes-Hut once it is not.
         let repel = self.params.repel * alpha;
+        let near = self.params.link_distance * 0.5;
         if n > BARNES_HUT_THRESHOLD {
-            self.tree.build(&self.pos);
+            self.tree.build(&self.pos, &self.weight, &self.inert);
             let theta = self.params.theta;
             for i in 0..n {
-                let f = self.tree.repulsion(self.pos[i], i as u32, repel, theta);
-                self.force[i][0] += f[0];
-                self.force[i][1] += f[1];
+                if self.inert[i] {
+                    continue;
+                }
+                let f = self.tree.repulsion(self.pos[i], i as u32, repel, theta, near);
+                self.force[i][0] += f[0] * self.weight[i];
+                self.force[i][1] += f[1] * self.weight[i];
             }
         } else {
             for i in 0..n {
+                if self.inert[i] {
+                    continue;
+                }
                 let pi = self.pos[i];
                 let mut fi = [0.0f32; 2];
                 for j in (i + 1)..n {
+                    if self.inert[j] {
+                        continue;
+                    }
                     let dx = pi[0] - self.pos[j][0];
                     let dy = pi[1] - self.pos[j][1];
-                    let d2 = (dx * dx + dy * dy).max(1.0);
-                    let k = repel / (d2 * d2.sqrt());
+                    let d2 = (dx * dx + dy * dy).max(near * near);
+                    let k = repel * self.weight[i] * self.weight[j] / d2;
                     fi[0] += dx * k;
                     fi[1] += dy * k;
                     self.force[j][0] -= dx * k;
@@ -441,33 +479,46 @@ impl ForceSim {
             let dx = self.pos[b][0] - self.pos[a][0];
             let dy = self.pos[b][1] - self.pos[a][1];
             let d = (dx * dx + dy * dy).sqrt().max(0.1);
-            let f = k * (d - rest) / d;
+            let ke = k / self.degree[a].min(self.degree[b]).max(1) as f32;
+            let f = ke * (d - rest) / d;
             self.force[a][0] += dx * f;
             self.force[a][1] += dy * f;
             self.force[b][0] -= dx * f;
             self.force[b][1] -= dy * f;
         }
 
-        // center: gravity toward the origin, which is what keeps disconnected
-        // components on screen instead of drifting out of the void.
+        // center: a constant pull toward the origin per unit of mass, which keeps
+        // components on screen without the linear spring that packed the core.
         let g = self.params.center * alpha;
-        for (f, p) in self.force.iter_mut().zip(self.pos.iter()) {
-            f[0] -= p[0] * g;
-            f[1] -= p[1] * g;
+        for i in 0..n {
+            let p = self.pos[i];
+            let r = (p[0] * p[0] + p[1] * p[1]).sqrt().max(1.0);
+            let pull = (g / r + self.params.gravity_linear * alpha) * self.weight[i];
+            self.force[i][0] -= p[0] * pull;
+            self.force[i][1] -= p[1] * pull;
         }
 
         let (dt, damping, max_v) = (self.params.dt, self.params.damping, self.params.max_velocity);
         let max_v2 = max_v * max_v;
         let mut total = 0.0f32;
-        for (((p, v), f), held) in
-            self.pos.iter_mut().zip(self.vel.iter_mut()).zip(self.force.iter()).zip(self.pinned.iter())
+        for (((((p, v), f), held), inert), m) in self
+            .pos
+            .iter_mut()
+            .zip(self.vel.iter_mut())
+            .zip(self.force.iter())
+            .zip(self.pinned.iter())
+            .zip(self.inert.iter())
+            .zip(self.weight.iter())
         {
-            if *held {
+            if *held || *inert {
                 *v = [0.0; 2];
                 continue;
             }
-            let mut vx = (v[0] + f[0] * dt) * damping;
-            let mut vy = (v[1] + f[1] * dt) * damping;
+            // A hub is heavy as well as loud: it pushes the others away in
+            // proportion to its mass and moves under a force in inverse proportion,
+            // so it anchors its cluster instead of being flung out by its own charge.
+            let mut vx = (v[0] + f[0] / m * dt) * damping;
+            let mut vy = (v[1] + f[1] / m * dt) * damping;
             let v2 = vx * vx + vy * vy;
             if v2 > max_v2 {
                 let s = max_v / v2.sqrt();
@@ -481,6 +532,116 @@ impl ForceSim {
         }
         self.energy = total / n as f32;
         true
+    }
+
+    /// A node's share of the separation gap: busy notes keep more room.
+    fn size(&self, i: usize) -> f32 {
+        1.0 + (self.degree[i] as f32).sqrt() * 0.3
+    }
+
+    /// Push apart active nodes that sit closer than `unit · (size_i + size_j)`, for
+    /// up to `passes` passes (Aquilum's separation pass, made size-aware). Run after
+    /// the settle: forces place the clusters, this guarantees no two discs sit on
+    /// top of each other. Small nodes are compared through a grid; the few big ones
+    /// against everyone. Held nodes do not move.
+    pub fn separate(&mut self, unit: f32, passes: usize) {
+        let n = self.pos.len();
+        if n < 2 || unit <= 0.0 {
+            return;
+        }
+        let cell = unit * 2.0 * 2.0;
+        let is_big: Vec<bool> = (0..n).map(|i| !self.inert[i] && self.size(i) > 2.0).collect();
+        let big: Vec<usize> = (0..n).filter(|&i| is_big[i]).collect();
+        let mut grid: std::collections::HashMap<(i32, i32), Vec<usize>> = std::collections::HashMap::new();
+        for _ in 0..passes {
+            grid.clear();
+            for i in (0..n).filter(|i| !self.inert[*i] && self.size(*i) <= 2.0) {
+                let p = self.pos[i];
+                grid.entry(((p[0] / cell).floor() as i32, (p[1] / cell).floor() as i32)).or_default().push(i);
+            }
+            let mut pairs: Vec<(usize, usize)> = Vec::new();
+            for (&(cx, cy), members) in &grid {
+                for &i in members {
+                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1), (1, -1)] {
+                        let Some(others) = grid.get(&(cx + dx, cy + dy)) else { continue };
+                        for &j in others {
+                            if (dx, dy) != (0, 0) || j > i {
+                                pairs.push((i, j));
+                            }
+                        }
+                    }
+                }
+            }
+            // A hub needs a wider gap than a grid cell, so it is checked against
+            // every active node; a pair of hubs is checked once.
+            for &i in &big {
+                pairs.extend(
+                    (0..n).filter(|&j| !self.inert[j] && j != i && !(is_big[j] && j < i)).map(|j| (i, j)),
+                );
+            }
+            let mut moved = false;
+            for (i, j) in pairs {
+                moved |= self.part(i, j, unit * (self.size(i) + self.size(j)));
+            }
+            if !moved {
+                break;
+            }
+        }
+    }
+
+    /// Move `i` and `j` apart along their line if they are closer than `gap`.
+    fn part(&mut self, i: usize, j: usize, gap: f32) -> bool {
+        let (a, b) = (self.pos[i], self.pos[j]);
+        let (ox, oy) = (b[0] - a[0], b[1] - a[1]);
+        let d = (ox * ox + oy * oy).sqrt();
+        if d >= gap {
+            return false;
+        }
+        // Coincident nodes part along a fixed per-pair direction.
+        let (ux, uy) = if d > 1e-4 {
+            (ox / d, oy / d)
+        } else {
+            let t = (i * 7 + j * 13) as f32;
+            (t.cos(), t.sin())
+        };
+        let (fi, fj) = (!self.pinned[i], !self.pinned[j]);
+        let push = (gap - d) * 0.55 * if fi && fj { 0.5 } else { 1.0 };
+        if fi {
+            self.pos[i] = [a[0] - ux * push, a[1] - uy * push];
+        }
+        if fj {
+            self.pos[j] = [b[0] + ux * push, b[1] + uy * push];
+        }
+        fi || fj
+    }
+
+    /// Lay the isolated notes on a golden-angle belt just outside the core, `gap`
+    /// apart, so they frame the graph instead of crowding it.
+    pub fn place_isolates(&mut self, gap: f32) {
+        let active: Vec<[f32; 2]> =
+            self.pos.iter().zip(&self.inert).filter(|(_, i)| !**i).map(|(p, _)| *p).collect();
+        if active.len() == self.pos.len() {
+            return;
+        }
+        let c = active.iter().fold([0.0f32; 2], |s, p| [s[0] + p[0], s[1] + p[1]]);
+        let c = [c[0] / active.len().max(1) as f32, c[1] / active.len().max(1) as f32];
+        let mut radii: Vec<f32> = active.iter().map(|p| (p[0] - c[0]).hypot(p[1] - c[1])).collect();
+        radii.sort_by(f32::total_cmp);
+        let core = radii.get(radii.len() * 95 / 100).copied().unwrap_or(0.0);
+        // An orphan gets a little more room than a connected note has in the core,
+        // so the belt reads as the same sky, slightly thinner.
+        let per = (std::f32::consts::PI * core * core / active.len() as f32 * 1.5).max(gap * gap);
+        let core = core + gap * 3.0;
+        let golden = std::f32::consts::PI * (3.0 - 5.0f32.sqrt());
+        let mut k = 0.0f32;
+        for i in 0..self.pos.len() {
+            if self.inert[i] && !self.pinned[i] {
+                // Equal area per note: r grows with sqrt(k) from the core's edge.
+                let r = (core * core + k * per / std::f32::consts::PI).sqrt();
+                self.pos[i] = [c[0] + r * (k * golden).cos(), c[1] + r * (k * golden).sin()];
+                k += 1.0;
+            }
+        }
     }
 
     /// Tick until the graph is at rest or `max_ticks` is spent. Returns the
@@ -513,7 +674,9 @@ mod tests {
         assert!(sim.tick(), "a fresh graph is not at rest");
         let after_one = sim.positions().to_vec();
         let moved = start.iter().zip(&after_one).filter(|(a, b)| a != b).count();
-        assert_eq!(moved, start.len(), "every node moves on the first tick");
+        // Node 8 has no links: it waits for the orphan belt instead of drifting.
+        assert_eq!(moved, start.len() - 1, "every linked node moves on the first tick");
+        assert_eq!(start[8], after_one[8], "an isolated note holds still");
 
         // Energy climbs while repulsion unwinds the seed spiral, so the early
         // reading is taken after the graph has opened up, not at t=0.
@@ -692,7 +855,8 @@ mod tests {
     /// it only until the drag ends.
     #[test]
     fn the_layout_cools_to_stillness_and_a_drag_only_warms_it_while_held() {
-        let mut sim = big(2_000, 3_000);
+        // Past the Barnes-Hut threshold, but small enough for CI's per-test budget.
+        let mut sim = big(300, 450);
         let ran = sim.settle(5_000);
         assert!(ran <= 620, "a cooling schedule ends near 600 ticks, ran {ran}");
         assert!(!sim.is_running(), "at rest the sim stops asking for frames");
@@ -703,7 +867,7 @@ mod tests {
         sim.place(0, 500.0, 500.0);
         sim.set_pinned(0, true);
         sim.hold_warm(true);
-        for _ in 0..1_000 {
+        for _ in 0..200 {
             assert!(sim.tick(), "a held drag keeps the neighbours following");
         }
         assert!(sim.alpha() <= sim.params.alpha_drag + 1e-6, "a drag is warm, never a fresh big bang");

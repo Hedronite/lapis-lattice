@@ -30,6 +30,11 @@ pub struct Laid {
     pub sim: ForceSim,
 }
 
+/// Minimum gap between two discs after the settle, as a share of the link rest
+/// length, and how many relaxation passes enforce it.
+pub const SEPARATION: f32 = 0.25;
+pub const SEPARATION_PASSES: usize = 60;
+
 /// Depth range the local-mode slider offers.
 pub const MIN_DEPTH: u32 = 1;
 pub const MAX_DEPTH: u32 = 8;
@@ -127,6 +132,11 @@ pub fn layout(snap: &GraphSnapshot, seed: &str, ticks: usize) -> Scene {
 pub fn lay_out(snap: &GraphSnapshot, seed: &str, ticks: usize) -> Laid {
     let mut sim = ForceSim::from_snapshot(snap, ForceParams::default());
     sim.settle(ticks);
+    // Forces place the clusters; these two passes give every disc room of its own
+    // and set isolated notes on a belt around the core.
+    let gap = sim.params.link_distance * SEPARATION;
+    sim.separate(gap, SEPARATION_PASSES);
+    sim.place_isolates(gap);
     let xy = sim.positions().to_vec();
 
     let index: std::collections::HashMap<&str, usize> =
