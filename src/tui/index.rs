@@ -73,7 +73,7 @@ impl App {
             }
             _ => {}
         }
-        let backend = match self.ctx.backend() {
+        let backend = match self.ctx.backend_with(None, true).map(|(b, _)| b) {
             Ok(backend) if backend.mode() == "embedded" => backend,
             Ok(_) => {
                 self.index = IndexState::Managed;

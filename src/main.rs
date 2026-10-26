@@ -12,6 +12,7 @@ mod desktop_session;
 mod doctor;
 mod edit;
 mod edit_args;
+mod embedder;
 mod envelope;
 mod error;
 mod hal;

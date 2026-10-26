@@ -118,18 +118,21 @@ pub fn reconcile_space(conn: &Connection, e: Option<&dyn Embedder>) -> Result<()
     Ok(())
 }
 
-/// Embed every chunk that has no vector yet. Returns how many were written.
-/// An embedder error propagates: indexing reports it rather than storing
-/// placeholders.
-pub fn embed_missing(conn: &Connection, e: &dyn Embedder, batch: usize) -> Result<u64> {
+/// Embed every chunk that has no vector yet, or only those of one path.
+/// Returns how many were written. An embedder error propagates: indexing
+/// reports it rather than storing placeholders.
+///
+/// `only` keeps a one-note reindex to that note's chunks. Without it, the first
+/// write after an embedder is configured would embed the whole vault inline.
+pub fn embed_missing(conn: &Connection, e: &dyn Embedder, batch: usize, only: Option<&str>) -> Result<u64> {
     crate::sqlite::create_vec_table(conn, e.dim())?;
     let table = crate::sqlite::VEC_TABLE;
     let pending: Vec<(i64, String)> = {
         let mut stmt = conn.prepare(&format!(
             "SELECT c.chunk_id, c.text FROM chunks c
-             WHERE c.chunk_id NOT IN (SELECT chunk_id FROM {table})"
+             WHERE c.chunk_id NOT IN (SELECT chunk_id FROM {table}) AND (?1 IS NULL OR c.path = ?1)"
         ))?;
-        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.filter_map(|r| r.ok()).collect()
+        stmt.query_map(params![only], |r| Ok((r.get(0)?, r.get(1)?)))?.filter_map(|r| r.ok()).collect()
     };
     let mut written = 0u64;
     for group in pending.chunks(batch.max(1)) {

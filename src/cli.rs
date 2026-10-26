@@ -425,9 +425,10 @@ pub struct SearchArgs {
     #[arg(long)]
     pub include_archives: bool,
 
-    /// Override the vault embedder for this query. `none` = BM25 only: no vector
-    /// arm and no connect to Ollama. `auto`/`ollama`/`onnx` use the index as stored
-    /// (`auto` is resolved at open, not per search).
+    /// Override `[embedder] provider` for this query (embedded index). `none` =
+    /// BM25 only: no vector arm and no connect to Ollama. `ollama` uses the
+    /// configured model; `auto` uses the space the index records. A dead
+    /// embedder drops the vector arm and BM25 still answers.
     #[arg(long, value_name = "PROVIDER", value_parser = ["none", "auto", "ollama", "onnx"])]
     pub embedder: Option<String>,
 
