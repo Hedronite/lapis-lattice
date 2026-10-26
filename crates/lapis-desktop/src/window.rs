@@ -331,10 +331,11 @@ impl Root {
                 if let Some(i) = index {
                     self.scene.nodes[i].x = w[0];
                     self.scene.nodes[i].y = w[1];
-                    // The sim holds it there and lets the rest settle
-                    // around it, which is what makes a drag feel live.
+                    // The sim holds it there and keeps the layout gently warm,
+                    // so the neighbours follow and nothing else wanders.
                     self.sim.place(i, w[0], w[1]);
                     self.sim.set_pinned(i, true);
+                    self.sim.hold_warm(true);
                 }
             }
             // Drag empty space: pan the camera. The layout does not move.
@@ -350,6 +351,8 @@ impl Root {
 
     fn on_up(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(press) = self.press.take() else { return };
+        // A drag ends: the layout cools back to stillness around the dropped node.
+        self.sim.hold_warm(false);
         // A short press is still a click, even on a node you could have
         // dragged.
         if !press.moved

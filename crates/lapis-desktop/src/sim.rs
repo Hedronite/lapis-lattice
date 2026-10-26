@@ -197,8 +197,15 @@ pub struct ForceParams {
     pub damping: f32,
     pub max_velocity: f32,
     pub dt: f32,
-    /// Energy below which the graph is at rest and ticking stops.
+    /// Temperature below which the graph is at rest and ticking stops.
     pub alpha_min: f32,
+    /// How fast the temperature falls toward its target each tick: d3's
+    /// `alphaDecay`. Forces are scaled by the temperature, so the layout always
+    /// eases to a stop on a fixed schedule, whatever residual force is left.
+    pub alpha_decay: f32,
+    /// Temperature held while the operator drags a node: warm enough for the
+    /// neighbours to follow, cool enough that nothing else wanders.
+    pub alpha_drag: f32,
     /// Barnes-Hut opening angle. Smaller is more exact and slower.
     pub theta: f32,
 }
@@ -210,10 +217,15 @@ impl Default for ForceParams {
             repel: 400.0,
             link: 0.02,
             link_distance: 30.0,
-            damping: 0.85,
-            max_velocity: 40.0,
+            // d3's velocityDecay of 0.4: enough friction that a settled graph
+            // glides to rest instead of ringing.
+            damping: 0.6,
+            max_velocity: 12.0,
             dt: 0.3,
             alpha_min: 0.001,
+            // From 1 to `alpha_min` in about 300 ticks, d3's default schedule.
+            alpha_decay: 1.0 - 0.001f32.powf(1.0 / 300.0),
+            alpha_drag: 0.12,
             // 0.8 is the reference value and it converges. A coarser angle
             // saves a little tick time and leaves a residual energy that never
             // falls under `alpha_min`, which `the_settle_is_damped_and_ends`
@@ -236,6 +248,9 @@ pub struct ForceSim {
     /// pushed themselves, which is d3's `fx`/`fy`.
     pinned: Vec<bool>,
     energy: f32,
+    /// Temperature: every force is scaled by it, and it eases toward `alpha_target`.
+    alpha: f32,
+    alpha_target: f32,
     tree: QuadTree,
 }
 
@@ -263,6 +278,8 @@ impl ForceSim {
             pos,
             edges,
             energy: 1.0,
+            alpha: 1.0,
+            alpha_target: 0.0,
             tree: QuadTree::default(),
         }
     }
@@ -330,15 +347,31 @@ impl ForceSim {
         self.wake();
     }
 
-    /// Put enough energy back to restart ticking after an interaction.
+    /// Warm the layout a little after an interaction, so the graph settles
+    /// around the change and then stops again.
     pub fn wake(&mut self) {
-        self.energy = self.energy.max(self.params.alpha_min * 50.0);
+        self.alpha = self.alpha.max(self.params.alpha_drag);
     }
 
-    /// True while the sim still has energy to spend, so a caller can tell
+    /// Hold the layout warm while a node is being dragged, and let it cool once
+    /// the drag ends.
+    pub fn hold_warm(&mut self, on: bool) {
+        self.alpha_target = if on { self.params.alpha_drag } else { 0.0 };
+        if on {
+            self.wake();
+        }
+    }
+
+    /// Current temperature, for the debug overlay.
+    pub fn alpha(&self) -> f32 {
+        self.alpha
+    }
+
+    /// True while the sim still has heat to spend, so a caller can tell
     /// whether the next frame is already scheduled.
     pub fn is_running(&self) -> bool {
-        !self.pos.is_empty() && self.energy >= self.params.alpha_min
+        !self.pos.is_empty()
+            && (self.alpha >= self.params.alpha_min || self.alpha_target >= self.params.alpha_min)
     }
 
     /// Bounding box of the current positions, for fitting a camera to it.
@@ -361,15 +394,17 @@ impl ForceSim {
     /// stop asking.
     pub fn tick(&mut self) -> bool {
         let n = self.pos.len();
-        if n == 0 || self.energy < self.params.alpha_min {
+        if !self.is_running() {
             return false;
         }
+        self.alpha += (self.alpha_target - self.alpha) * self.params.alpha_decay;
+        let alpha = self.alpha;
         self.force.fill([0.0; 2]);
 
         // charge: every node pushes every other apart, softened near zero so
         // coincident nodes get a finite shove instead of an infinity. Exact
         // while the vault is small, Barnes-Hut once it is not.
-        let repel = self.params.repel;
+        let repel = self.params.repel * alpha;
         if n > BARNES_HUT_THRESHOLD {
             self.tree.build(&self.pos);
             let theta = self.params.theta;
@@ -399,7 +434,7 @@ impl ForceSim {
 
         // link: a spring toward the rest length, pulling when long and pushing
         // when short.
-        let (k, rest) = (self.params.link, self.params.link_distance);
+        let (k, rest) = (self.params.link * alpha, self.params.link_distance);
         for &(a, b) in &self.edges {
             let dx = self.pos[b][0] - self.pos[a][0];
             let dy = self.pos[b][1] - self.pos[a][1];
@@ -413,7 +448,7 @@ impl ForceSim {
 
         // center: gravity toward the origin, which is what keeps disconnected
         // components on screen instead of drifting out of the void.
-        let g = self.params.center;
+        let g = self.params.center * alpha;
         for (f, p) in self.force.iter_mut().zip(self.pos.iter()) {
             f[0] -= p[0] * g;
             f[1] -= p[1] * g;
@@ -648,6 +683,32 @@ mod tests {
         let per_tick = t0.elapsed().as_secs_f64() * 1000.0 / runs as f64;
         println!("2000 nodes / 4000 edges: {per_tick:.3} ms per tick");
         assert!(per_tick < 16.6, "{per_tick:.3} ms per tick misses the 60 fps budget");
+    }
+
+    /// The layout cools on a schedule: a big graph comes to rest in about 300
+    /// ticks however much residual force is left, sits still, and a drag warms
+    /// it only until the drag ends.
+    #[test]
+    fn the_layout_cools_to_stillness_and_a_drag_only_warms_it_while_held() {
+        let mut sim = big(2_000, 3_000);
+        let ran = sim.settle(5_000);
+        assert!(ran <= 320, "a cooling schedule ends near 300 ticks, ran {ran}");
+        assert!(!sim.is_running(), "at rest the sim stops asking for frames");
+        let still = sim.positions().to_vec();
+        assert!(!sim.tick(), "a cooled graph does not tick");
+        assert_eq!(sim.positions(), still.as_slice(), "and nothing drifts");
+
+        sim.place(0, 500.0, 500.0);
+        sim.set_pinned(0, true);
+        sim.hold_warm(true);
+        for _ in 0..1_000 {
+            assert!(sim.tick(), "a held drag keeps the neighbours following");
+        }
+        assert!(sim.alpha() <= sim.params.alpha_drag + 1e-6, "a drag is warm, never a fresh big bang");
+        sim.hold_warm(false);
+        let cooled = sim.settle(5_000);
+        assert!(cooled <= 320, "after the drop it cools again, ran {cooled}");
+        assert_eq!(sim.positions()[0], [500.0, 500.0], "the dropped node stays where it was put");
     }
 
     #[test]
