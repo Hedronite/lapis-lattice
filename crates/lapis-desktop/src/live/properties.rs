@@ -76,24 +76,24 @@ mod tests {
     #[test]
     fn priority_keys_lead_and_links_split_out() {
         let props = json!({
-            "cross_refs": ["[[foundry/SEMVER]]", "[[foundry/lapis/STATUS|Status]]"],
+            "cross_refs": ["[[projects/demo]]", "[[notes/plan|Plan]]"],
             "status": "live",
-            "parent": "[[foundry/lapis/README]]",
-            "type": "foundry-doc",
+            "parent": "[[notes/README]]",
+            "type": "note",
             "hal_version": "1.0",
         });
         let rows = rows(&props);
         let keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
         assert_eq!(&keys[..3], ["type", "status", "parent"]);
         let parent = &rows[2].pieces;
-        assert_eq!(parent, &[Piece::Link { label: "README".into(), target: "foundry/lapis/README".into() }]);
+        assert_eq!(parent, &[Piece::Link { label: "README".into(), target: "notes/README".into() }]);
         let refs = &rows.iter().find(|r| r.key == "cross_refs").unwrap().pieces;
         assert_eq!(
             refs,
             &[
-                Piece::Link { label: "SEMVER".into(), target: "foundry/SEMVER".into() },
+                Piece::Link { label: "demo".into(), target: "projects/demo".into() },
                 Piece::Text(" · ".into()),
-                Piece::Link { label: "Status".into(), target: "foundry/lapis/STATUS".into() },
+                Piece::Link { label: "Plan".into(), target: "notes/plan".into() },
             ]
         );
     }
