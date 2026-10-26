@@ -1,9 +1,9 @@
-use super::chrome::{hex_chain, hex_mark, icon_button, kbd, rule, section, text_button};
+use super::chrome::{hex_chain, hex_mark, icon_button, kbd, rule, text_button};
 use super::*;
 use gpui_kit::base::{h_resizable, resizable_panel};
 use gpui_kit::{
-    FontWeight, InteractiveElement, IntoElement, ParentElement, Render, Role, SharedString,
-    StatefulInteractiveElement, Styled, div, px,
+    FontWeight, InteractiveElement, IntoElement, ParentElement, Render, Role, StatefulInteractiveElement,
+    Styled, div, px,
 };
 use gpui_omarchy::{ActiveTheme, IconName, icon};
 
@@ -20,99 +20,7 @@ fn short_path(path: &str) -> String {
 impl Workspace {
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.omarchy().clone();
-        let mut files = div()
-            .id("file-list")
-            .role(Role::List)
-            .aria_label("Workspace files")
-            .flex_1()
-            // Without a zero minimum the list grows past the sidebar and never scrolls.
-            .min_h_0()
-            .overflow_y_scroll()
-            .px_2()
-            .pb_2()
-            .flex()
-            .flex_col()
-            .gap_px();
-        if !self.folder.is_empty() {
-            let parent = self.folder.rsplit_once('/').map_or(String::new(), |(p, _)| p.into());
-            files = files.child(
-                div()
-                    .id("parent-folder")
-                    .role(Role::Button)
-                    .aria_label("Open parent folder")
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap_2()
-                    .h(px(28.))
-                    .px_2()
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .text_color(theme.secondary)
-                    .hover(|s| s.bg(theme.hover_fill()))
-                    .child(icon(IconName::ChevronLeft).size(px(14.)))
-                    .child("Parent folder")
-                    .on_click(cx.listener(move |this, _, w, cx| this.directory(parent.clone(), w, cx))),
-            );
-        }
-        for entry in &self.files {
-            let path = entry.path.clone();
-            let directory = entry.directory;
-            let active = self.tabs.get(self.active).is_some_and(|t| t.document.path == path);
-            let glyph = if directory { IconName::Folder } else { IconName::FileText };
-            let mut row = div()
-                .id(SharedString::from(format!("file-{path}")))
-                .role(Role::Button)
-                .accessibility_id(format!("workspace.file.{path}"))
-                .aria_label(format!("Open {} {}", if directory { "folder" } else { "file" }, entry.name))
-                .relative()
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap_2()
-                .h(px(28.))
-                .px_2()
-                .rounded(px(6.))
-                .cursor_pointer()
-                .child(icon(glyph).size(px(14.)).text_color(if directory {
-                    theme.accent.opacity(0.75)
-                } else {
-                    theme.secondary
-                }))
-                .child(div().flex_1().min_w_0().truncate().child(entry.name.clone()));
-            if active {
-                row = row.bg(crate::theme::lapis_blue().opacity(0.55)).text_color(theme.bright).child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top(px(6.))
-                        .bottom(px(6.))
-                        .w(px(2.))
-                        .rounded(px(1.))
-                        .bg(theme.accent),
-                );
-            } else {
-                row = row.hover(|s| s.bg(theme.hover_fill()));
-            }
-            files = files.child(row.on_click(cx.listener(move |this, _, w, cx| {
-                if directory {
-                    this.directory(path.clone(), w, cx)
-                } else {
-                    this.open_file(path.clone(), w, cx)
-                }
-            })));
-        }
-        if self.files_loading {
-            files = files.child(div().p_2().text_sm().text_color(theme.secondary).child("Loading files…"));
-        } else if self.files.is_empty() {
-            files =
-                files.child(div().p_2().text_sm().text_color(theme.secondary).child("This folder is empty"));
-        }
-        let folder_name = if self.folder.is_empty() {
-            "Vault".to_string()
-        } else {
-            self.folder.rsplit('/').next().unwrap_or("").into()
-        };
+        let files = self.render_file_list(cx);
         div()
             .w_full()
             .h_full()
@@ -175,19 +83,6 @@ impl Workspace {
                     .on_click(
                         cx.listener(|this, _, w, cx| this.open_menu(super::menu::Kind::Commands, w, cx)),
                     ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_4()
-                    .pt_4()
-                    .pb_1p5()
-                    .child(section("FILES", &theme))
-                    .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme.secondary).child(
-                        if self.folder.is_empty() { String::new() } else { format!("· {folder_name}") },
-                    )),
             )
             .child(files)
             .child(
@@ -576,6 +471,7 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.omarchy().clone();
+        self.apply_reveal();
         let sidebar = self.render_sidebar(cx);
         let mut content = div()
             .flex_1()

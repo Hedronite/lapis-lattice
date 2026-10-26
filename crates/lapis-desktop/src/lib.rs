@@ -15,6 +15,7 @@
 //!   returns [`DesktopError::NotBuilt`]. Window code lives in `window.rs`.
 
 mod code_graph;
+pub mod file_tree;
 pub mod graph_data;
 pub mod html;
 pub use code_graph::{CodeGraphOverlay, PHANTOM_NOT_FOUND};
