@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Reindex everything
+
+- `lapis reindex --all` rebuilds the whole embedded index in place: the same rebuild the TUI and the desktop run from their build-index actions, for a terminal or a script. A terminal sees `indexing N/M` on stderr while it runs; `--json` prints `documents`, `chunks`, `edges`, `embedded`, `embedError` and `elapsedMs`. Against an HTTP lattice it exits 1, because that service owns its own index. The stale-index hints in `search` and `doctor` name it.
+
 ### Stale index
 
 - `search --json` carries `meta.stale`: how many notes the index has not caught up with. A note is stale when its file is newer than its index entry, when it sits in an indexed folder but has no entry, or when its entry names a file that is gone. Non-zero means a miss may be the index, not the vault. The MCP `search` tool reports it too, and human `search` output prints one line on stderr.

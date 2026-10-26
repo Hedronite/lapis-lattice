@@ -26,6 +26,7 @@ mod overlay;
 mod pdf_render;
 mod phantom;
 mod rag_gate;
+mod reindex_all;
 mod resolve;
 mod safe_file;
 mod stale;
@@ -381,7 +382,8 @@ async fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
 // -------------------------------------------------------------------- reindex
 
 async fn reindex(ctx: &Ctx, args: ReindexArgs) -> Result<()> {
-    let r = ops::reindex(ctx, &args.path).await?;
+    let Some(path) = args.path else { return reindex_all::run(ctx) };
+    let r = ops::reindex(ctx, &path).await?;
     if ctx.json {
         return emit_json(&r);
     }

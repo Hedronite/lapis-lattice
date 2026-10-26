@@ -64,7 +64,7 @@ pub async fn run(ctx: &Ctx) -> Result<()> {
             Ok(s) if s.count == 0 => check!("index_fresh", "ok", "every indexed folder matches the disk"),
             Ok(s) => {
                 check!("index_fresh", "warn", format!("{} notes changed since indexing", s.count));
-                notes.push("`lapis vault info` lists stale notes; `lapis reindex PATH` refreshes one".into());
+                notes.push("`lapis vault info` lists stale notes; `lapis reindex PATH` refreshes one, `lapis reindex --all` rebuilds the index".into());
             }
             Err(e) => check!("index_fresh", "warn", e.to_string()),
         }
