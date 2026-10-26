@@ -63,6 +63,18 @@ impl Service {
         saved
     }
 
+    /// Status-bar text never shows where the vault lives on disk.
+    fn vault_relative(&self, message: String) -> String {
+        let mut message = message;
+        for root in
+            [self.ctx.vault.root.canonicalize().ok(), Some(self.ctx.vault.root.clone())].into_iter().flatten()
+        {
+            let root = root.to_string_lossy();
+            message = message.replace(&format!("{root}/"), "").replace(root.as_ref(), "<vault>");
+        }
+        message
+    }
+
     fn contained(&self, rel: &str) -> Result<PathBuf, String> {
         let root = self.ctx.vault.root.canonicalize().map_err(|e| e.to_string())?;
         let path = if rel.is_empty() {
@@ -218,20 +230,24 @@ impl WorkspaceServices for Service {
     }
 
     fn resolve_link(&self, target: &str) -> Result<Option<String>, String> {
+        let root = self.ctx.vault.root.canonicalize().map_err(|e| self.vault_relative(e.to_string()))?;
+        // Every answer, fast path or scan, must be a file that canonicalizes inside the vault,
+        // so an in-vault symlink pointing out of it is not followed.
+        let inside = |rel: &str| {
+            self.contained(rel)
+                .ok()
+                .filter(|abs| abs.is_file())
+                .and_then(|abs| abs.strip_prefix(&root).ok().map(|r| r.to_string_lossy().into_owned()))
+        };
         // A link that already names a vault file skips the whole-vault scan.
         let bare = target.split(['#', '|']).next().unwrap_or(target).trim();
-        for candidate in [bare.to_string(), format!("{bare}.md")] {
-            if let Ok(abs) = self.contained(&candidate)
-                && abs.is_file()
-                && let Ok(rel) =
-                    abs.strip_prefix(self.ctx.vault.root.canonicalize().map_err(|e| e.to_string())?)
-            {
-                return Ok(Some(rel.to_string_lossy().into_owned()));
-            }
+        if let Some(rel) = [bare.to_string(), format!("{bare}.md")].iter().find_map(|c| inside(c)) {
+            return Ok(Some(rel));
         }
-        let r = crate::resolve::resolve(&self.ctx.vault.root, target).map_err(|e| e.to_string())?;
+        let r = crate::resolve::resolve(&self.ctx.vault.root, target)
+            .map_err(|e| self.vault_relative(e.to_string()))?;
         match (r.path, r.how) {
-            (Some(path), _) => Ok(Some(path)),
+            (Some(path), _) => Ok(inside(&path)),
             (None, "collision") => {
                 Err(format!("{target} matches more than one note: {}", r.candidates.join(", ")))
             }
@@ -525,6 +541,29 @@ mod tests {
             changes: Default::default(),
         };
         (root, service)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn links_resolve_inside_the_vault_and_never_through_an_escaping_symlink() {
+        let (root, service) = fixture();
+        let outside = root.with_extension("outside");
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("notes/plan.md"), "# Plan\n").unwrap();
+        std::fs::write(outside.join("secret.md"), "# Secret\n").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.md"), root.join("notes/secret.md")).unwrap();
+        let result = tokio::task::spawn_blocking(move || {
+            assert_eq!(service.resolve_link("notes/plan").unwrap().as_deref(), Some("notes/plan.md"));
+            assert_eq!(service.resolve_link("plan#Part").unwrap().as_deref(), Some("notes/plan.md"));
+            assert_eq!(service.resolve_link("notes/secret").unwrap(), None, "fast path refuses the escape");
+            assert_eq!(service.resolve_link("secret").unwrap(), None, "the scan's answer is checked too");
+            assert_eq!(service.resolve_link("nowhere").unwrap(), None);
+        })
+        .await;
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::remove_dir_all(&outside).unwrap();
+        result.unwrap();
     }
 
     #[tokio::test]

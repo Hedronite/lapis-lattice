@@ -481,6 +481,31 @@ impl Render for Workspace {
             .flex_col()
             .child(self.render_navigation(cx))
             .child(self.render_tabs(cx));
+        if !self.code_graph.rows().is_empty() || self.code_graph.truncated() {
+            // Already-capped rows, drawn as text. A row is not a path.
+            let mut rows = div()
+                .id("code-graph-rows")
+                .role(Role::List)
+                .aria_label("Code graph rows")
+                .flex()
+                .flex_col()
+                .flex_shrink_0()
+                .max_h(px(240.))
+                .overflow_y_scroll()
+                .px_4()
+                .py_2()
+                .border_b_1()
+                .border_color(theme.border)
+                .text_color(theme.secondary);
+            for (index, row) in self.code_graph.rows().iter().enumerate() {
+                rows =
+                    rows.child(div().id(("code-graph-row", index)).role(Role::ListItem).child(row.clone()));
+            }
+            if self.code_graph.truncated() {
+                rows = rows.child(div().id("code-graph-truncated").child("truncated"));
+            }
+            content = content.child(rows);
+        }
         if self.graph_visible {
             if let Some(graph) = &self.graph {
                 content = content.child(div().flex_1().min_h_0().child(graph.clone()));

@@ -5,7 +5,13 @@
 //! up, so another tool by that name cannot shadow Phantom. Nothing here runs the
 //! binary or reads Phantom's data; absence is `None`, not an error.
 //!
-//! Std only, so `tests/phantom_discover.rs` can include this file directly.
+//! A found path is always absolute (G0a, G0b): relative `PATH` entries and a
+//! relative `$LAPIS_PHANTOM_BINARY` are joined to the current directory, and
+//! the parent directory is canonicalized so `..` is gone. The file name itself
+//! is kept, so a `phantom-fractal` symlink is not renamed by resolving it.
+//! [`super::run`] re-checks that path immediately before it spawns (G0c).
+//!
+//! Std only, so the `tests/phantom_*.rs` files can include this module directly.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -16,42 +22,72 @@ pub const BINARY: &str = "phantom-fractal";
 /// Environment variable naming a configured `phantom-fractal` path.
 pub const ENV: &str = "LAPIS_PHANTOM_BINARY";
 
-/// Discovery against this process's `PATH` and `$LAPIS_PHANTOM_BINARY`.
+/// Discovery against this process's `PATH`, `$LAPIS_PHANTOM_BINARY`, and
+/// current directory.
 pub fn from_env() -> Option<PathBuf> {
     let configured = std::env::var_os(ENV).filter(|v| !v.is_empty()).map(PathBuf::from);
     discover(std::env::var_os("PATH").as_deref(), configured.as_deref())
 }
 
-/// `phantom-fractal` on `path_var` (a `PATH`-style list), else `configured` when
-/// its file name is `phantom-fractal`. `None` when neither is an executable file.
+/// [`discover_from`] with relative paths resolved against the current directory.
 pub fn discover(path_var: Option<&OsStr>, configured: Option<&Path>) -> Option<PathBuf> {
-    on_path(path_var).or_else(|| configured.filter(|p| named(p) && is_executable(p)).map(Path::to_path_buf))
+    discover_from(std::env::current_dir().ok().as_deref(), path_var, configured)
 }
 
-fn on_path(path_var: Option<&OsStr>) -> Option<PathBuf> {
+/// `phantom-fractal` on `path_var` (a `PATH`-style list), else `configured` when
+/// its file name is `phantom-fractal`. Relative entries are joined to `cwd`;
+/// with no `cwd` they are skipped. `None` when nothing is an executable file.
+pub fn discover_from(
+    cwd: Option<&Path>,
+    path_var: Option<&OsStr>,
+    configured: Option<&Path>,
+) -> Option<PathBuf> {
+    on_path(cwd, path_var).or_else(|| {
+        let p = absolute(cwd, configured?)?;
+        if !named(&p) {
+            return None;
+        }
+        settle(&p).filter(|p| is_executable(p))
+    })
+}
+
+fn on_path(cwd: Option<&Path>, path_var: Option<&OsStr>) -> Option<PathBuf> {
     // An empty entry would mean the current directory; skip it rather than
     // pick up a binary from wherever `lapis` happens to be run.
     std::env::split_paths(path_var?)
         .filter(|dir| !dir.as_os_str().is_empty())
-        .map(|dir| dir.join(file_name()))
+        .filter_map(|dir| absolute(cwd, &dir.join(file_name())))
+        .filter_map(|p| settle(&p))
         .find(|p| is_executable(p))
 }
 
-fn file_name() -> String {
+fn absolute(cwd: Option<&Path>, p: &Path) -> Option<PathBuf> {
+    if p.is_absolute() { Some(p.to_path_buf()) } else { cwd.map(|c| c.join(p)) }
+}
+
+/// Canonical parent joined with the original file name. `None` when the
+/// parent does not exist.
+fn settle(p: &Path) -> Option<PathBuf> {
+    let name = p.file_name()?;
+    let parent = p.parent().filter(|d| !d.as_os_str().is_empty())?;
+    Some(parent.canonicalize().ok()?.join(name))
+}
+
+pub(crate) fn file_name() -> String {
     format!("{BINARY}{}", std::env::consts::EXE_SUFFIX)
 }
 
-fn named(p: &Path) -> bool {
+pub(crate) fn named(p: &Path) -> bool {
     p.file_name().is_some_and(|n| n == OsStr::new(&file_name()))
 }
 
 #[cfg(unix)]
-fn is_executable(p: &Path) -> bool {
+pub(crate) fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(not(unix))]
-fn is_executable(p: &Path) -> bool {
+pub(crate) fn is_executable(p: &Path) -> bool {
     std::fs::metadata(p).is_ok_and(|m| m.is_file())
 }

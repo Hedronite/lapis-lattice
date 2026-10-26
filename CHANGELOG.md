@@ -16,6 +16,10 @@
 - Reading view follows wikilinks too. Search snippets read as one run of prose and clamp to two lines.
 - The sidebar is a folder tree: folders open and close in place and load on first open, with indent guides and a collapse-all control. Opening a note opens the folders above it and scrolls its row into view. A Recent section lists the last five notes opened. The saved session format is unchanged.
 
+### Phantom client
+
+- Lapis parses the JSON envelope that `phantom-fractal` prints and does not read Phantom's database.
+
 ### Dependencies
 
 - `lapis-lattice` moved to rusqlite 0.40, and its behavior is unchanged.
@@ -28,6 +32,11 @@
 - A real write bumps `updated:` and, when that key is missing, inserts it before the closing `---`. Every other frontmatter byte stays, including CRLF. A file with no frontmatter block does not gain one. The body is the only search region.
 - The write is a same-directory temp file plus rename and keeps the file mode. `..`, an absolute path, and a symlink that leaves the vault exit 3 (`sandbox`). A missing note is exit 3 (`not_found`).
 - MCP adds one tool, `lapis_edit`. `mode` is an enum: `replace` | `insert_after` | `insert_before`. The base tool count is 15.
+
+### Desktop
+
+- The optional code-graph sidecar was removed. There is no user-visible
+  change unless that sidecar's config was present.
 
 ## 0.4.2 — 2026-09-21
 
@@ -110,8 +119,6 @@ Built with `--features desktop` (off in the default CLI asset).
   in a cancellable reader; the PDFium runtime is packaged beside the app
   and is never downloaded on open.
 - An idle Live note no longer repaints on caret blink.
-- The optional code-graph sidecar was removed. There is no user-visible
-  change unless that sidecar's config was present.
 
 ## 0.4.1 — 2026-09-11
 

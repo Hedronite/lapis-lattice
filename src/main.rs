@@ -878,24 +878,50 @@ async fn doctor(ctx: &Ctx) -> Result<()> {
 fn desktop(ctx: &Ctx, args: cli::DesktopArgs) -> Result<()> {
     // D1: `phantom-fractal` only. Absent is not an error; the overlay stays empty.
     let phantom_binary = phantom::discover::from_env();
+    // One `phantom-fractal --json version` when found (G3). A run that yields no
+    // envelope is an error, not an empty overlay.
+    let probe = phantom_binary.as_deref().map(|p| phantom::run::run(p, &["version"]));
+    let (phantom_rows, phantom_truncated) = match &probe {
+        Some(Ok(reply)) => (reply.rows(), reply.truncated),
+        Some(Err(e)) => (vec![format!("phantom: {e}")], false),
+        None => (Vec::new(), false),
+    };
     let opts = lapis_desktop::Options {
         vault_root: ctx.vault.root.clone(),
         lattice_url: ctx.lattice_url.clone(),
         seed: args.path,
         title: "Lapis".into(),
         phantom_binary,
+        phantom_rows,
+        phantom_truncated,
     };
     if args.check {
         let report = lapis_desktop::preflight(&opts);
+        let probe = probe.transpose().map_err(|e| LapisError::Internal(format!("phantom: {e}")))?;
         if ctx.json {
             let mut v = serde_json::to_value(&report)?;
             v["phantomBinary"] = json!(opts.phantom_binary);
+            if let Some(reply) = &probe {
+                let env = &reply.envelope;
+                v["phantom"] = json!({
+                    "ok": env.ok,
+                    "data": env.data,
+                    "error": env.error.as_ref().map(|e| json!({ "kind": e.kind, "message": e.message, "exit": e.exit })),
+                    "truncated": reply.truncated,
+                });
+            }
             return emit_json(&v);
         }
         println!("desktop: gpui={}", report.gpui_available);
-        match &opts.phantom_binary {
-            Some(p) => println!("phantom: {}", p.display()),
-            None => println!("{}", lapis_desktop::PHANTOM_NOT_FOUND),
+        match (&opts.phantom_binary, &probe) {
+            (Some(p), Some(reply)) => {
+                println!("phantom: {}", p.display());
+                match &reply.envelope.error {
+                    None => println!("phantom version: ok"),
+                    Some(e) => println!("phantom version: exit {} {}: {}", e.exit, e.kind, e.message),
+                }
+            }
+            _ => println!("{}", lapis_desktop::PHANTOM_NOT_FOUND),
         }
         return Ok(());
     }
