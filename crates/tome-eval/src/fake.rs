@@ -53,7 +53,7 @@ impl FakeTome {
         let sha = sample_doc();
         let meta = DocMeta {
             doc_id: sha.clone(),
-            path: "Archmagus-Stack/09-Tomes/fake/Fake Book.pdf".into(),
+            path: "tomes/fake/Fake Book.pdf".into(),
             sha256: sha.as_str().to_string(),
             pages: 20,
             outline: true,
