@@ -156,7 +156,7 @@ impl PdfReader {
     fn wanted(&self) -> Vec<u32> {
         let Some(pages) = self.pages else { return vec![self.page] };
         let range = if self.view_height <= 0. || self.pending_jump.is_some() {
-            self.page..self.page + 1
+            self.page..self.page.saturating_add(1)
         } else {
             let y0 = -f32::from(self.scroll.offset().y);
             self.strip().visible(y0, y0 + self.view_height)
@@ -285,7 +285,7 @@ impl PdfReader {
         let page = self.pages.map_or(page, |n| page.min(n.saturating_sub(1)));
         self.page = page;
         self.pending_jump = Some(page);
-        self.page_input.update(cx, |s, cx| s.set_value((page + 1).to_string(), window, cx));
+        self.page_input.update(cx, |s, cx| s.set_value(page.saturating_add(1).to_string(), window, cx));
         self.pump(window, cx);
         cx.notify();
     }
@@ -320,7 +320,8 @@ impl PdfReader {
             if page != self.page {
                 self.page = page;
                 if !self.page_input.read(cx).focus_handle(cx).is_focused(window) {
-                    self.page_input.update(cx, |s, cx| s.set_value((page + 1).to_string(), window, cx));
+                    self.page_input
+                        .update(cx, |s, cx| s.set_value(page.saturating_add(1).to_string(), window, cx));
                 }
             }
         }
@@ -370,7 +371,7 @@ impl PdfReader {
         }
         let last = self.pages.map_or(self.page, |n| n.saturating_sub(1));
         match key {
-            "right" | "pagedown" | "j" => self.jump_to((self.page + 1).min(last), window, cx),
+            "right" | "pagedown" | "j" => self.jump_to(self.page.saturating_add(1).min(last), window, cx),
             "left" | "pageup" | "k" => self.jump_to(self.page.saturating_sub(1), window, cx),
             "down" => self.scroll_by(LINE_STEP, cx),
             "up" => self.scroll_by(-LINE_STEP, cx),
@@ -433,7 +434,7 @@ impl Render for PdfReader {
             .child(format!("/ {}", self.pages.map_or("…".into(), |n| n.to_string())))
             .child(button("pdf-next", "Next").on_click(cx.listener(|this, _, w, cx| {
                 let last = this.pages.map_or(this.page, |n| n.saturating_sub(1));
-                this.jump_to((this.page + 1).min(last), w, cx);
+                this.jump_to(this.page.saturating_add(1).min(last), w, cx);
                 this.focus(w, cx)
             })))
             .child(div().flex_1())
@@ -495,9 +496,9 @@ impl Render for PdfReader {
             let text = self.cache.iter().rev().find(|p| p.number == self.page).map(|p| p.text.clone());
             body = body.child(
                 div().p_6().child(match text {
-                    None => {
-                        div().text_color(theme.secondary).child(format!("Loading page {}…", self.page + 1))
-                    }
+                    None => div()
+                        .text_color(theme.secondary)
+                        .child(format!("Loading page {}…", self.page.saturating_add(1))),
                     Some(t) if t.trim().is_empty() => div()
                         .text_color(theme.secondary)
                         .child("This page has no extractable text. Use the page image to read it."),
@@ -511,7 +512,10 @@ impl Render for PdfReader {
             body = body.child(self.column(pages, &theme));
         } else if self.error.is_none() {
             body = body.child(
-                div().p_6().text_color(theme.secondary).child(format!("Loading page {}…", self.page + 1)),
+                div()
+                    .p_6()
+                    .text_color(theme.secondary)
+                    .child(format!("Loading page {}…", self.page.saturating_add(1))),
             );
         }
         div()
@@ -580,7 +584,7 @@ impl PdfReader {
             let r = strip.visible(y0, y0 + self.view_height);
             r.start.saturating_sub(PREFETCH)..(r.end + PREFETCH).min(pages)
         } else {
-            self.page..(self.page + 1).min(pages)
+            self.page..self.page.saturating_add(1).min(pages)
         };
         let raster = self.raster_width();
         let mut column = div()
@@ -613,9 +617,9 @@ impl PdfReader {
                 Some(p) => frame.child(img(p.image.clone()).w(px(width)).h(px(height))),
                 None => frame.flex().items_center().justify_center().text_color(theme.secondary).child(
                     if self.inflight.is_some_and(|(p, _)| p == page) {
-                        format!("Rendering page {}…", page + 1)
+                        format!("Rendering page {}…", page.saturating_add(1))
                     } else {
-                        format!("Page {}", page + 1)
+                        format!("Page {}", page.saturating_add(1))
                     },
                 ),
             };
