@@ -13,6 +13,8 @@ categories = ["database", "text-processing"]
 exclude = []
 
 [dependencies]
+# Gitignore semantics for `.lapisignore`: the same engine ripgrep uses.
+ignore = "0.4"
 regex = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 # Vector KNN inside the same SQLite file. Linked into the binary and registered
