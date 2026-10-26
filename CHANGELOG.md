@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Stale index
+
+- `search --json` carries `meta.stale`: how many notes the index has not caught up with. A note is stale when its file is newer than its index entry, when it sits in an indexed folder but has no entry, or when its entry names a file that is gone. Non-zero means a miss may be the index, not the vault. The MCP `search` tool reports it too, and human `search` output prints one line on stderr.
+- `vault info` reports `lattice.stale` with `count`, `changed`, `unindexed`, `removed` and up to 20 paths. `doctor` adds an `index_fresh` check.
+- The check reads the index through the configured backend, embedded or HTTP, and walks only folders that already hold indexed notes, so folders the index leaves out on purpose are never counted. Markdown only.
+- Listing about 9,300 documents from an HTTP lattice takes most of a second, so `search` and `vault info` reuse a check up to 60 s old from `$XDG_CACHE_HOME/lapis` (else `~/.cache/lapis`), never from the vault. A reindex through `lapis` drops the cached check, and `doctor` always checks afresh.
+
 ### Desktop
 
 - The window opens in a Lapis palette (night navy, cream, gold) unless an Omarchy theme is present. `LAPIS_THEME=lapis` or `LAPIS_THEME=omarchy` overrides the choice.

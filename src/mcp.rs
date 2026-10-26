@@ -501,6 +501,7 @@ impl LapisServer {
             count: Some(r.count),
             limit: Some(page.limit),
             offset: Some(page.offset),
+            stale: self.ctx.stale().await,
             ..Meta::default()
         };
         ok_meta(t0, &r, meta)
