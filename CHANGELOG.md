@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Graph review nits
+
+- The layout settles on its own thread pool, at most eight threads and one fewer than the machine's cores, instead of rayon's global pool with a thread per core. That leaves a core for the window and the rest of the machine.
+- The Barnes-Hut tree leaves out a body at a non-finite position. Before, one such body made the root cell infinite and the subdivision endless.
+- The cap on how many notes a drag or release frees (1,500) now counts every note freed until the layout rests, not each call. A long drag or Unpin all stays a local edit.
+- A compile-time check covers the whole frame's worst case: the full segment budget plus a batched disc for every node the snapshot can hold stays under half the renderer's cap.
+
 ### Vault containment
 
 - New files stay inside the vault. `create` (and `capture`, `daily` and the other periodic notes), `restore`, `trash` and the desktop's Save a copy used to join the path to the vault root and write, so a folder symlinked out of the vault could carry the write outside it. They now go through `notes::contained_new`. It resolves the deepest folder that already exists, refuses one outside the vault (exit 3), and refuses a target that exists in any form, a dangling symlink included. The write then lands under that folder's real path, without following the links again.

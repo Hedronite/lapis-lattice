@@ -16,6 +16,16 @@ pub const DASH_BUDGET: usize = 60_000;
 // At about 720 bytes a segment, a full frame stays under half the renderer's cap.
 const _: () = assert!(SEGMENT_BUDGET * 720 < 128 * 1024 * 1024 && DASH_BUDGET <= SEGMENT_BUDGET);
 
+/// Instance bytes one batched small disc costs: four triangles, three vertices
+/// each, at the same per-vertex size as a hairline's.
+pub const DISC_BYTES: usize = 4 * 3 * 120;
+
+// The whole frame's worst case: every segment the budget allows plus a
+// batched disc for every node the snapshot can hold, under half the renderer's
+// 256 MiB cap.
+const _: () =
+    assert!(SEGMENT_BUDGET * 720 + lapis_lattice::SNAPSHOT_NODE_CAP * DISC_BYTES < 128 * 1024 * 1024);
+
 /// The part of segment `s` (`[x0, y0, x1, y1]`) inside the board grown by
 /// `margin` on every side, or `None` when none of it is (Liang–Barsky).
 pub fn clip(s: [f32; 4], board: [f32; 2], margin: f32) -> Option<[f32; 4]> {

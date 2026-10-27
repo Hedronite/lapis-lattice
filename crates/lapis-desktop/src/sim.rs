@@ -34,6 +34,25 @@ pub const WARM_SPEED_SHARE: f32 = 0.2;
 pub const MOBILE_HOPS: usize = 2;
 /// Most nodes a drag frees, so a drag on a huge hub stays a local edit.
 pub const MOBILE_CAP: usize = 1_500;
+/// Most threads the layout uses. rayon's global pool takes one per logical core;
+/// the settle leaves one free for the window and the rest of the machine.
+const LAYOUT_THREADS: usize = 8;
+
+/// The layout's own thread pool, built once; `None` if the system refuses one,
+/// and the settle then runs on rayon's global pool.
+fn layout_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(cores.saturating_sub(1).clamp(1, LAYOUT_THREADS))
+            .thread_name(|i| format!("lapis-layout-{i}"))
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
+
 /// Nodes per parallel repulsion task: enough work to outweigh the hand-off.
 const REPULSION_CHUNK: usize = 256;
 /// Starting places: the nodes in link order, laid along a spiral.
@@ -190,6 +209,8 @@ pub struct ForceSim {
     /// While an interaction settles: the only nodes that may move. `None` lets
     /// every node move, as a fresh or remembered layout does.
     mobile: Option<Vec<bool>>,
+    /// Nodes freed since the layout last rested, against [`MOBILE_CAP`].
+    freed: usize,
 }
 
 impl ForceSim {
@@ -234,6 +255,7 @@ impl ForceSim {
             tree: QuadTree::default(),
             adj,
             mobile: None,
+            freed: 0,
         }
     }
 
@@ -307,7 +329,6 @@ impl ForceSim {
     fn free_around(&mut self, roots: &[usize]) {
         let n = self.pos.len();
         let mobile = self.mobile.get_or_insert_with(|| vec![false; n]);
-        let mut freed = 0usize;
         let mut frontier: Vec<usize> = roots.iter().copied().filter(|&i| i < n).collect();
         for &i in &frontier {
             mobile[i] = true;
@@ -316,9 +337,11 @@ impl ForceSim {
             let mut next = Vec::new();
             for &i in &frontier {
                 for &j in &self.adj[i] {
-                    if !mobile[j] && freed < MOBILE_CAP {
+                    // The cap runs until the layout rests, not per call: a
+                    // drag of many ticks or Unpin all stays a local edit.
+                    if !mobile[j] && self.freed < MOBILE_CAP {
                         mobile[j] = true;
-                        freed += 1;
+                        self.freed += 1;
                         next.push(j);
                     }
                 }
@@ -394,6 +417,7 @@ impl ForceSim {
         if !self.is_running() {
             // At rest the next interaction starts from a still map.
             self.mobile = None;
+            self.freed = 0;
             return false;
         }
         self.alpha += (self.alpha_target - self.alpha) * self.params.alpha_decay;
@@ -414,19 +438,25 @@ impl ForceSim {
             // across cores in chunks, one traversal stack per chunk.
             let (tree, pos, weight, inert) = (&self.tree, &self.pos, &self.weight, &self.inert);
             let mobile = self.mobile.as_deref();
-            self.force.par_chunks_mut(REPULSION_CHUNK).enumerate().for_each(|(c, chunk)| {
-                let mut stack = Vec::with_capacity(64);
-                for (k, f) in chunk.iter_mut().enumerate() {
-                    let i = c * REPULSION_CHUNK + k;
-                    // A frozen node feels no force worth computing.
-                    if inert[i] || mobile.is_some_and(|m| !m[i]) {
-                        continue;
+            let repel_all = |force: &mut [[f32; 2]]| {
+                force.par_chunks_mut(REPULSION_CHUNK).enumerate().for_each(|(c, chunk)| {
+                    let mut stack = Vec::with_capacity(64);
+                    for (k, f) in chunk.iter_mut().enumerate() {
+                        let i = c * REPULSION_CHUNK + k;
+                        // A frozen node feels no force worth computing.
+                        if inert[i] || mobile.is_some_and(|m| !m[i]) {
+                            continue;
+                        }
+                        let r = tree.repulsion(pos[i], i as u32, charge, &mut stack);
+                        f[0] += r[0] * weight[i];
+                        f[1] += r[1] * weight[i];
                     }
-                    let r = tree.repulsion(pos[i], i as u32, charge, &mut stack);
-                    f[0] += r[0] * weight[i];
-                    f[1] += r[1] * weight[i];
-                }
-            });
+                })
+            };
+            match layout_pool() {
+                Some(pool) => pool.install(|| repel_all(&mut self.force)),
+                None => repel_all(&mut self.force),
+            }
         } else {
             for i in 0..n {
                 if self.inert[i] {

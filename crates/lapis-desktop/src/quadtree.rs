@@ -85,7 +85,10 @@ impl QuadTree {
     /// `weight[i]` is body i's mass; bodies with `skip[i]` set are left out.
     pub(crate) fn build(&mut self, pos: &[[f32; 2]], weight: &[f32], skip: &[bool]) {
         self.clear();
-        let mut live = pos.iter().zip(skip).filter(|(_, s)| !**s).map(|(p, _)| *p);
+        // A non-finite position would make the root cell infinite and the
+        // subdivision endless; such a body is left out of the tree.
+        let finite = |p: &[f32; 2]| p[0].is_finite() && p[1].is_finite();
+        let mut live = pos.iter().zip(skip).filter(|(p, s)| !**s && finite(p)).map(|(p, _)| *p);
         let Some(first) = live.next() else { return };
         let (mut lo, mut hi) = (first, first);
         for p in live {
@@ -98,7 +101,7 @@ impl QuadTree {
         let size = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(1.0) * 1.01;
         self.push_cell(center, size);
         for (i, &p) in pos.iter().enumerate() {
-            if !skip[i] {
+            if !skip[i] && finite(&p) {
                 self.insert(i as u32, p, pos, weight);
             }
         }
@@ -176,5 +179,20 @@ impl QuadTree {
             }
         }
         acc
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_non_finite_body_is_left_out_and_the_build_ends() {
+        let pos = [[0.0, 0.0], [f32::NAN, 1.0], [10.0, f32::INFINITY], [5.0, 5.0]];
+        let mut tree = QuadTree::default();
+        tree.build(&pos, &[1.0; 4], &[false; 4]);
+        let charge = Charge { strength: 1.0, theta: 0.5, near: 1.0 };
+        let f = tree.repulsion([5.0, 5.0], 3, charge, &mut Vec::new());
+        assert!(f[0].is_finite() && f[1].is_finite(), "the finite bodies still push: {f:?}");
     }
 }
