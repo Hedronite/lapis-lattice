@@ -13,7 +13,10 @@ pub const SEGMENT_BUDGET: usize = 120_000;
 /// solid: at that density nobody can tell a dash from a line anyway.
 pub const DASH_BUDGET: usize = 60_000;
 
-// At about 720 bytes a segment, a full frame stays under half the renderer's cap.
+// `window/board.rs` charges every stroke, a dashed link included, against
+// SEGMENT_BUDGET before adding it, so no frame draws more than SEGMENT_BUDGET
+// segments. At about 720 bytes a segment, a full frame stays under half the
+// renderer's cap.
 const _: () = assert!(SEGMENT_BUDGET * 720 < 128 * 1024 * 1024 && DASH_BUDGET <= SEGMENT_BUDGET);
 
 /// The part of segment `s` (`[x0, y0, x1, y1]`) inside the board grown by

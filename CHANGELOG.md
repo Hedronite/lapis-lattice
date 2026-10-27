@@ -60,6 +60,7 @@
 - `$LAPIS_PHANTOM_BINARY`, when set, is the only place Lapis looks for Phantom. A configured path that is missing, misnamed or not executable no longer falls back to `PATH`.
 - A relative `$LAPIS_PHANTOM_BINARY` is refused, so the binary cannot depend on where `lapis` is run. It is not joined to the current directory and does not fall back to `PATH`; Lapis reports `Phantom not found`.
 - On unix the `phantom-fractal` child runs in its own process group, and a timeout or an output overflow kills the whole group. Anything the child started, such as a background job still holding its output, is stopped with it.
+- On Windows only the direct `phantom-fractal` child is killed. Process groups and `killpg` are unix only, and no Job Object is used, so a process the child started can outlive it.
 - Graph preview: a note path containing ` · ` shows whole on the preview card. Without the desktop services, the preview reads at most what it shows and stays inside the vault. Errors on the graph board no longer show where the vault lives on disk.
 
 ### Reindex everything

@@ -10,6 +10,8 @@
 //! noisy binary costs Lapis a typed error, never a hang or an unbounded buffer.
 //! On unix the child leads its own process group, and stopping it kills the
 //! whole group, so nothing it started outlives it holding the pipes.
+//! `process_group` and `killpg` are unix only: on Windows only the direct
+//! child is killed, since no Job Object holds what it started.
 
 use std::ffi::OsStr;
 use std::io::Read;
@@ -207,6 +209,10 @@ fn drain(stream: &'static str, from: impl Read + Send + 'static, cap: usize, tx:
 
 /// Kill the child's process group, then reap the child, so neither a
 /// grandchild holding the pipes nor a zombie is left behind.
+///
+/// The group gets `SIGKILL` at once, with no `SIGTERM` and no grace period.
+/// That is by design: `stop` only runs for a helper that has hung or
+/// overflowed, and a polite signal would only give it longer to do so.
 fn stop(child: &mut Child) {
     #[cfg(unix)]
     if let Ok(group) = libc::pid_t::try_from(child.id()) {
