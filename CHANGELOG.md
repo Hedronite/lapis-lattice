@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Graph frame budget and logging
+
+- A dashed graph link is added only when its dashes fit the frame's segment budget as well as the dash budget, so a frame never passes the budget the renderer is sized for.
+- The desktop's stderr logger writes the home folder as `~`, so a pasted log does not name the machine's user.
 ### Graph review nits
 
 - The layout settles on its own thread pool, at most eight threads and one fewer than the machine's cores, instead of rayon's global pool with a thread per core. That leaves a core for the window and the rest of the machine.
