@@ -107,7 +107,7 @@ pub fn reindex_path(conn: &Connection, vault: &Path, rel: &str) -> Result<IndexR
     let mut chunks_n = 0u64;
     // A path the index does not cover is only forgotten: saving a file inside an
     // ignored folder or a nested vault must not pull it back in.
-    if abs.is_file() && Scope::load(vault).covers(vault, &rel) {
+    if abs.is_file() && Scope::load(vault).covers(vault, &rel) && scope::resolves_inside(vault, &abs) {
         chunks_n = index_one(conn, vault, &rel)?;
         documents = 1;
     }
@@ -222,12 +222,13 @@ fn index_one(conn: &Connection, vault: &Path, rel: &str) -> Result<u64> {
 
 fn walk(root: &Path) -> Result<Vec<String>> {
     let mut out = Vec::new();
-    walk_inner(root, root, &Scope::load(root), &mut out)?;
+    let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    walk_inner(root, root, &canon, &Scope::load(root), &mut out)?;
     out.sort();
     Ok(out)
 }
 
-fn walk_inner(root: &Path, dir: &Path, scope: &Scope, out: &mut Vec<String>) -> Result<()> {
+fn walk_inner(root: &Path, dir: &Path, canon: &Path, scope: &Scope, out: &mut Vec<String>) -> Result<()> {
     for ent in fs::read_dir(dir)? {
         let ent = ent?;
         let name = ent.file_name();
@@ -237,6 +238,21 @@ fn walk_inner(root: &Path, dir: &Path, scope: &Scope, out: &mut Vec<String>) -> 
         }
         let path = ent.path();
         let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+        // The entry itself, not what a link points at. A linked folder is never
+        // walked: its notes are indexed where they really live, and it can neither
+        // lead out of the vault nor loop back on itself. A linked file is indexed
+        // only when it resolves inside the vault.
+        if ent.file_type()?.is_symlink() {
+            let Ok(target) = path.canonicalize() else { continue };
+            if target.is_file()
+                && target.starts_with(canon)
+                && kinds::kind_for(&name).is_some()
+                && !scope.ignores(&rel, false)
+            {
+                out.push(rel);
+            }
+            continue;
+        }
         if path.is_dir() {
             // Pruned whole: a nested vault keeps its own index, and an ignored
             // folder is not read at all.
@@ -246,7 +262,7 @@ fn walk_inner(root: &Path, dir: &Path, scope: &Scope, out: &mut Vec<String>) -> 
             {
                 continue;
             }
-            walk_inner(root, &path, scope, out)?;
+            walk_inner(root, &path, canon, scope, out)?;
         } else if kinds::kind_for(&name).is_some() && !scope.ignores(&rel, false) {
             out.push(rel);
         }

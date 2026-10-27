@@ -95,6 +95,15 @@ impl Scope {
     }
 }
 
+/// True when `abs` resolves, through any links, to a path inside `vault`. A
+/// note reached through a link out of the vault is never read into the index.
+pub fn resolves_inside(vault: &Path, abs: &Path) -> bool {
+    match (vault.canonicalize(), abs.canonicalize()) {
+        (Ok(root), Ok(target)) => target.starts_with(root),
+        _ => false,
+    }
+}
+
 /// True when `dir` holds its own vault markers. Never asked of the vault root.
 pub fn is_nested_vault(dir: &Path) -> bool {
     VAULT_MARKERS.iter().any(|m| dir.join(m).is_dir())
@@ -156,6 +165,30 @@ mod tests {
         assert_eq!(r.documents, 0);
         assert_eq!(e.reindex_path("fixtures/run1/vault/Note-1.md").unwrap().documents, 0);
         assert_eq!(e.reindex_path("notes/Alpha.md").unwrap().documents, 1, "a real note still indexes");
+        let _ = std::fs::remove_dir_all(v);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_walk_does_not_follow_links_out_of_the_vault_or_round_in_a_loop() {
+        let v = vault("links");
+        let outside = vault("links-outside");
+        std::fs::write(outside.join("Secret.md"), "# Secret\n").unwrap();
+        std::fs::create_dir_all(v.join("notes")).unwrap();
+        std::fs::write(v.join("notes/Real.md"), "# Real\n").unwrap();
+        let link = |to: &Path, at: &str| std::os::unix::fs::symlink(to, v.join(at)).unwrap();
+        link(&outside, "away");
+        link(&outside.join("Secret.md"), "notes/Leak.md");
+        link(&v, "notes/loop");
+        link(&v.join("notes/Real.md"), "Alias.md");
+
+        let mut e = crate::Engine::open(&v).unwrap();
+        e.reindex().unwrap();
+        let mut ids: Vec<String> = e.graph_snapshot().unwrap().nodes.into_iter().map(|n| n.id).collect();
+        ids.sort();
+        assert_eq!(ids, ["Alias.md", "notes/Real.md"], "no way out, no loop; an inside link still counts");
+        assert_eq!(e.reindex_path("notes/Leak.md").unwrap().documents, 0, "a single reindex refuses it too");
+        let _ = std::fs::remove_dir_all(outside);
         let _ = std::fs::remove_dir_all(v);
     }
 
