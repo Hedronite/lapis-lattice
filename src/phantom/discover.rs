@@ -7,9 +7,9 @@
 //! another tool by that name cannot shadow Phantom. Nothing here runs the
 //! binary or reads Phantom's data; absence is `None`, not an error.
 //!
-//! A found path is always absolute (G0a, G0b): relative `PATH` entries and a
-//! relative `$LAPIS_PHANTOM_BINARY` are joined to the current directory, and
-//! the parent directory is canonicalized so `..` is gone. The file name itself
+//! A found path is always absolute (G0a, G0b): relative `PATH` entries are
+//! joined to the current directory, a relative `$LAPIS_PHANTOM_BINARY` is
+//! refused, and the parent directory is canonicalized so `..` is gone. The file name itself
 //! is kept, so a `phantom-fractal` symlink is not renamed by resolving it.
 //! [`super::run`] re-checks that path immediately before it spawns (G0c).
 //!
@@ -28,6 +28,9 @@ pub const ENV: &str = "LAPIS_PHANTOM_BINARY";
 /// current directory.
 pub fn from_env() -> Option<PathBuf> {
     let configured = std::env::var_os(ENV).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if configured.as_deref().is_some_and(|p| !p.is_absolute()) {
+        eprintln!("lapis: ${ENV} must be an absolute path; ignoring it");
+    }
     discover(std::env::var_os("PATH").as_deref(), configured.as_deref())
 }
 
@@ -47,7 +50,12 @@ pub fn discover_from(
     configured: Option<&Path>,
 ) -> Option<PathBuf> {
     let Some(configured) = configured else { return on_path(cwd, path_var) };
-    let p = absolute(cwd, configured)?;
+    // A configured binary is named by its full path: a relative one would mean
+    // whatever sits under the current folder, which is not a choice anyone made.
+    if !configured.is_absolute() {
+        return None;
+    }
+    let p = configured.to_path_buf();
     if !named(&p) {
         return None;
     }

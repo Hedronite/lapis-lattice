@@ -262,6 +262,24 @@ fn a_hung_binary_is_stopped_at_the_time_limit() {
 }
 
 #[test]
+fn a_stop_takes_the_grandchildren_too() {
+    let _g = serial();
+    let dir = temp_dir("group");
+    let pid_file = dir.join("grandchild.pid");
+    let bin = script("group-stub", &format!("sleep 30 &\necho $! > '{}'\nexec sleep 30", pid_file.display()));
+    // Long enough for the stub to start its grandchild under a loaded test run.
+    let r = run::run_within(&bin, &["version"], std::time::Duration::from_secs(2));
+    assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
+    let pid = std::fs::read_to_string(&pid_file).unwrap().trim().to_string();
+    let alive = || std::process::Command::new("kill").args(["-0", &pid]).status().is_ok_and(|s| s.success());
+    let t0 = std::time::Instant::now();
+    while alive() && t0.elapsed() < std::time::Duration::from_secs(3) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(!alive(), "the backgrounded grandchild {pid} was stopped with its parent");
+}
+
+#[test]
 fn endless_output_is_cut_at_the_cap() {
     let _g = serial();
     let bin = script("flood", "while :; do printf '%s' 0123456789abcdef0123456789abcdef; done");

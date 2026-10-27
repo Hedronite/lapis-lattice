@@ -95,7 +95,12 @@ impl Board {
                 0
             };
             let cost = strokes::dash_count((seg[2] - seg[0]).hypot(seg[3] - seg[1]), on, off);
-            let dashed = *dashed && !(fan && tone == 2) && dashed_used + cost <= strokes::DASH_BUDGET;
+            // A dashed link costs its dashes against both caps before it is
+            // added, so the frame never passes the segment budget.
+            let dashed = *dashed
+                && !(fan && tone == 2)
+                && dashed_used + cost <= strokes::DASH_BUDGET
+                && used + cost <= strokes::SEGMENT_BUDGET;
             let slot = tone * 2 + usize::from(dashed);
             if dashed {
                 dashes(seg, on, off, &mut batch[slot]);
