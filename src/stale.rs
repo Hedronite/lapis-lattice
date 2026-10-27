@@ -108,10 +108,12 @@ pub fn warn(count: Option<u64>) {
 async fn list_indexed(backend: &Backend) -> Result<Indexed> {
     let mut out = Indexed::new();
     let mut offset = 0u32;
+    let mut pages = crate::paging::Pages::default();
     loop {
         let page = backend
             .documents(&ListParams { limit: PAGE, offset, include_archives: true, ..Default::default() })
             .await?;
+        pages.next(page.first().map(|d| d.path.as_str()))?;
         let n = u32::try_from(page.len()).unwrap_or(u32::MAX);
         for d in page {
             // A backend path is only trusted once it is a clean vault-relative
@@ -242,9 +244,11 @@ fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+/// The backend is recorded as a hash of its source, never the source itself:
+/// an HTTP lattice URL can carry credentials.
 #[derive(Serialize, Deserialize)]
 struct Cached {
-    source: String,
+    source: u64,
     stale: Stale,
 }
 
@@ -265,25 +269,23 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3))
 }
 
+/// Most bytes a cached check is read from.
+const CACHE_CAP: u64 = 4 << 20;
+
 fn load(file: &Path, source: &str, now: u64) -> Option<Stale> {
-    let c: Cached = serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;
-    let fresh = c.source == source && now.saturating_sub(c.stale.checked_at) < TTL.as_secs();
+    let c: Cached = serde_json::from_slice(&crate::private_file::read_capped(file, CACHE_CAP)?).ok()?;
+    let fresh =
+        c.source == fnv1a(source.as_bytes()) && now.saturating_sub(c.stale.checked_at) < TTL.as_secs();
     fresh.then_some(c.stale)
 }
 
 fn store(file: &Path, source: &str, stale: &Stale) {
-    let Some(dir) = file.parent() else { return };
-    if std::fs::create_dir_all(dir).is_err() {
-        return;
-    }
-    let Ok(body) = serde_json::to_vec(&Cached { source: source.to_string(), stale: stale.clone() }) else {
+    let Ok(body) = serde_json::to_vec(&Cached { source: fnv1a(source.as_bytes()), stale: stale.clone() })
+    else {
         return;
     };
-    // Write then rename, so a concurrent `search` never reads half a file.
-    let tmp = file.with_extension(format!("json.{}", std::process::id()));
-    if std::fs::write(&tmp, body).is_ok() && std::fs::rename(&tmp, file).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
+    // Owner-only and written whole: a concurrent `search` never reads half a file.
+    let _ = crate::private_file::write(file, &body);
 }
 
 #[cfg(test)]

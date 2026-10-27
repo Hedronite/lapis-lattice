@@ -51,7 +51,8 @@ fn chain(e: &dyn std::error::Error) -> String {
         out.push_str(&s.to_string());
         cur = s.source();
     }
-    out
+    // HTTP client errors quote the URL they tried, credentials and all.
+    crate::redact::text(&out)
 }
 
 async fn request(url: &str, body: &Value, timeout: Duration) -> Result<Value, String> {
@@ -59,14 +60,16 @@ async fn request(url: &str, body: &Value, timeout: Duration) -> Result<Value, St
         .timeout(timeout)
         .connect_timeout(timeout.min(Duration::from_secs(2)))
         .user_agent(concat!("lapis/", env!("CARGO_PKG_VERSION")))
+        // A redirect would send note text to a host nobody configured.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| chain(&e))?;
     let resp = client.post(url).json(body).send().await.map_err(|e| chain(&e))?;
     let status = resp.status();
     let text = resp.text().await.map_err(|e| chain(&e))?;
     if !status.is_success() {
-        let said: String = text.chars().take(200).collect();
-        return Err(format!("HTTP {status}: {said}"));
+        // The status only: a reply body is the server's text, not ours to echo.
+        return Err(format!("HTTP {status}"));
     }
     serde_json::from_str(&text).map_err(|e| format!("reply is not JSON: {e}"))
 }
@@ -138,7 +141,12 @@ impl Ollama {
     }
 
     fn fail(&self, e: String) -> lapis_lattice::Error {
-        lapis_lattice::Error::Io(std::io::Error::other(format!("ollama {} at {}: {e}", self.model, self.url)))
+        lapis_lattice::Error::Io(std::io::Error::other(format!(
+            "ollama {} at {}: {}",
+            self.model,
+            crate::redact::url(&self.url),
+            crate::redact::text(&e)
+        )))
     }
 
     /// One query round trip, for `doctor`.
@@ -152,8 +160,9 @@ impl Ollama {
         self.embedded.load(Ordering::Relaxed)
     }
 
-    pub fn endpoint(&self) -> &str {
-        &self.url
+    /// The embed URL as shown: no credentials, no query.
+    pub fn endpoint(&self) -> String {
+        crate::redact::url(&self.url)
     }
 }
 
@@ -245,8 +254,10 @@ pub fn resolve(cfg: &EmbedderConfig, requested: Option<&str>, vault: &Path, sett
                         Some(format!("{} did not answer ({e}); using the index's {}", cfg.model, s.model)),
                     ),
                     None => Resolved::none(format!(
-                        "ollama {} at {} did not answer: {e} - keyword search only",
-                        cfg.model, cfg.ollama_url
+                        "ollama {} at {} did not answer: {} - keyword search only",
+                        cfg.model,
+                        crate::redact::url(&cfg.ollama_url),
+                        crate::redact::text(&e.to_string())
                     )),
                 },
             }
@@ -256,8 +267,9 @@ pub fn resolve(cfg: &EmbedderConfig, requested: Option<&str>, vault: &Path, sett
             None if settle => match Ollama::probe(cfg, &cfg.model) {
                 Ok(o) => Resolved { ollama: Some(Arc::new(o)), note: None },
                 Err(e) => Resolved::none(format!(
-                    "auto: no Ollama at {} ({e}) - keyword search only",
-                    cfg.ollama_url
+                    "auto: no Ollama at {} ({}) - keyword search only",
+                    crate::redact::url(&cfg.ollama_url),
+                    crate::redact::text(&e.to_string())
                 )),
             },
             None => {

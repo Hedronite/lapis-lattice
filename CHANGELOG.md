@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Graph frame budget and logging
+
+- A dashed graph link is added only when its dashes fit the frame's segment budget as well as the dash budget, so a frame never passes the budget the renderer is sized for.
+- The desktop's stderr logger writes the home folder as `~`, so a pasted log does not name the machine's user.
+
 ### Vault containment
 
 - New files stay inside the vault. `create` (and `capture`, `daily` and the other periodic notes), `restore`, `trash` and the desktop's Save a copy used to join the path to the vault root and write, so a folder symlinked out of the vault could carry the write outside it. They now go through `notes::contained_new`. It resolves the deepest folder that already exists, refuses one outside the vault (exit 3), and refuses a target that exists in any form, a dangling symlink included. The write then lands under that folder's real path, without following the links again.
@@ -13,6 +18,14 @@
 - A note indexed before a new `.lapisignore` rule or nested vault excluded it now counts as stale (as removed) until `lapis reindex --all` drops it. Before, it stayed searchable, in the graph and over MCP with nothing flagging it. The engine's health count and the CLI's stale check (`vault info`, `search`, `doctor`) both apply the built-in index's scope; an excluded file is never reported as unindexed.
 - Paths the backend reports are trusted only as clean vault-relative paths before the stale check joins them to the disk; absolute and `..` paths are dropped. Stale paths printed by `vault info` have control characters replaced, so an escape sequence in an index path cannot drive the terminal.
 - A `.lapisignore` that is a symlink is not read, so a link at the vault root cannot carry ignore rules in from outside the vault; the skip is reported like the other loud failures, and nothing is ignored.
+
+### Private caches, bounded listings, clean URLs
+
+- The stale-index cache no longer stores the backend's address. An HTTP lattice URL can carry `user:pass@`, so the cache records a hash of it. The file is written owner-only (folder 0700, file 0600) through an exclusively created temporary file, and is read with a 4 MiB cap.
+- The desktop's graph memory gets the same treatment (owner-only, exclusive temporary file, a 32 MiB and 200,000-note read cap). It never saves under an empty vault path, and pins of notes that are no longer in the graph are dropped when it saves.
+- Paged document listings end. The stale check and the RAG gate's lattice listing stopped only on a short page, so a lattice that ignores `offset` would keep them reading forever. Both now stop with a lattice error (exit 2) when a page repeats the one before, or after 1,000 pages. In `LAPIS_RAG_GATE=hard` mode that error refuses the write, as a down lattice does.
+- Ollama addresses are shown without credentials or query strings: in errors, in `doctor`, and in `reindex --all --json`'s `embedder.url`. Errors from the HTTP client, which quote the URL they tried, are scrubbed the same way.
+- A failed embed reports the HTTP status only, not the start of the reply body. The embed client no longer follows redirects, so note text cannot be sent to a host nobody configured.
 
 ### Graph: fast frames, local drags
 
