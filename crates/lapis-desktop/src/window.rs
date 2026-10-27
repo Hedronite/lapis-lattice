@@ -460,7 +460,7 @@ impl Root {
                     self.scene.nodes[i].y = w[1];
                     // The sim holds it there and keeps the layout gently warm,
                     // so the neighbours follow and nothing else wanders.
-                    self.sim.place(i, w[0], w[1]);
+                    self.sim.drag_to(i, w[0], w[1]);
                     self.sim.set_pinned(i, true);
                     self.sim.hold_warm(true);
                 }

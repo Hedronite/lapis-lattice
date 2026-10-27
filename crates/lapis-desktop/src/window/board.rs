@@ -135,21 +135,40 @@ impl Board {
             }
         }
 
-        for p in &self.prims {
+        // Small plain discs are batched: one shape per colour instead of one quad
+        // each, because on a big vault per-quad overhead was most of the frame.
+        // They go first, so hubs and the focus still paint on top of them.
+        let mut small: Vec<(Hsla, Vec<[f32; 3]>)> = Vec::new();
+        let mut batched = vec![false; self.prims.len()];
+        for (k, p) in self.prims.iter().enumerate() {
             let Prim::Disc { x, y, r, seed, dangling, pinned, alpha, group, node } = p else { continue };
+            if *r >= SMALL_DISC_PX || *seed || *dangling || *pinned || self.focus == Some(*node) {
+                continue;
+            }
+            let a = if self.focus.is_some() { *alpha } else { *alpha * 0.85 };
+            let colour = with_alpha(self.disc_colour(*group, *node, false, false), a);
+            match small.iter_mut().find(|(c, _)| *c == colour) {
+                Some((_, discs)) => discs.push([*x, *y, *r]),
+                None => small.push((colour, vec![[*x, *y, *r]])),
+            }
+            batched[k] = true;
+        }
+        for (colour, discs) in &small {
+            if let Some(path) = hexagons_path(discs, bounds.origin) {
+                window.paint_path(path, *colour);
+            }
+        }
+
+        for (k, p) in self.prims.iter().enumerate() {
+            let Prim::Disc { x, y, r, seed, dangling, pinned, alpha, group, node } = p else { continue };
+            if batched[k] {
+                continue;
+            }
             // At rest discs are slightly translucent, so overlapping clusters show their
             // structure; a focused neighbourhood paints solid.
             let (x, y, r) = (*x, *y, *r);
             let a = if self.focus.is_some() { *alpha } else { *alpha * 0.85 };
-            // A group wins over everything: the operator asked for that colour by query.
-            let colour = match (group, self.folder.get(*node).copied().flatten()) {
-                (Some(g), _) => group_hsla(*g, theme),
-                (None, _) if *dangling => with_alpha(theme.secondary, 0.6),
-                (None, _) if *seed => theme.accent,
-                (None, Some(slot)) => folder_hsla(theme, slot),
-                // Notes outside the coloured folders recede, so the map reads first.
-                (None, None) => with_alpha(theme.foreground, 0.55),
-            };
+            let colour = self.disc_colour(*group, *node, *dangling, *seed);
             let focused = self.focus == Some(*node);
             if focused {
                 window.paint_quad(dot(at(x, y), r * 3.2, with_alpha(theme.accent, 0.10)));
@@ -176,6 +195,50 @@ impl Board {
     }
 }
 
+impl Board {
+    /// A disc's colour before its alpha. A group wins over everything: the
+    /// operator asked for that colour by query.
+    fn disc_colour(&self, group: Option<GroupColour>, node: usize, dangling: bool, seed: bool) -> Hsla {
+        let theme = &self.theme;
+        match (group, self.folder.get(node).copied().flatten()) {
+            (Some(g), _) => group_hsla(g, theme),
+            (None, _) if dangling => with_alpha(theme.secondary, 0.6),
+            (None, _) if seed => theme.accent,
+            (None, Some(slot)) => folder_hsla(theme, slot),
+            // Notes outside the coloured folders recede, so the map reads first.
+            (None, None) => with_alpha(theme.foreground, 0.55),
+        }
+    }
+}
+
+/// Discs under this radius are drawn as batched hexagons: at three pixels a
+/// hexagon and a circle are the same few pixels.
+const SMALL_DISC_PX: f32 = 3.0;
+
+/// The six corners of the hexagon inscribed in the circle at `(x, y)` of radius `r`.
+fn hexagon(x: f32, y: f32, r: f32) -> [[f32; 2]; 6] {
+    std::array::from_fn(|k| {
+        let a = k as f32 * std::f32::consts::FRAC_PI_3;
+        [x + r * a.cos(), y + r * a.sin()]
+    })
+}
+
+/// One path holding every disc in `discs` (`[x, y, r]`) as a hexagon of four
+/// triangles, the same direct geometry the hairlines use.
+fn hexagons_path(discs: &[[f32; 3]], origin: Point<Pixels>) -> Option<Path<Pixels>> {
+    let first = discs.first()?;
+    let at = |p: [f32; 2]| Point { x: origin.x + px(p[0]), y: origin.y + px(p[1]) };
+    let solid = (point(0., 1.), point(0., 1.), point(0., 1.));
+    let mut path = Path::new(at([first[0], first[1]]));
+    for d in discs {
+        let h = hexagon(d[0], d[1], d[2].max(0.5));
+        for k in 1..5 {
+            path.push_triangle((at(h[0]), at(h[k]), at(h[k + 1])), solid);
+        }
+    }
+    Some(path)
+}
+
 /// A hollow circle `width` pixels thick.
 fn ring(at: Point<Pixels>, r: f32, width: f32, colour: Hsla) -> PaintQuad {
     let mut q = dot(at, r, colour);
@@ -183,4 +246,26 @@ fn ring(at: Point<Pixels>, r: f32, width: f32, colour: Hsla) -> PaintQuad {
     q.border_widths = Edges::all(px(width));
     q.border_color = colour;
     q
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hexagon_sits_on_its_circle_and_covers_most_of_it() {
+        let h = hexagon(10.0, -4.0, 2.0);
+        for p in h {
+            assert!(((p[0] - 10.0).hypot(p[1] + 4.0) - 2.0).abs() < 1e-5, "every corner on the circle");
+        }
+        // A regular hexagon covers 3√3/2π ≈ 83% of its circle: at three pixels
+        // the difference is under a pixel of edge.
+        let area: f32 = (1..5)
+            .map(|k| {
+                let (a, b, c) = (h[0], h[k], h[k + 1]);
+                ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])).abs() / 2.0
+            })
+            .sum();
+        assert!((area / (std::f32::consts::PI * 4.0) - 0.827).abs() < 0.01);
+    }
 }
