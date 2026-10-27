@@ -82,6 +82,44 @@ pub fn file_for(dir: &Path, vault: &Path) -> PathBuf {
 const READ_CAP: u64 = 32 << 20;
 const NODE_CAP: usize = 200_000;
 
+/// A memory file nobody has written for this long belongs to a vault that was
+/// removed, renamed or long unopened. Files are named by a hash, never a path,
+/// so age is how a gone vault is told apart; reopening one only costs a cold layout.
+pub const FORGET_AFTER: std::time::Duration = std::time::Duration::from_secs(90 * 24 * 3600);
+/// A temporary file this old was left by a save that died part way.
+const TMP_FORGET_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Remove memory files in `dir` not written for `age`, and temporary files a
+/// failed save left behind. Only names this module writes are touched, and only
+/// plain files (never a link). Returns how many went.
+pub fn prune(dir: &Path, age: std::time::Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some((stem, rest)) = name.split_once('.') else { continue };
+        if stem.len() != 16 || !stem.bytes().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        let limit = match rest {
+            "json" => age,
+            _ if rest.starts_with("json.") && rest.ends_with(".tmp") => TMP_FORGET_AFTER,
+            _ => continue,
+        };
+        let Ok(meta) = entry.path().symlink_metadata() else { continue };
+        let idle = meta.modified().ok().and_then(|m| now.duration_since(m).ok());
+        if meta.is_file()
+            && idle.is_some_and(|idle| idle > limit)
+            && std::fs::remove_file(entry.path()).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 pub fn load_from(dir: &Path, vault: &Path) -> Option<Remembered> {
     let file = file_for(dir, vault);
     let meta = std::fs::metadata(&file).ok()?;
@@ -123,6 +161,7 @@ pub fn save_to(dir: &Path, vault: &Path, memory: &Remembered) -> std::io::Result
     if placed.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
+    prune(dir, FORGET_AFTER);
     placed
 }
 
@@ -140,6 +179,7 @@ pub fn save(vault: &Path, memory: &Remembered) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, SystemTime};
 
     fn dirs(name: &str) -> (PathBuf, PathBuf) {
         let base = std::env::temp_dir().join(format!("lapis-memory-{name}-{}", std::process::id()));
@@ -209,6 +249,48 @@ mod tests {
         assert!(big.fits(["a", "b"].into_iter()), "half the memory still in the graph");
         assert!(!big.fits(["a"].into_iter()), "the graph shrank to a quarter of the memory");
         assert!(!Remembered::default().fits(["a"].into_iter()));
+        let _ = std::fs::remove_dir_all(cache.parent().unwrap());
+    }
+
+    /// G-4: a vault that is gone stops leaving its note paths in the cache.
+    #[test]
+    fn a_save_forgets_long_idle_layouts_and_dead_temp_files_only() {
+        let (cache, vault) = dirs("prune");
+        save_to(&cache, &vault, &Remembered::new(Default::default(), Default::default())).unwrap();
+        let mine = file_for(&cache, &vault);
+        let old = SystemTime::now() - FORGET_AFTER - Duration::from_secs(60);
+        let place = |name: &str, when: SystemTime| {
+            let path = cache.join(name);
+            std::fs::write(&path, "{}").unwrap();
+            std::fs::File::options().write(true).open(&path).unwrap().set_modified(when).unwrap();
+            path
+        };
+        let gone = place("00000000000000aa.json", old);
+        let recent = place("00000000000000bb.json", SystemTime::now() - Duration::from_secs(86_400));
+        let dead_tmp = place("00000000000000cc.json.42.7.tmp", SystemTime::now() - Duration::from_secs(7200));
+        let live_tmp = place("00000000000000dd.json.42.8.tmp", SystemTime::now());
+        let foreign = place("notes.json", old);
+        let odd = place("not-a-hash-here!.json", old);
+        assert_eq!(prune(&cache, FORGET_AFTER), 2);
+        for p in [&gone, &dead_tmp] {
+            assert!(!p.exists(), "{} should be forgotten", p.display());
+        }
+        for p in [&mine, &recent, &live_tmp, &foreign, &odd] {
+            assert!(p.exists(), "{} should stay", p.display());
+        }
+        #[cfg(unix)]
+        {
+            let target = place("00000000000000ee.json", old);
+            let link = cache.join("00000000000000ff.json");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            std::fs::remove_file(&target).unwrap();
+            prune(&cache, FORGET_AFTER);
+            assert!(link.symlink_metadata().is_ok(), "a link is never followed or removed");
+        }
+        // A save prunes on the way out.
+        let again = place("00000000000000aa.json", old);
+        save_to(&cache, &vault, &Remembered::new(Default::default(), Default::default())).unwrap();
+        assert!(!again.exists());
         let _ = std::fs::remove_dir_all(cache.parent().unwrap());
     }
 }

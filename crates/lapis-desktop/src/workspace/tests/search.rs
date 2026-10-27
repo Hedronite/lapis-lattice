@@ -25,7 +25,7 @@ fn shown(handle: WindowHandle<Workspace>, cx: &TestAppContext) -> (Vec<String>, 
     handle
         .read_with(cx, |this, _| {
             let p = this.palette.as_ref().unwrap();
-            (p.hits.iter().map(|h| h.path.clone()).collect(), p.selected, p.refining, p.vector_note.is_some())
+            (p.hits.iter().map(|h| h.path.clone()).collect(), p.selected, p.refining, p.vector_missed)
         })
         .unwrap()
 }
@@ -81,4 +81,25 @@ fn keyword_hits_stay_when_the_vector_ranking_fails(cx: &mut TestAppContext) {
         .update(cx, |this, _, cx| this.apply_search(epoch - 1, Arm::Hybrid, page(&["x.md"], &[]), cx))
         .unwrap();
     assert_eq!(shown(handle, cx).0, ["a.md"]);
+}
+
+/// A run of queries keeps one search per arm in flight: a query entered while
+/// its arm is busy waits, a newer one replaces it, and one the reader has moved
+/// past (or closed the palette on) never starts.
+#[test]
+fn each_arm_runs_one_search_and_only_the_newest_waits() {
+    use crate::workspace::palette::Lanes;
+    let mut lanes = Lanes::default();
+    assert!(lanes.submit(Arm::Hybrid, 1, "tide"));
+    assert!(lanes.submit(Arm::Keyword, 1, "tide"), "the arms are independent");
+    assert!(!lanes.submit(Arm::Hybrid, 2, "tid"));
+    assert!(!lanes.submit(Arm::Hybrid, 3, "tides"), "a newer query replaces the waiting one");
+    assert_eq!(lanes.finish(Arm::Hybrid, Some(3)), Some((3, "tides".to_string())));
+    assert!(!lanes.submit(Arm::Hybrid, 4, "moon"), "still busy with the query it handed back");
+    assert_eq!(lanes.finish(Arm::Hybrid, Some(5)), None, "the reader moved on, so 4 never runs");
+    assert!(lanes.submit(Arm::Hybrid, 5, "moon"), "and the arm is free again");
+    assert!(!lanes.submit(Arm::Hybrid, 6, "sea"));
+    assert_eq!(lanes.finish(Arm::Hybrid, None), None, "a closed palette starts nothing");
+    assert_eq!(lanes.finish(Arm::Keyword, Some(6)), None);
+    assert!(lanes.submit(Arm::Keyword, 6, "sea"));
 }
