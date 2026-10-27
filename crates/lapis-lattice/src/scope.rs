@@ -26,14 +26,20 @@ pub struct Scope {
 }
 
 impl Scope {
-    /// Read `vault/.lapisignore`. A missing file ignores nothing. A file that
-    /// cannot be read, is over [`IGNORE_CAP`], or has lines that are not valid
-    /// patterns still lets the index run on what it could read, and says so in
-    /// [`Scope::problems`], so a broken file is never silently the same as none.
+    /// Read `vault/.lapisignore`. A missing file ignores nothing. A symlinked
+    /// file is never read, so a link at the root cannot lead out of the vault.
+    /// A file that cannot be read, is over [`IGNORE_CAP`], or has lines that are
+    /// not valid patterns still lets the index run on what it could read, and
+    /// says so in [`Scope::problems`], so a broken file is never silently the
+    /// same as none.
     pub fn load(vault: &Path) -> Self {
         let path = vault.join(IGNORE_FILE);
         let mut problems = Vec::new();
-        let Ok(meta) = std::fs::metadata(&path) else { return Self { ignore: None, problems } };
+        let Ok(meta) = std::fs::symlink_metadata(&path) else { return Self { ignore: None, problems } };
+        if meta.is_symlink() {
+            problems.push(format!("{IGNORE_FILE} is a symlink and was not read; nothing is ignored"));
+            return Self { ignore: None, problems };
+        }
         if !meta.is_file() {
             problems.push(format!("{IGNORE_FILE} is not a file; nothing is ignored"));
             return Self { ignore: None, problems };
@@ -202,6 +208,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(v);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_ignore_file_is_reported_and_not_read() {
+        let v = vault("link-ignore");
+        let outside = vault("link-ignore-outside");
+        std::fs::write(outside.join(IGNORE_FILE), "notes/\n[OUTSIDE_SECRET_7\n").unwrap();
+        std::os::unix::fs::symlink(outside.join(IGNORE_FILE), v.join(IGNORE_FILE)).unwrap();
+        let s = Scope::load(&v);
+        assert!(
+            s.problems()[0].contains("is a symlink and was not read"),
+            "{:?}",
+            s.problems()
+        );
+        assert!(s.covers(&v, "notes/a.md"), "nothing is ignored");
+        assert!(!s.ignores("notes", true), "the linked file's patterns do not apply");
+        assert!(
+            !s.problems().iter().any(|p| p.contains("OUTSIDE_SECRET_7")),
+            "the outside content never leaks: {:?}",
+            s.problems()
+        );
+        let _ = std::fs::remove_dir_all(outside);
+        let _ = std::fs::remove_dir_all(v);
+    }
     #[test]
     fn a_note_excluded_after_indexing_counts_as_stale_until_a_full_reindex() {
         let v = vault("late-ignore");
