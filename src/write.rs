@@ -352,7 +352,7 @@ pub fn create(root: &Path, opts: &CreateOpts) -> Result<Written> {
             diff: None,
         });
     }
-    let bytes = write_atomic(&root.join(&rel), &text)?;
+    let bytes = write_atomic(&notes::contained_new(root, &rel)?, &text)?;
     Ok(Written {
         path: rel,
         title,
@@ -539,10 +539,10 @@ pub fn restore(root: &Path, trashed_rel: &str, trash_bucket: &str) -> Result<Tra
         },
         _ => orig.to_string(),
     };
-    let dest = root.join(&orig);
-    if dest.exists() {
+    if root.join(&orig).exists() {
         return Err(LapisError::Usage(format!("cannot restore, target exists: {orig}")));
     }
+    let dest = notes::contained_new(root, &orig)?;
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -592,7 +592,7 @@ pub fn trash(root: &Path, rel: &str, trash_bucket: &str) -> Result<Trashed> {
         let stamp = jiff::Zoned::now().strftime("%Y%m%d-%H%M%S").to_string();
         dest_rel = format!("{bucket}/{}.{stamp}.md", rel.trim_end_matches(".md"));
     }
-    let dest = root.join(&dest_rel);
+    let dest = notes::contained_new(root, &dest_rel)?;
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -724,6 +724,34 @@ mod tests {
         assert!(t2.trashed_to.starts_with(".lapis/trash/notes/x."));
         assert_eq!(trash(&v, "notes/missing.md", ".lapis/trash").unwrap_err().exit_code(), 3);
         assert!(matches!(trash(&v, &t.trashed_to, ".lapis/trash"), Err(LapisError::Usage(_))));
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_restore_and_trash_never_write_through_a_folder_symlinked_out() {
+        let v = vault();
+        let outside = v.with_extension("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, v.join("notes/away")).unwrap();
+        let o = CreateOpts { path: Some("notes/away/".into()), ..opts("Escapee") };
+        assert_eq!(create(&v, &o).unwrap_err().exit_code(), 3, "create refuses");
+        // A trash bucket that is itself a link out of the vault.
+        std::fs::create_dir_all(v.join(".lapis")).unwrap();
+        std::os::unix::fs::symlink(&outside, v.join(".lapis/trash")).unwrap();
+        std::fs::write(v.join("notes/keep.md"), "stay").unwrap();
+        assert_eq!(trash(&v, "notes/keep.md", ".lapis/trash").unwrap_err().exit_code(), 3, "trash refuses");
+        assert!(v.join("notes/keep.md").exists(), "and the note is not moved");
+        // Restore into a folder symlinked out of the vault.
+        std::fs::remove_file(v.join(".lapis/trash")).unwrap();
+        std::fs::create_dir_all(v.join(".lapis/trash/notes/away")).unwrap();
+        std::fs::write(v.join(".lapis/trash/notes/away/back.md"), "back").unwrap();
+        assert_eq!(
+            restore(&v, ".lapis/trash/notes/away/back.md", ".lapis/trash").unwrap_err().exit_code(),
+            3
+        );
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0, "nothing landed outside the vault");
+        let _ = std::fs::remove_dir_all(&outside);
         let _ = std::fs::remove_dir_all(&v);
     }
 

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Vault containment
+
+- New files stay inside the vault. `create` (and `capture`, `daily` and the other periodic notes), `restore`, `trash` and the desktop's Save a copy used to join the path to the vault root and write, so a folder symlinked out of the vault could carry the write outside it. They now go through `notes::contained_new`. It resolves the deepest folder that already exists, refuses one outside the vault (exit 3), and refuses a target that exists in any form, a dangling symlink included. The write then lands under that folder's real path, without following the links again.
+- The index walk no longer follows links. A symlinked folder is never walked: its notes are indexed where they really live, so it cannot lead out of the vault or loop back into itself. A symlinked file is indexed only when it resolves inside the vault, and a single-path reindex checks the same.
+- Reads open the canonical file (`notes::resolve_target`), so a link swapped after the containment check cannot redirect the read. Edits still go through the lexical path, so the shared writer keeps refusing to replace a symlink.
+
 ### Private caches, bounded listings, clean URLs
 
 - The stale-index cache no longer stores the backend's address. An HTTP lattice URL can carry `user:pass@`, so the cache records a hash of it. The file is written owner-only (folder 0700, file 0600) through an exclusively created temporary file, and is read with a 4 MiB cap.

@@ -219,7 +219,12 @@ impl WorkspaceServices for Service {
                 .join(format!("{stem} (Lapis copy {number}){extension}"))
                 .to_string_lossy()
                 .into_owned();
-            match safe_file::create(&self.ctx.vault.root.join(&path), next.as_bytes()) {
+            if std::fs::symlink_metadata(self.ctx.vault.root.join(&path)).is_ok() {
+                continue;
+            }
+            let abs = notes::contained_new(&self.ctx.vault.root, &path)
+                .map_err(|e| self.vault_relative(e.to_string()))?;
+            match safe_file::create(&abs, next.as_bytes()) {
                 Ok(()) => {
                     return Ok(Self::saved(document, path, text, next));
                 }
