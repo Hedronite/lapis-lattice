@@ -6,7 +6,7 @@
 //! root takes gitignore patterns, for generated output that lives inside the
 //! vault without being notes. Search, the graph and the stale count all see the
 //! same set, because every walk and every single-path reindex asks here.
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
@@ -101,13 +101,13 @@ impl Scope {
     }
 }
 
-/// True when `abs` resolves, through any links, to a path inside `vault`. A
-/// note reached through a link out of the vault is never read into the index.
-pub fn resolves_inside(vault: &Path, abs: &Path) -> bool {
-    match (vault.canonicalize(), abs.canonicalize()) {
-        (Ok(root), Ok(target)) => target.starts_with(root),
-        _ => false,
-    }
+/// The canonical path of `abs` when it resolves, through any links, to a path
+/// inside `vault`. A note reached through a link out of the vault is never read
+/// into the index, and the reader opens this path, not `abs` again.
+pub fn resolves_inside(vault: &Path, abs: &Path) -> Option<PathBuf> {
+    let root = vault.canonicalize().ok()?;
+    let target = abs.canonicalize().ok()?;
+    target.starts_with(root).then_some(target)
 }
 
 /// True when `dir` holds its own vault markers. Never asked of the vault root.
@@ -196,6 +196,58 @@ mod tests {
         assert_eq!(e.reindex_path("notes/Leak.md").unwrap().documents, 0, "a single reindex refuses it too");
         let _ = std::fs::remove_dir_all(outside);
         let _ = std::fs::remove_dir_all(v);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_index_reads_the_path_it_checked() {
+        let v = vault("checked");
+        let outside = vault("checked-outside");
+        std::fs::write(outside.join("Secret.md"), "# Secret\n\nzebrafish\n").unwrap();
+        std::fs::create_dir_all(v.join("notes")).unwrap();
+        std::fs::write(v.join("notes/Real.md"), "# Real\n\nquokka\n").unwrap();
+        std::os::unix::fs::symlink(outside.join("Secret.md"), v.join("notes/Leak.md")).unwrap();
+        std::os::unix::fs::symlink(v.join("notes/Real.md"), v.join("Alias.md")).unwrap();
+        assert_eq!(
+            resolves_inside(&v, &v.join("Alias.md")),
+            Some(v.canonicalize().unwrap().join("notes/Real.md"))
+        );
+        assert_eq!(resolves_inside(&v, &v.join("notes/Leak.md")), None);
+
+        let mut e = crate::Engine::open(&v).unwrap();
+        e.reindex().unwrap();
+        assert!(e.search("zebrafish", 10).unwrap().is_empty(), "a full walk never reads the link out");
+        assert_eq!(e.reindex_path("notes/Leak.md").unwrap().documents, 0);
+        assert!(e.search("zebrafish", 10).unwrap().is_empty(), "nor does a single reindex");
+        let alias = |e: &crate::Engine| {
+            e.search("quokka", 10).unwrap().into_iter().filter(|h| h.path == "Alias.md").count()
+        };
+        assert_eq!(alias(&e), 1, "an inside alias is indexed once, from its target");
+        assert_eq!(e.reindex_path("Alias.md").unwrap().documents, 1);
+        assert_eq!(alias(&e), 1, "and a single reindex keeps it at one");
+        let _ = std::fs::remove_dir_all(outside);
+        let _ = std::fs::remove_dir_all(v);
+    }
+
+    #[test]
+    fn a_single_reindex_refuses_a_path_out_of_the_vault() {
+        let parent = vault("dotdot");
+        let v = parent.join("vault");
+        std::fs::create_dir_all(v.join("a")).unwrap();
+        std::fs::write(v.join("Welcome.md"), "# Welcome\n").unwrap();
+        std::fs::write(parent.join("x.md"), "# Outside\n\nplatypus\n").unwrap();
+        let mut e = crate::Engine::open(&v).unwrap();
+        e.reindex().unwrap();
+        let abs = parent.join("x.md").to_string_lossy().into_owned();
+        for rel in ["../x.md", "a/../../x.md", "a/../x.md", abs.as_str()] {
+            let err = e.reindex_path(rel).unwrap_err();
+            assert!(matches!(err, crate::Error::Usage(_)), "{rel}: {err}");
+        }
+        assert!(e.search("platypus", 10).unwrap().is_empty(), "nothing outside was read");
+        let ids: Vec<String> = e.graph_snapshot().unwrap().nodes.into_iter().map(|n| n.id).collect();
+        assert_eq!(ids, ["Welcome.md"], "and nothing inside was forgotten");
+        assert_eq!(std::fs::read_to_string(parent.join("x.md")).unwrap(), "# Outside\n\nplatypus\n");
+        let _ = std::fs::remove_dir_all(parent);
     }
 
     #[test]

@@ -10,7 +10,7 @@ use rusqlite::{Connection, params};
 use crate::graph::parse_wikilinks;
 use crate::kinds;
 use crate::scope::{self, Scope};
-use crate::{IndexReport, Result};
+use crate::{Error, IndexReport, Result};
 
 const SKIP: &[&str] = &[".lapis", ".git", ".obsidian", "node_modules", ".venv", "target"];
 
@@ -37,14 +37,15 @@ pub fn reindex(conn: &Connection, vault: &Path, progress: &mut dyn FnMut(u64, u6
     conn.execute_batch("DROP TABLE IF EXISTS chunks_fts;")?;
     crate::sqlite::create_chunks_fts(conn)?;
 
-    let files = walk(vault)?;
-    let total = files.len() as u64;
+    let found = walk_checked(vault)?;
+    let total = found.len() as u64;
     progress(0, total);
     let mut chunks_n = 0u64;
-    for (done, rel) in files.iter().enumerate() {
-        chunks_n += index_one(conn, vault, rel)?;
+    for (done, (rel, abs)) in found.iter().enumerate() {
+        chunks_n += index_one(conn, abs, rel)?;
         progress(done as u64 + 1, total);
     }
+    let files: Vec<String> = found.into_iter().map(|(rel, _)| rel).collect();
     resolve_edges(conn, &files)?;
     crate::sqlite::meta_set(conn, "graph_built", "1")?;
     let documents: u64 =
@@ -100,15 +101,19 @@ pub fn stale_count(conn: &Connection, vault: &Path) -> Result<u64> {
 /// a new note can satisfy someone else's dangling link, but nothing else is
 /// re-read or re-chunked.
 pub fn reindex_path(conn: &Connection, vault: &Path, rel: &str) -> Result<IndexReport> {
-    let rel = rel.trim_start_matches("./").replace('\\', "/");
+    let rel = clean_rel(rel)?;
     forget_path(conn, &rel)?;
     let abs = vault.join(&rel);
     let mut documents = 0u64;
     let mut chunks_n = 0u64;
     // A path the index does not cover is only forgotten: saving a file inside an
-    // ignored folder or a nested vault must not pull it back in.
-    if abs.is_file() && Scope::load(vault).covers(vault, &rel) && scope::resolves_inside(vault, &abs) {
-        chunks_n = index_one(conn, vault, &rel)?;
+    // ignored folder or a nested vault must not pull it back in. The read opens
+    // the canonical path the check returned.
+    if abs.is_file()
+        && Scope::load(vault).covers(vault, &rel)
+        && let Some(target) = scope::resolves_inside(vault, &abs)
+    {
+        chunks_n = index_one(conn, &target, &rel)?;
         documents = 1;
     }
     let files = walk(vault)?;
@@ -118,6 +123,27 @@ pub fn reindex_path(conn: &Connection, vault: &Path, rel: &str) -> Result<IndexR
         .query_row("SELECT COUNT(*) FROM edges WHERE src = ?1", params![rel], |r| r.get::<_, i64>(0))
         .map(|n| n as u64)?;
     Ok(IndexReport { documents, chunks: chunks_n, edges, embedded: 0, embed_error: None })
+}
+
+/// Normalize a vault-relative path: `/` separators, no `.` parts. A `..` part
+/// or an absolute path is a usage error, so it never reaches the index or a join.
+fn clean_rel(rel: &str) -> Result<String> {
+    let rel = rel.trim().replace('\\', "/");
+    if rel.starts_with('/') || Path::new(&rel).is_absolute() {
+        return Err(Error::Usage(format!("path must be vault-relative: {rel}")));
+    }
+    let mut parts = Vec::new();
+    for part in rel.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => return Err(Error::Usage(format!("path escapes the vault: {rel}"))),
+            p => parts.push(p),
+        }
+    }
+    if parts.is_empty() {
+        return Err(Error::Usage(format!("path names no file: {rel}")));
+    }
+    Ok(parts.join("/"))
 }
 
 /// Remove one path from documents, chunks, chunks_fts and edges. The FTS rows
@@ -153,18 +179,18 @@ fn forget_path(conn: &Connection, rel: &str) -> Result<()> {
     Ok(())
 }
 
-/// Index one file: document row, chunk rows, matching FTS rows, outbound edges.
+/// Index one file, stored as `rel` and read from `abs`, the path its caller
+/// already checked: document row, chunk rows, matching FTS rows, outbound edges.
 /// Returns the number of chunks written.
-fn index_one(conn: &Connection, vault: &Path, rel: &str) -> Result<u64> {
-    let abs = vault.join(rel);
-    let meta = fs::metadata(&abs)?;
+fn index_one(conn: &Connection, abs: &Path, rel: &str) -> Result<u64> {
+    let meta = fs::metadata(abs)?;
     let mtime = meta
         .modified()
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
-    let text = read_lossy(&abs);
+    let text = read_lossy(abs);
     let kind = kinds::kind_for(rel).unwrap_or(kinds::MARKDOWN);
     // Markdown keeps its frontmatter split; HTML and YAML each know how to give
     // up a title, metadata and heading-shaped chunks of their own.
@@ -221,14 +247,29 @@ fn index_one(conn: &Connection, vault: &Path, rel: &str) -> Result<u64> {
 }
 
 fn walk(root: &Path) -> Result<Vec<String>> {
+    Ok(walk_checked(root)?.into_iter().map(|(rel, _)| rel).collect())
+}
+
+/// Every indexable file with the path the walk checked: a linked file's
+/// canonical target, or the entry itself.
+fn walk_checked(root: &Path) -> Result<Vec<(String, PathBuf)>> {
     let mut out = Vec::new();
+    // If the root cannot be canonicalized, the raw root stands in. That fails
+    // closed: a link's canonical target never `starts_with` a lexical root, so
+    // linked files are dropped, not let through.
     let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     walk_inner(root, root, &canon, &Scope::load(root), &mut out)?;
     out.sort();
     Ok(out)
 }
 
-fn walk_inner(root: &Path, dir: &Path, canon: &Path, scope: &Scope, out: &mut Vec<String>) -> Result<()> {
+fn walk_inner(
+    root: &Path,
+    dir: &Path,
+    canon: &Path,
+    scope: &Scope,
+    out: &mut Vec<(String, PathBuf)>,
+) -> Result<()> {
     for ent in fs::read_dir(dir)? {
         let ent = ent?;
         let name = ent.file_name();
@@ -249,7 +290,7 @@ fn walk_inner(root: &Path, dir: &Path, canon: &Path, scope: &Scope, out: &mut Ve
                 && kinds::kind_for(&name).is_some()
                 && !scope.ignores(&rel, false)
             {
-                out.push(rel);
+                out.push((rel, target));
             }
             continue;
         }
@@ -264,7 +305,7 @@ fn walk_inner(root: &Path, dir: &Path, canon: &Path, scope: &Scope, out: &mut Ve
             }
             walk_inner(root, &path, canon, scope, out)?;
         } else if kinds::kind_for(&name).is_some() && !scope.ignores(&rel, false) {
-            out.push(rel);
+            out.push((rel, path));
         }
     }
     Ok(())
