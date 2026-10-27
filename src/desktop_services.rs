@@ -346,7 +346,8 @@ impl WorkspaceServices for Service {
 
     fn build_index(&self) -> Result<u64, String> {
         self.runtime.block_on(async {
-            let backend = self.ctx.backend().map_err(|e| e.to_string())?;
+            // A build is one of the moments the embedder may be settled, as in the TUI.
+            let (backend, _) = self.ctx.backend_with(None, true).map_err(|e| e.to_string())?;
             backend.reindex_all().await.map_err(|e| e.to_string())?;
             backend.health().await.map(|h| h.documents_indexed).map_err(|e| e.to_string())
         })

@@ -124,6 +124,7 @@ provider = "ollama"            # or "auto", or "none"
 model = "nomic-embed-text"
 ollama_url = "http://127.0.0.1:11434"
 timeout_ms = 5000              # per query; index_timeout_ms (120000) per batch
+mcp = "search"                 # what an MCP client may send: "search", "all" or "off"
 ```
 
 The index covers Markdown, HTML and YAML under the vault root, except `.git`, `.obsidian`, `.lapis`, `node_modules`, `.venv` and `target`. A folder that holds its own `.lapis/` or `.obsidian/` is another vault and is left to its own index. For generated output that lives inside the vault, such as test fixtures or build logs, list gitignore patterns in `.lapisignore` at the vault root. Then run `lapis reindex --all`:
@@ -135,6 +136,14 @@ evidence/runtime/
 ```
 
 If Ollama is down or slow, search falls back to BM25 and the stored vectors stay; `lapis reindex --vectors` later embeds whatever was missed. `search --embedder none` skips the vector arm for one query. `lapis doctor` reports the embedder, how many chunks have vectors, and one query round trip.
+
+Only `reindex --all`, `reindex --vectors`, `doctor` and the TUI and desktop build actions ask Ollama for a model's width or switch the index to a newly configured model. Other commands use the space the index already records, or stay keyword-only until a reindex settles it. Note text goes only to `ollama_url`, and lapis never follows a redirect from it. `doctor` and the reindex commands warn when that URL is plain `http` to a host other than this machine, because notes then cross the network unencrypted.
+
+`mcp` bounds what a `lapis mcp` client can make lapis send. With `search`, the default, its queries are embedded, but a note it writes is indexed keyword-only until `lapis reindex --vectors` embeds it. `all` embeds those notes as they are written. `off` keeps MCP keyword-only.
+
+### HTTP lattice
+
+The embedded index is the default. `lattice.mode = "http"` in config, `--lattice URL`, or `$LAPIS_LATTICE_URL` point lapis at a lattice HTTP service instead (default URL `http://127.0.0.1:8080`). `$LAPIS_LATTICE_URL` overrides the config URL, and the gate that checks notes as they are written reads the same service. If the URL carries credentials (`https://user:password@host`), they are a secret: lapis strips them from what it prints and caches, but anything that can read your environment or config file can read them. Prefer `https` for any host other than this machine.
 
 ```text
 lapis init ~/Notes

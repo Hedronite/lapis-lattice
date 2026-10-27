@@ -12,8 +12,8 @@
 //! whose vectors stay put. Opening with no embedder leaves the space alone.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use lapis_lattice::{Embedder, StoredEmbedder};
@@ -55,16 +55,35 @@ fn chain(e: &dyn std::error::Error) -> String {
     crate::redact::text(&out)
 }
 
-async fn request(url: &str, body: &Value, timeout: Duration) -> Result<Value, String> {
-    let client = reqwest::Client::builder()
-        .timeout(timeout)
-        .connect_timeout(timeout.min(Duration::from_secs(2)))
-        .user_agent(concat!("lapis/", env!("CARGO_PKG_VERSION")))
-        // A redirect would send note text to a host nobody configured.
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| chain(&e))?;
-    let resp = client.post(url).json(body).send().await.map_err(|e| chain(&e))?;
+/// One runtime and one client for every request, so a reindex reuses its
+/// connection instead of building a client, a runtime and a thread per batch.
+/// The engine calls embedders from sync code that may itself be inside a tokio
+/// runtime (CLI, MCP, desktop), where `block_on` may not run, so requests run
+/// on this runtime's own worker and the caller waits on a channel.
+fn transport() -> Result<&'static (tokio::runtime::Runtime, reqwest::Client), String> {
+    static T: OnceLock<Result<(tokio::runtime::Runtime, reqwest::Client), String>> = OnceLock::new();
+    T.get_or_init(|| {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("lapis-embed")
+            .enable_all()
+            .build()
+            .map_err(|e| format!("runtime: {e}"))?;
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(2))
+            .user_agent(concat!("lapis/", env!("CARGO_PKG_VERSION")))
+            // A redirect would send note text to a host nobody configured.
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| chain(&e))?;
+        Ok((rt, client))
+    })
+    .as_ref()
+    .map_err(Clone::clone)
+}
+
+async fn request(req: reqwest::RequestBuilder) -> Result<Value, String> {
+    let resp = req.send().await.map_err(|e| chain(&e))?;
     let status = resp.status();
     let text = resp.text().await.map_err(|e| chain(&e))?;
     if !status.is_success() {
@@ -74,21 +93,25 @@ async fn request(url: &str, body: &Value, timeout: Duration) -> Result<Value, St
     serde_json::from_str(&text).map_err(|e| format!("reply is not JSON: {e}"))
 }
 
-/// POST `body` and return the JSON reply. The engine calls embedders from sync
-/// code that may itself be inside a tokio runtime (CLI, MCP, desktop), where a
-/// blocking client may not run, so the request gets its own thread and runtime.
+/// POST `body` and return the JSON reply, through [`transport`].
 fn post(url: &str, body: &Value, timeout: Duration) -> Result<Value, String> {
-    std::thread::scope(|s| {
-        s.spawn(|| {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| format!("runtime: {e}"))?;
-            rt.block_on(request(url, body, timeout))
-        })
-        .join()
-        .unwrap_or_else(|_| Err("embedder thread panicked".into()))
-    })
+    let (rt, client) = transport()?;
+    let req = client.post(url).timeout(timeout).json(body);
+    let (tx, rx) = std::sync::mpsc::channel();
+    rt.spawn(async move {
+        let _ = tx.send(request(req).await);
+    });
+    rx.recv().unwrap_or_else(|_| Err("embedder request was dropped".into()))
+}
+
+/// Whether `url` sends text off this machine unencrypted: plain `http` to a
+/// host that is not loopback. The operator chose the URL, so this warns.
+pub fn cleartext_off_box(url: &str) -> bool {
+    let Ok(u) = reqwest::Url::parse(url) else { return false };
+    let host = u.host_str().unwrap_or("").trim_start_matches('[').trim_end_matches(']');
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    u.scheme() == "http" && !host.is_empty() && !loopback
 }
 
 /// `{"embeddings": [[..], ..]}`, one row per input, each `dim` wide (`0` = any).
@@ -164,6 +187,17 @@ impl Ollama {
     pub fn endpoint(&self) -> String {
         crate::redact::url(&self.url)
     }
+
+    /// Said by `doctor` and the reindex commands when note text would cross
+    /// the network unencrypted.
+    pub fn cleartext_warning(&self) -> Option<String> {
+        cleartext_off_box(&self.url).then(|| {
+            format!(
+                "{} is plain http to another host: note text and queries cross the network unencrypted; use https or a loopback tunnel",
+                self.endpoint()
+            )
+        })
+    }
 }
 
 impl Embedder for Ollama {
@@ -215,8 +249,9 @@ impl Resolved {
 ///
 /// `requested` is a per-call override (`search --embedder`); `none` there means
 /// this call never touches the network. `settle` is set by `reindex --all`,
-/// `doctor`, and the TUI's build action: the moments `auto` may probe Ollama.
-/// Ordinary commands read the space the index records instead of probing.
+/// `reindex --vectors`, `doctor`, and the TUI and desktop build actions: the
+/// moments `auto` or `ollama` may probe Ollama or switch to a new model.
+/// Ordinary commands, MCP among them, use the space the index records instead.
 pub fn resolve(cfg: &EmbedderConfig, requested: Option<&str>, vault: &Path, settle: bool) -> Resolved {
     let stored =
         lapis_lattice::Engine::stored_embedder(vault).filter(|s| s.provider == PROVIDER && s.dim > 0);
@@ -242,6 +277,21 @@ pub fn resolve(cfg: &EmbedderConfig, requested: Option<&str>, vault: &Path, sett
             }
             if let Some(s) = stored.as_ref().filter(|s| s.model == cfg.model) {
                 return Resolved::keep(cfg, s, None);
+            }
+            if !settle {
+                return match &stored {
+                    Some(s) => Resolved::keep(
+                        cfg,
+                        s,
+                        Some(format!(
+                            "{} is configured; `lapis reindex --all` switches to it from {}",
+                            cfg.model, s.model
+                        )),
+                    ),
+                    None => Resolved::none(
+                        "ollama: the index records no vectors yet; `lapis reindex --all` settles it",
+                    ),
+                };
             }
             match Ollama::probe(cfg, &cfg.model) {
                 Ok(o) => Resolved { ollama: Some(Arc::new(o)), note: None },
