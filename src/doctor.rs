@@ -165,6 +165,10 @@ fn embedder_check(
         state = "warn";
         notes.push(n.clone());
     }
+    if let Some(w) = o.cleartext_warning() {
+        state = "warn";
+        notes.push(w);
+    }
     match o.check() {
         Ok(t) => (state, format!("{space}, {vectors}/{chunks} chunks embedded, query {} ms", t.as_millis())),
         Err(e) => ("warn", format!("{space} did not answer ({e}) - keyword search until it does")),

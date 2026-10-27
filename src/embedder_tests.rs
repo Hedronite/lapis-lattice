@@ -249,7 +249,15 @@ async fn resolution_rules() {
     let r = resolve(&cfg(&dead, Some("auto")), None, &d, false);
     assert!(r.ollama.is_none() && r.note.unwrap().contains("reindex --all"), "auto does not probe here");
     let r = resolve(&cfg(&dead, Some("ollama")), None, &d, false);
+    assert!(
+        r.ollama.is_none() && r.note.unwrap().contains("reindex --all"),
+        "ollama does not probe here either"
+    );
+    let r = resolve(&cfg(&dead, Some("ollama")), None, &d, true);
     assert!(r.ollama.is_none() && r.note.unwrap().contains("did not answer"));
+    let live = fake(8, false);
+    assert!(resolve(&cfg(&live.url, Some("ollama")), None, &d, false).ollama.is_none());
+    assert_eq!(live.requests(), 0, "an ordinary command sends nothing to learn a width");
     assert!(resolve(&cfg(&dead, Some("onnx")), None, &d, true).note.unwrap().contains("onnx"));
     let f = fake(8, false);
     assert!(resolve(&cfg(&f.url, Some("auto")), None, &d, true).ollama.is_some(), "settle may probe");
@@ -267,9 +275,11 @@ async fn resolution_rules() {
     // A new model that does not answer keeps the old space rather than wiping it.
     let mut other = cfg(&dead, Some("ollama"));
     other.model = "other-model".into();
-    let r = resolve(&other, None, &d, false);
-    assert_eq!(r.ollama.unwrap().model(), MODEL);
-    assert!(r.note.unwrap().contains("other-model"));
+    for settle in [false, true] {
+        let r = resolve(&other, None, &d, settle);
+        assert_eq!(r.ollama.unwrap().model(), MODEL);
+        assert!(r.note.unwrap().contains("other-model"));
+    }
 
     let c = ctx(&d, cfg(&dead, Some("none")));
     assert!(resolve(&cfg(&dead, Some("none")), None, &d, true).ollama.is_none());
@@ -299,5 +309,67 @@ async fn reindex_vectors_resumes_after_an_outage() {
 
     let none = ctx(&d, cfg(&dead_url(), Some("none")));
     assert!(crate::reindex_all::vectors(&none).is_err(), "no embedder is a usage error, not a silent zero");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// O-1: plain http leaves the machine unencrypted unless it stays on loopback.
+#[test]
+fn cleartext_is_plain_http_off_loopback() {
+    use crate::embedder::cleartext_off_box as off;
+    for url in ["http://10.0.0.5:11434", "http://ollama.example:11434", "http://u:p@192.0.2.1"] {
+        assert!(off(url), "{url}");
+    }
+    for url in [
+        "http://127.0.0.1:11434",
+        "http://localhost:11434",
+        "http://[::1]:11434",
+        "http://127.9.9.9",
+        "https://ollama.example",
+        "not a url",
+    ] {
+        assert!(!off(url), "{url}");
+    }
+}
+
+/// O-3: what an MCP client can make lapis send, by `[embedder] mcp`.
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_writes_reach_the_embedder_only_when_allowed() {
+    use crate::config::McpEmbed;
+    let d = vault();
+    let f = fake(8, false);
+    let chunks = build(&d, &f).await;
+    let with = |mcp| {
+        let mut e = cfg(&f.url, Some("ollama"));
+        e.mcp = mcp;
+        ctx(&d, e).mcp_split()
+    };
+
+    let (reads, writes) = with(McpEmbed::default());
+    assert!(
+        reads.backend_with(None, false).unwrap().1.unwrap().ollama.is_some(),
+        "searches still embed the query"
+    );
+    std::fs::write(d.join("Welcome.md"), "# Welcome\n\nThe quokka smiles.\n").unwrap();
+    let before = f.requests();
+    writes.reindex("Welcome.md").await.unwrap();
+    assert_eq!(f.requests(), before, "a client write sends no note text");
+    let (have, total) = vectors(&reads).await;
+    assert!(have < total && total > 0, "the written note waits for reindex --vectors: {have}/{total}");
+    crate::reindex_all::vectors(&reads).unwrap();
+    assert_eq!(vectors(&reads).await, (total, total));
+
+    let (_, writes) = with(McpEmbed::All);
+    let before = f.requests();
+    writes.reindex("Welcome.md").await.unwrap();
+    assert!(f.requests() > before, "all embeds what the client writes");
+
+    let (reads, writes) = with(McpEmbed::Off);
+    for c in [&reads, &writes] {
+        assert!(
+            c.backend_with(None, false).unwrap().1.unwrap().ollama.is_none(),
+            "off never reaches the embedder"
+        );
+    }
+    assert!(chunks > 0);
     let _ = std::fs::remove_dir_all(&d);
 }

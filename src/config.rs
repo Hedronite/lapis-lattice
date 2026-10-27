@@ -62,6 +62,24 @@ pub struct EmbedderConfig {
     /// Per batch of chunks during indexing, which includes a cold model load.
     #[serde(default = "default_embed_index_timeout")]
     pub index_timeout_ms: u64,
+    /// What a `lapis mcp` client may make lapis send to the embedder.
+    #[serde(default)]
+    pub mcp: McpEmbed,
+}
+
+/// `[embedder] mcp`. An MCP client is another program; this bounds what it can
+/// put on the network through lapis.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpEmbed {
+    /// Its search queries are embedded. A note it writes is indexed keyword-only,
+    /// and `lapis reindex --vectors` embeds it later.
+    #[default]
+    Search,
+    /// The notes it writes are embedded too.
+    All,
+    /// MCP never reaches the embedder; its searches are keyword-only.
+    Off,
 }
 
 fn default_embed_model() -> String {
@@ -86,6 +104,7 @@ impl Default for EmbedderConfig {
             dim: None,
             timeout_ms: default_embed_timeout(),
             index_timeout_ms: default_embed_index_timeout(),
+            mcp: McpEmbed::default(),
         }
     }
 }
@@ -620,6 +639,13 @@ mod tests {
         assert_eq!(c.embedder.timeout_ms, 900);
         assert_eq!(c.embedder.index_timeout_ms, 120_000);
         assert_eq!(c.embedder.dim, None);
+        assert_eq!(c.embedder.mcp, McpEmbed::Search, "MCP writes stay off the network by default");
+        let c: Config = toml::from_str("[embedder]\nmcp = \"off\"\n").unwrap();
+        assert_eq!(c.embedder.mcp, McpEmbed::Off);
+        assert!(
+            toml::from_str::<Config>("[embedder]\nmcp = \"some\"\n").is_err(),
+            "a typo is an error, not a default"
+        );
     }
 
     #[test]

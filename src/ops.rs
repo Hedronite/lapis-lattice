@@ -64,6 +64,23 @@ impl Ctx {
         r
     }
 
+    /// Split into what an MCP server reads through and what its writes reindex
+    /// through, by `[embedder] mcp`. `provider = "none"` opens the index without
+    /// an embedder: nothing is sent, and the vectors already stored stay put.
+    pub fn mcp_split(mut self) -> (Ctx, Ctx) {
+        use crate::config::McpEmbed;
+        let keyword_only = |c: &mut Ctx| c.cfg.embedder.provider = Some("none".into());
+        let policy = self.cfg.embedder.mcp;
+        if policy == McpEmbed::Off {
+            keyword_only(&mut self);
+        }
+        let mut writes = self.clone();
+        if policy != McpEmbed::All {
+            keyword_only(&mut writes);
+        }
+        (self, writes)
+    }
+
     pub fn inbox(&self) -> Result<String> {
         Ok(overlay::load(&self.vault.root)?.0.buckets.inbox)
     }

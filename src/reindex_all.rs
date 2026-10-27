@@ -31,6 +31,10 @@ fn tick(o: &Ollama, walked: &AtomicBool, done: &AtomicBool) {
 pub fn run(ctx: &Ctx) -> Result<()> {
     let (backend, resolved) = ctx.backend_with(None, true)?;
     let ollama = resolved.as_ref().and_then(|r| r.ollama.clone());
+    let cleartext = ollama.as_ref().and_then(|o| o.cleartext_warning());
+    if let (false, Some(w)) = (ctx.json, &cleartext) {
+        eprintln!("lapis: warning: {w}");
+    }
     let live = !ctx.json && std::io::stderr().is_terminal();
     let t0 = Instant::now();
     let mut shown = t0;
@@ -74,6 +78,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
             "embedError": report.embed_error,
             "embedder": embedder,
             "embedderNote": note,
+            "embedderWarning": cleartext,
             "elapsedMs": elapsed_ms,
         }));
     }
@@ -101,6 +106,9 @@ pub fn vectors(ctx: &Ctx) -> Result<()> {
         let why = resolved.and_then(|r| r.note).unwrap_or_else(|| "the HTTP service owns its vectors".into());
         return Err(LapisError::Usage(format!("no embedder to fill vectors with: {why}")));
     };
+    if let (false, Some(w)) = (ctx.json, o.cleartext_warning()) {
+        eprintln!("lapis: warning: {w}");
+    }
     let live = !ctx.json && std::io::stderr().is_terminal();
     let t0 = Instant::now();
     let (walked, done) = (AtomicBool::new(true), AtomicBool::new(false));

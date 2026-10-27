@@ -52,6 +52,9 @@ pub const NOTE_URI_PREFIX: &str = "lapis://note/";
 #[derive(Clone)]
 pub struct LapisServer {
     ctx: Arc<Ctx>,
+    /// What a write reindexes through: `[embedder] mcp` decides whether the
+    /// note's text may go to the embedder.
+    writes: Arc<Ctx>,
     router: ToolRouter<LapisServer>,
     #[cfg(feature = "tome")]
     pub(crate) tome: Option<Arc<dyn tome_eval::contract::TomeApi>>,
@@ -439,8 +442,10 @@ impl LapisServer {
         let router = Self::tool_router();
         #[cfg(feature = "tome")]
         let (router, tome) = crate::mcp_tome::extend(router, &ctx.vault.root);
+        let (ctx, writes) = ctx.mcp_split();
         Self {
             ctx: Arc::new(ctx),
+            writes: Arc::new(writes),
             router,
             #[cfg(feature = "tome")]
             tome,
@@ -697,7 +702,7 @@ impl LapisServer {
             dry_run: a.dry_run.unwrap_or(false),
         };
         let w = write::create(&self.ctx.vault.root, &opts).map_err(fail)?;
-        ok_at(t0, &ops::kick(&self.ctx, w, false).await.map_err(fail)?)
+        ok_at(t0, &ops::kick(&self.writes, w, false).await.map_err(fail)?)
     }
 
     #[tool(
@@ -710,7 +715,7 @@ impl LapisServer {
         let t0 = Instant::now();
         let g = guard(a.dry_run, a.if_mtime, a.if_hash);
         let w = write::append_with(&self.ctx.vault.root, &a.path, &a.text, &g).map_err(fail)?;
-        ok_at(t0, &ops::kick(&self.ctx, w, false).await.map_err(fail)?)
+        ok_at(t0, &ops::kick(&self.writes, w, false).await.map_err(fail)?)
     }
 
     #[tool(
@@ -724,7 +729,7 @@ impl LapisServer {
         let op = edit_op(&a);
         let g = guard(a.dry_run, a.if_mtime, a.if_hash);
         let w = crate::edit::edit(&self.ctx.vault.root, &a.path, &op, &g).map_err(fail)?;
-        ok_at(t0, &ops::kick(&self.ctx, w, false).await.map_err(fail)?)
+        ok_at(t0, &ops::kick(&self.writes, w, false).await.map_err(fail)?)
     }
 
     #[tool(
@@ -761,7 +766,7 @@ impl LapisServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let t0 = Instant::now();
         let g = guard(a.dry_run, a.if_mtime, a.if_hash);
-        ok_at(t0, &ops::toggle_task_with(&self.ctx, &a.id, false, &g).await.map_err(fail)?)
+        ok_at(t0, &ops::toggle_task_with(&self.writes, &a.id, false, &g).await.map_err(fail)?)
     }
 }
 
