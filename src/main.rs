@@ -304,8 +304,10 @@ async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
 // ----------------------------------------------------------------------- read
 
 /// `lapis check-note`: GateResult JSON on stdout. Never writes, never blocks a read.
+/// Reads the canonical file the containment check returned, so a link swapped
+/// after the check cannot redirect the read.
 fn check_note(ctx: &Ctx, args: cli::CheckNoteArgs) -> Result<()> {
-    let (rel, abs) = notes::resolve(&ctx.vault.root, &args.path)?;
+    let (rel, abs) = notes::resolve_target(&ctx.vault.root, &args.path)?;
     let bytes = std::fs::read(&abs)?;
     let text = String::from_utf8(bytes).map_err(|_| LapisError::Usage(format!("{rel}: not UTF-8 text")))?;
     let review = rag_gate::review(&ctx.vault.root, &rel, &text);
