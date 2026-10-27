@@ -1,4 +1,5 @@
-//! G2 and G0a-G0b: discovery finds `phantom-fractal` only, stores it absolute,
+//! G2, G0a and G4.2: discovery finds `phantom-fractal` only, stores it absolute,
+//! refuses a relative configured path,
 //! absence is quiet, and no Phantom crate is linked. No Phantom install is
 //! needed; binaries here are stub files.
 
@@ -169,24 +170,28 @@ fn empty_path_entry_is_still_skipped() {
     }
 }
 
-/// G0b: a relative `$LAPIS_PHANTOM_BINARY` is made absolute before the name
-/// and executable checks; another name is still rejected.
+/// G4.2: a relative `$LAPIS_PHANTOM_BINARY` is refused. A valid stub sits at
+/// that path under the current directory and another is on `PATH`; neither is
+/// returned.
 #[test]
-fn relative_configured_path_is_stored_absolute() {
+fn relative_configured_path_is_refused() {
     let _g = serial();
     let cwd = temp_dir("rel-cfg");
+    let other = temp_dir("rel-cfg-path");
     std::fs::create_dir_all(cwd.join("bin")).unwrap();
     stub(&cwd.join("bin"), discover::BINARY);
-    stub(&cwd.join("bin"), "fract");
+    stub(&other, discover::BINARY);
+    let path = path_of(&[&other]);
+    for rel in ["bin", "./bin", "bin/../bin"] {
+        let rel = PathBuf::from(rel).join(discover::BINARY);
+        assert!(cwd.join(&rel).is_file(), "the stub is really there");
+        assert_eq!(discover::discover_from(Some(&cwd), Some(&path), Some(&rel)), None, "{}", rel.display());
+        assert_eq!(discover::discover_from(None, Some(&path), Some(&rel)), None, "{}", rel.display());
+    }
+    // The same stub named absolutely is found, so only the relative form is refused.
+    let abs = cwd.join("bin").join(discover::BINARY);
     let want = found(&cwd.join("bin"), discover::BINARY);
-    let rel = PathBuf::from("bin").join(discover::BINARY);
-    let got = discover::discover_from(Some(&cwd), None, Some(&rel)).unwrap();
-    assert!(got.is_absolute());
-    assert_eq!(got, want);
-    let up = PathBuf::from("bin/../bin").join(discover::BINARY);
-    assert_eq!(discover::discover_from(Some(&cwd), None, Some(&up)), Some(want));
-    let fract = PathBuf::from("bin").join("fract");
-    assert_eq!(discover::discover_from(Some(&cwd), None, Some(&fract)), None);
+    assert_eq!(discover::discover_from(Some(&cwd), Some(&path), Some(&abs)), Some(want));
 }
 
 /// `lapis desktop --check` with nothing on `PATH` but `fract`: exit 0 and a
