@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Graph clusters
+
+- A hub keeps its notes around it, and connected notes form visible clusters. On a 13,000-note vault the median distance from a busy note to its own notes fell from more than half the graph's radius to about a sixth. Among the notes nearest a hub, the share that are its own rose from about 1% to about 40%.
+- The cause was the start, not the forces. Notes started on a golden-angle spiral as wide as the finished graph, in path order, so linked notes began on opposite sides of a big vault and could never travel far enough to meet before the layout cooled. They now start in link order (breadth-first from the busiest note) along an evenly spaced spiral no wider than six link lengths, and the speed cap rose from 40 to 200 so a compact start can open out. A small graph still starts at its natural size, and a chain starts unfolded.
+- Repulsion runs across all cores: 13,000 notes settle in about 1.3 s. Below a twentieth of a link length, rather than half, two notes count as that close, so close neighbours keep pushing apart. The separation gap rose from 0.25 to 0.35 of a link length. A layout is now the same every run: the separation pass used to visit a hash map in a different order each time.
+- Each linked pair is now one spring. A→B and B→A, or a link written twice, used to count twice.
+- Remembered maps from the previous layout are not reopened, because the memory file version changed. The next open lays the vault out afresh.
+
 ### Graph memory
 
 - The whole-vault graph remembers its shape. When the layout comes to rest, after it opens or once a dragged note settles, every note's position and every pin is saved per vault in `$XDG_CACHE_HOME/lapis/graph/` (else `~/.cache/lapis/graph/`). The cache never goes in the vault.

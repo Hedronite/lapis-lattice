@@ -18,6 +18,8 @@ image = { version = "0.25", optional = true, default-features = false }
 # GPUI reports dropped frames through `log`; the shell prints its warnings.
 log = { version = "0.4", optional = true }
 pulldown-cmark = { version = "0.13", default-features = false }
+# The layout's repulsion runs across cores.
+rayon = "1.12"
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2"
 serde = { version = "1", features = ["derive"] }

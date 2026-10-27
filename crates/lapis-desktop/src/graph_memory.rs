@@ -8,8 +8,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// Bumped when the file shape changes; any other version is ignored.
-pub const VERSION: u32 = 1;
+/// Bumped when the file shape or the layout physics changes; any other version
+/// is ignored, so a map laid out by older forces is not reopened. 2: compact,
+/// link-ordered start, so hubs gather their notes.
+pub const VERSION: u32 = 2;
 
 /// The layout starts warm only when the memory and the graph mostly agree: at
 /// least this share of the graph's notes is remembered, and at least this

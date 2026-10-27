@@ -32,7 +32,7 @@ pub struct Laid {
 
 /// Minimum gap between two discs after the settle, as a share of the link rest
 /// length, and how many relaxation passes enforce it.
-pub const SEPARATION: f32 = 0.25;
+pub const SEPARATION: f32 = 0.35;
 pub const SEPARATION_PASSES: usize = 60;
 
 /// Depth range the local-mode slider offers.
