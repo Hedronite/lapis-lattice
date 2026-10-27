@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Graph memory
+
+- The whole-vault graph remembers its shape. When the layout comes to rest, after it opens or once a dragged note settles, every note's position and every pin is saved per vault in `$XDG_CACHE_HOME/lapis/graph/` (else `~/.cache/lapis/graph/`). The cache never goes in the vault.
+- The next open starts from that memory when the two mostly agree: at least half the graph is remembered and at least half the memory is still in the graph, so a vault that lost half its notes gets a fresh map. Known notes start where they were, a new note starts beside its remembered neighbours, and the layout begins cool, so the map opens in its familiar shape and only the seams settle. Pins dropped in an earlier session come back.
+- Saving a note no longer re-runs the whole layout. The reload starts warm from the map on screen, so the graph adjusts in place.
+- A missing, damaged or foreign-version memory file only means a fresh layout. Local and ring views keep their own layouts and are not remembered.
+
 ### What the index covers
 
 - The embedded index skips nested vaults: a folder below the vault root that holds its own `.lapis/` or `.obsidian/` is left to its own index. Test fixtures that build sample vaults inside a real vault no longer show up in search and the graph.

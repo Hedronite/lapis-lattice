@@ -69,6 +69,9 @@ impl Render for Root {
         // The graph keeps moving until it settles; each frame asks for the
         // next one, and a graph at rest stops asking.
         let moving = self.visible && if self.loading { self.unfold() } else { self.advance() };
+        if !moving && !self.loading && self.layout_dirty {
+            self.remember(cx);
+        }
         if moving {
             self.meter.frame();
             window.request_animation_frame();
@@ -344,6 +347,7 @@ impl Root {
                     cx.listener(|this, _, _, cx| {
                         this.pins.clear();
                         this.sim.unpin_all();
+                        this.layout_dirty = true;
                         cx.notify();
                     }),
                 ),

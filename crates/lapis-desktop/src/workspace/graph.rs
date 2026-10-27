@@ -24,7 +24,12 @@ impl Workspace {
         let seed = self.tabs.get(self.active).map(|t| t.document.path.clone());
         if self.graph.is_none() {
             let graph = cx.new(|cx| {
-                crate::window::Root::new(Default::default(), Some(self.services.clone()), seed.clone(), cx)
+                crate::window::Root::new(
+                    self.vault_root.clone(),
+                    Some(self.services.clone()),
+                    seed.clone(),
+                    cx,
+                )
             });
             self.graph_events = Some(cx.subscribe_in(
                 &graph,

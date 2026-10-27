@@ -173,8 +173,36 @@ pub fn lay_out_streaming(
     ticks: usize,
     publish: &mut dyn FnMut(Unfold),
 ) -> Laid {
+    lay_out_remembered(snap, seed, ticks, None, publish)
+}
+
+/// Heat a remembered layout starts with: enough to settle new notes and the
+/// seams around them, far too little to reshuffle the map.
+pub const WARM_ALPHA: f32 = 0.05;
+
+/// Ticks a remembered layout cools over. It starts near rest, so it does not
+/// need the cold schedule's six hundred.
+pub const WARM_TICKS: f32 = 150.0;
+
+/// [`lay_out_streaming`], seeded from `memory` when it knows where most of these
+/// notes sat. Known notes start where they were; a new note starts beside its
+/// placed neighbours. The sim then starts cool ([`WARM_ALPHA`]), so the graph
+/// opens in its familiar shape and only the seams move.
+pub fn lay_out_remembered(
+    snap: &GraphSnapshot,
+    seed: &str,
+    ticks: usize,
+    memory: Option<&crate::graph_memory::Remembered>,
+    publish: &mut dyn FnMut(Unfold),
+) -> Laid {
     let mut sim = ForceSim::from_snapshot(snap, ForceParams::default());
     let gap = sim.params.link_distance * SEPARATION;
+    let warm = memory.filter(|m| m.fits(snap.nodes.iter().map(|n| n.id.as_str())));
+    let cold_decay = sim.params.alpha_decay;
+    if let Some(memory) = warm {
+        seed_from(&mut sim, snap, memory);
+        sim.params.alpha_decay = 1.0 - (sim.params.alpha_min / WARM_ALPHA).powf(1.0 / WARM_TICKS);
+    }
     // Isolated notes feel no force, so the belt can follow the core as it grows
     // instead of waiting in the middle and jumping out at the end.
     sim.place_isolates(gap);
@@ -196,7 +224,41 @@ pub fn lay_out_streaming(
     sim.separate(gap, SEPARATION_PASSES);
     sim.place_isolates(gap);
     sync_positions(&mut scene, &sim);
+    // A drag after a warm open cools on the usual schedule.
+    sim.params.alpha_decay = cold_decay;
     Laid { scene, sim }
+}
+
+/// Put every remembered note where it was and every new one beside the mean of
+/// its remembered neighbours, nudged apart so two newcomers never coincide.
+/// A new note with no remembered neighbour keeps its spiral seat.
+fn seed_from(sim: &mut ForceSim, snap: &GraphSnapshot, memory: &crate::graph_memory::Remembered) {
+    let index: std::collections::HashMap<&str, usize> =
+        snap.nodes.iter().enumerate().map(|(i, n)| (n.id.as_str(), i)).collect();
+    let known: Vec<Option<[f32; 2]>> = snap.nodes.iter().map(|n| memory.nodes.get(&n.id).copied()).collect();
+    let mut near: Vec<([f32; 2], u32)> = vec![([0.0; 2], 0); snap.nodes.len()];
+    for e in &snap.edges {
+        let (Some(&a), Some(&b)) = (index.get(e.src.as_str()), index.get(e.dst.as_str())) else { continue };
+        for (from, to) in [(a, b), (b, a)] {
+            if let (None, Some(p)) = (known[to], known[from]) {
+                near[to].0 = [near[to].0[0] + p[0], near[to].0[1] + p[1]];
+                near[to].1 += 1;
+            }
+        }
+    }
+    let nudge = sim.params.link_distance * 0.3;
+    for (i, slot) in known.iter().enumerate() {
+        match (slot, near[i]) {
+            (Some(p), _) => sim.place(i, p[0], p[1]),
+            (None, (sum, n)) if n > 0 => {
+                let angle = i as f32 * 2.399_963;
+                let c = [sum[0] / n as f32, sum[1] / n as f32];
+                sim.place(i, c[0] + nudge * angle.cos(), c[1] + nudge * angle.sin());
+            }
+            (None, _) => {}
+        }
+    }
+    sim.cool_to(WARM_ALPHA);
 }
 
 /// The drawable scene for `snap`, with nodes at `xy`.
@@ -445,6 +507,50 @@ mod tests {
         let plain = lay_out(&snap, "Welcome.md", SETTLE_TICKS);
         let xy = |s: &Scene| s.nodes.iter().map(|n| [n.x, n.y]).collect::<Vec<_>>();
         assert_eq!(xy(&laid.scene), xy(&plain.scene), "publishing does not change the result");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_remembered_map_opens_in_its_shape_and_a_new_note_joins_its_neighbour() {
+        let d = vault();
+        let snap = snapshot_for(&d).unwrap();
+        let first = lay_out(&snap, "Welcome.md", SETTLE_TICKS);
+        let nodes: std::collections::HashMap<String, [f32; 2]> =
+            first.scene.nodes.iter().map(|n| (n.id.clone(), [n.x, n.y])).collect();
+        let memory = crate::graph_memory::Remembered::new(nodes.clone(), Default::default());
+
+        let again = lay_out_remembered(&snap, "Welcome.md", SETTLE_TICKS, Some(&memory), &mut |_| {});
+        let link = ForceParams::default().link_distance;
+        for n in &again.scene.nodes {
+            let was = nodes[&n.id];
+            let moved = (n.x - was[0]).hypot(n.y - was[1]);
+            assert!(moved < link * 0.5, "{} moved {moved} on a warm start", n.id);
+        }
+
+        // Forget one linked note: it starts beside the neighbours that are remembered.
+        let mut partial = memory.clone();
+        partial.nodes.remove("notes/Beta.md");
+        let mut first_frame = None;
+        lay_out_remembered(&snap, "Welcome.md", SETTLE_TICKS, Some(&partial), &mut |u| {
+            if let Unfold::Scene(s) = u {
+                first_frame.get_or_insert(s);
+            }
+        });
+        let seeded = first_frame.unwrap();
+        let at = |id: &str| seeded.nodes.iter().find(|n| n.id == id).map(|n| [n.x, n.y]).unwrap();
+        let (beta, alpha) = (at("notes/Beta.md"), at("notes/Alpha.md"));
+        assert!(
+            (beta[0] - alpha[0]).hypot(beta[1] - alpha[1]) < link * 2.0,
+            "Beta starts near Alpha, its link"
+        );
+
+        // Too little memory is a cold start: the spiral, not the old map.
+        let mut thin = memory.clone();
+        thin.nodes.retain(|id, _| id == "Welcome.md");
+        let cold = lay_out_remembered(&snap, "Welcome.md", SETTLE_TICKS, Some(&thin), &mut |_| {});
+        let plain = lay_out(&snap, "Welcome.md", SETTLE_TICKS);
+        let xy = |s: &Scene| s.nodes.iter().map(|n| [n.x, n.y]).collect::<Vec<_>>();
+        assert_eq!(xy(&cold.scene), xy(&plain.scene));
         let _ = std::fs::remove_dir_all(&d);
     }
 
