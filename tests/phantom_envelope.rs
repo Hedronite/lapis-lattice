@@ -261,6 +261,32 @@ fn a_hung_binary_is_stopped_at_the_time_limit() {
     assert!(t0.elapsed() < std::time::Duration::from_secs(5), "stopped near the limit, not at sleep's end");
 }
 
+/// G4.1: a stub that backgrounds a long `sleep` holding the pipes, records its
+/// pid, and hangs. The call times out near the limit, and stopping the child
+/// takes the grandchild with it: its process group is killed.
+#[test]
+fn a_timeout_stops_the_grandchild_too() {
+    let _g = serial();
+    let dir = temp_dir("grandchild");
+    let pidfile = dir.join("sleep.pid");
+    let bin = script("grandchild", &format!("sleep 30 &\necho $! > '{}'\nwait", pidfile.display()));
+    let t0 = std::time::Instant::now();
+    let r = run::run_within(&bin, &["version"], std::time::Duration::from_secs(1));
+    assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
+    assert!(t0.elapsed() < std::time::Duration::from_secs(5), "stopped near the limit, not at sleep's end");
+    let pid: libc::pid_t = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+    // Killed, then reaped by init; give the reaper a moment.
+    let gone = (0..200).any(|_| {
+        // SAFETY: signal 0 only asks whether the pid exists.
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        if alive {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        !alive
+    });
+    assert!(gone, "grandchild {pid} outlived the stopped call");
+}
+
 #[test]
 fn endless_output_is_cut_at_the_cap() {
     let _g = serial();

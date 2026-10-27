@@ -8,6 +8,8 @@
 //! The child is bounded: it sees only an allowlisted environment, its output is
 //! read up to a byte cap, and it is killed if it outlives [`TIMEOUT`]. A slow or
 //! noisy binary costs Lapis a typed error, never a hang or an unbounded buffer.
+//! On unix the child leads its own process group, and stopping it kills the
+//! whole group, so nothing it started outlives it holding the pipes.
 
 use std::ffi::OsStr;
 use std::io::Read;
@@ -127,6 +129,8 @@ pub fn run_within(path: &Path, args: &[&str], timeout: Duration) -> Result<Reply
         .stderr(Stdio::piped())
         .env_clear()
         .envs(std::env::vars_os().filter(|(k, _)| keep_env(k)));
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let mut child = command.spawn().map_err(|source| RunError::Spawn { path: path.to_path_buf(), source })?;
     let (tx, rx) = mpsc::channel();
     if let Some(out) = child.stdout.take() {
@@ -201,8 +205,15 @@ fn drain(stream: &'static str, from: impl Read + Send + 'static, cap: usize, tx:
     });
 }
 
-/// Kill and reap, so a stopped child leaves no zombie behind.
+/// Kill the child's process group, then reap the child, so neither a
+/// grandchild holding the pipes nor a zombie is left behind.
 fn stop(child: &mut Child) {
+    #[cfg(unix)]
+    if let Ok(group) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: no pointers are passed. The child is not reaped yet, so its
+        // pid is still the id of the group `process_group(0)` gave it.
+        unsafe { libc::killpg(group, libc::SIGKILL) };
+    }
     let _ = child.kill();
     let _ = child.wait();
 }

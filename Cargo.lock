@@ -4191,6 +4191,7 @@ dependencies = [
  "jiff",
  "lapis-desktop",
  "lapis-lattice",
+ "libc",
  "notify 8.2.0",
  "pdf-extract",
  "pdfium-render",
