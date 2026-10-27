@@ -54,6 +54,10 @@ toml = "1"
 unicode-width = "0.2"
 yaml_serde = "0.10"
 
+# `killpg` for the Phantom child's process group; already in the lock.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.189"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

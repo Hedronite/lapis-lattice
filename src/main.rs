@@ -24,9 +24,12 @@ mod mcp_tome;
 mod notes;
 mod ops;
 mod overlay;
+mod paging;
 mod pdf_render;
 mod phantom;
+mod private_file;
 mod rag_gate;
+mod redact;
 mod reindex_all;
 mod resolve;
 mod safe_file;
@@ -228,7 +231,7 @@ async fn vault_info(ctx: &Ctx) -> Result<()> {
                 s.count, s.changed, s.unindexed, s.removed
             );
             for p in &s.paths {
-                println!("         {p}");
+                println!("         {}", stale::printable(p));
             }
         }
     }
