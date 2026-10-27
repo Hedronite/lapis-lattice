@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Graph: fast frames, local drags
+
+- Small notes draw as batched hexagons, one shape per colour, instead of one disc each. On a 13,000-note vault, per-disc overhead was most of every frame. The board's draw time at rest fell from about 23 ms to about 5 ms, and a fresh layout unfolds at about 55 fps where it ran at 7–10. Hubs, pinned, focused and unresolved notes still draw as real circles, on top.
+- A drag moves its neighbourhood and nothing else. Dragging or releasing a note frees that note and the notes up to two links from it (at most 1,500) until the layout rests. The rest of the map stays still, so a drag no longer lets the whole graph keep reorganising toward its true resting shape. Physics ticks during a drag fell to about 1 ms.
+- The speed cap cools with the layout: a fresh layout opens out at full speed, and a drag or a warm start moves at most a fifth of it.
+
 ### Graph clusters
 
 - A hub keeps its notes around it, and connected notes form visible clusters. On a 13,000-note vault the median distance from a busy note to its own notes fell from more than half the graph's radius to about a sixth. Among the notes nearest a hub, the share that are its own rose from about 1% to about 40%.

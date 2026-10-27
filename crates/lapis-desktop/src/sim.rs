@@ -27,6 +27,13 @@ pub const BARNES_HUT_THRESHOLD: usize = 64;
 pub const START_RADIUS: f32 = 6.0;
 /// Share of a link length under which two nodes count as that far apart.
 pub const NEAR_SHARE: f32 = 0.05;
+/// Share of [`ForceParams::max_velocity`] a cool layout (a drag, a warm start)
+/// may move at.
+pub const WARM_SPEED_SHARE: f32 = 0.2;
+/// How many links out from a dragged or released node may move with it.
+pub const MOBILE_HOPS: usize = 2;
+/// Most nodes a drag frees, so a drag on a huge hub stays a local edit.
+pub const MOBILE_CAP: usize = 1_500;
 /// Nodes per parallel repulsion task: enough work to outweigh the hand-off.
 const REPULSION_CHUNK: usize = 256;
 /// Starting places: the nodes in link order, laid along a spiral.
@@ -178,6 +185,11 @@ pub struct ForceSim {
     alpha: f32,
     alpha_target: f32,
     tree: QuadTree,
+    /// Each node's linked neighbours, for freeing a neighbourhood.
+    adj: Vec<Vec<usize>>,
+    /// While an interaction settles: the only nodes that may move. `None` lets
+    /// every node move, as a fresh or remembered layout does.
+    mobile: Option<Vec<bool>>,
 }
 
 impl ForceSim {
@@ -196,9 +208,12 @@ impl ForceSim {
         edges.sort_unstable();
         edges.dedup();
         let mut degree = vec![0u32; node_count];
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); node_count];
         for &(a, b) in &edges {
             degree[a] += 1;
             degree[b] += 1;
+            adj[a].push(b);
+            adj[b].push(a);
         }
         let pos = start_positions(node_count, &edges, &degree, &params);
         let weight = degree.iter().map(|d| 1.0 + *d as f32).collect();
@@ -217,6 +232,8 @@ impl ForceSim {
             alpha: 1.0,
             alpha_target: 0.0,
             tree: QuadTree::default(),
+            adj,
+            mobile: None,
         }
     }
 
@@ -264,13 +281,49 @@ impl ForceSim {
         }
     }
 
+    /// Move a node the operator is dragging. Unlike [`ForceSim::place`] this
+    /// frees only its neighbourhood: the rest of the map holds still, so a drag
+    /// never reorganises the whole graph.
+    pub fn drag_to(&mut self, i: usize, x: f32, y: f32) {
+        self.free_around(&[i]);
+        self.place(i, x, y);
+    }
+
     /// Hold a node still. It keeps pushing on its neighbours; nothing pushes it.
+    /// Releasing one frees its neighbourhood to settle round it.
     pub fn set_pinned(&mut self, i: usize, pinned: bool) {
         if let Some(p) = self.pinned.get_mut(i) {
             *p = pinned;
             if !pinned {
+                self.free_around(&[i]);
                 self.wake();
             }
+        }
+    }
+
+    /// Let `roots` and the nodes within [`MOBILE_HOPS`] links of them move until
+    /// the layout rests again, at most [`MOBILE_CAP`] of them; everything else
+    /// stays where it is.
+    fn free_around(&mut self, roots: &[usize]) {
+        let n = self.pos.len();
+        let mobile = self.mobile.get_or_insert_with(|| vec![false; n]);
+        let mut freed = 0usize;
+        let mut frontier: Vec<usize> = roots.iter().copied().filter(|&i| i < n).collect();
+        for &i in &frontier {
+            mobile[i] = true;
+        }
+        for _ in 0..MOBILE_HOPS {
+            let mut next = Vec::new();
+            for &i in &frontier {
+                for &j in &self.adj[i] {
+                    if !mobile[j] && freed < MOBILE_CAP {
+                        mobile[j] = true;
+                        freed += 1;
+                        next.push(j);
+                    }
+                }
+            }
+            frontier = next;
         }
     }
 
@@ -279,7 +332,9 @@ impl ForceSim {
     }
 
     pub fn unpin_all(&mut self) {
+        let held: Vec<usize> = (0..self.pinned.len()).filter(|&i| self.pinned[i]).collect();
         self.pinned.iter_mut().for_each(|p| *p = false);
+        self.free_around(&held);
         self.wake();
     }
 
@@ -337,6 +392,8 @@ impl ForceSim {
     pub fn tick(&mut self) -> bool {
         let n = self.pos.len();
         if !self.is_running() {
+            // At rest the next interaction starts from a still map.
+            self.mobile = None;
             return false;
         }
         self.alpha += (self.alpha_target - self.alpha) * self.params.alpha_decay;
@@ -356,11 +413,13 @@ impl ForceSim {
             // Each node's charge is read-only over the tree, so the nodes split
             // across cores in chunks, one traversal stack per chunk.
             let (tree, pos, weight, inert) = (&self.tree, &self.pos, &self.weight, &self.inert);
+            let mobile = self.mobile.as_deref();
             self.force.par_chunks_mut(REPULSION_CHUNK).enumerate().for_each(|(c, chunk)| {
                 let mut stack = Vec::with_capacity(64);
                 for (k, f) in chunk.iter_mut().enumerate() {
                     let i = c * REPULSION_CHUNK + k;
-                    if inert[i] {
+                    // A frozen node feels no force worth computing.
+                    if inert[i] || mobile.is_some_and(|m| !m[i]) {
                         continue;
                     }
                     let r = tree.repulsion(pos[i], i as u32, charge, &mut stack);
@@ -419,10 +478,14 @@ impl ForceSim {
             self.force[i][1] -= p[1] * pull;
         }
 
-        let (dt, damping, max_v) = (self.params.dt, self.params.damping, self.params.max_velocity);
+        // The speed cap cools with the layout: a cold start opens out at full
+        // speed, but a drag or a warm start moves at most a fifth of it.
+        let max_v = self.params.max_velocity * alpha.clamp(WARM_SPEED_SHARE, 1.0);
+        let (dt, damping) = (self.params.dt, self.params.damping);
         let max_v2 = max_v * max_v;
         let mut total = 0.0f32;
-        for (((((p, v), f), held), inert), m) in self
+        let mobile = self.mobile.as_deref();
+        for (i, (((((p, v), f), held), inert), m)) in self
             .pos
             .iter_mut()
             .zip(self.vel.iter_mut())
@@ -430,8 +493,9 @@ impl ForceSim {
             .zip(self.pinned.iter())
             .zip(self.inert.iter())
             .zip(self.weight.iter())
+            .enumerate()
         {
-            if *held || *inert {
+            if *held || *inert || mobile.is_some_and(|m| !m[i]) {
                 *v = [0.0; 2];
                 continue;
             }
@@ -833,6 +897,36 @@ mod tests {
         let cooled = sim.settle(5_000);
         assert!(cooled <= 620, "after the drop it cools again, ran {cooled}");
         assert_eq!(sim.positions()[0], [500.0, 500.0], "the dropped node stays where it was put");
+    }
+
+    #[test]
+    fn a_drag_moves_its_neighbourhood_and_leaves_the_rest_of_the_map_still() {
+        let mut sim = big(300, 450);
+        sim.settle(5_000);
+        let before = sim.positions().to_vec();
+        let near: std::collections::HashSet<usize> = {
+            let mut s: std::collections::HashSet<usize> = std::collections::HashSet::from([0]);
+            for _ in 0..MOBILE_HOPS {
+                let next: Vec<usize> = s.iter().flat_map(|&i| sim.adj[i].clone()).collect();
+                s.extend(next);
+            }
+            s
+        };
+        sim.hold_warm(true);
+        for k in 0..60 {
+            sim.drag_to(0, before[0][0] + k as f32 * 4.0, before[0][1]);
+            sim.set_pinned(0, true);
+            sim.tick();
+        }
+        sim.hold_warm(false);
+        sim.settle(5_000);
+        let after = sim.positions();
+        let far_moved = (0..after.len()).filter(|i| !near.contains(i) && after[*i] != before[*i]).count();
+        assert_eq!(far_moved, 0, "nothing beyond two links of the drag moves");
+        let near_moved = near.iter().filter(|&&i| i != 0 && after[i] != before[i]).count();
+        assert!(near_moved > 0, "its neighbours follow it");
+        // At rest the map is free again for the next layout or interaction.
+        assert!(sim.mobile.is_none() || !sim.tick());
     }
 
     #[test]
