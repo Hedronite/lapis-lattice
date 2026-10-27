@@ -6,6 +6,12 @@
 
 - A dashed graph link is added only when its dashes fit the frame's segment budget as well as the dash budget, so a frame never passes the budget the renderer is sized for.
 - The desktop's stderr logger writes the home folder as `~`, so a pasted log does not name the machine's user.
+### Graph review nits
+
+- The layout settles on its own thread pool, at most eight threads and one fewer than the machine's cores, instead of rayon's global pool with a thread per core. That leaves a core for the window and the rest of the machine.
+- The Barnes-Hut tree leaves out a body at a non-finite position. Before, one such body made the root cell infinite and the subdivision endless.
+- The cap on how many notes a drag or release frees (1,500) now counts every note freed until the layout rests, not each call. A long drag or Unpin all stays a local edit.
+- A compile-time check covers the whole frame's worst case: the full segment budget plus a batched disc for every node the snapshot can hold stays under half the renderer's cap.
 
 ### Vault containment
 
