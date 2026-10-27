@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Graph frame budget and logging
+
+- A dashed graph link is added only when its dashes fit the frame's segment budget as well as the dash budget, so a frame never passes the budget the renderer is sized for.
+- The desktop's stderr logger writes the home folder as `~`, so a pasted log does not name the machine's user.
+
 ### Vault containment
 
 - New files stay inside the vault. `create` (and `capture`, `daily` and the other periodic notes), `restore`, `trash` and the desktop's Save a copy used to join the path to the vault root and write, so a folder symlinked out of the vault could carry the write outside it. They now go through `notes::contained_new`. It resolves the deepest folder that already exists, refuses one outside the vault (exit 3), and refuses a target that exists in any form, a dangling symlink included. The write then lands under that folder's real path, without following the links again.
