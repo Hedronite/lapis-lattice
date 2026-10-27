@@ -4222,6 +4222,7 @@ dependencies = [
  "lapis-lattice",
  "log",
  "pulldown-cmark",
+ "rayon",
  "serde",
  "serde_json",
  "unicode-segmentation",

@@ -27,6 +27,7 @@ mod motion;
 pub mod panes;
 #[cfg(feature = "gpui")]
 mod pdf_reader;
+mod quadtree;
 pub mod scene;
 pub mod services;
 pub mod session;

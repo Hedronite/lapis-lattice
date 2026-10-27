@@ -15,173 +15,69 @@
 //! nodes at 30.
 
 use lapis_lattice::GraphSnapshot;
+use rayon::prelude::*;
+
+use crate::quadtree::{Charge, QuadTree};
 
 /// Above this many nodes, repulsion goes through the quadtree.
 pub const BARNES_HUT_THRESHOLD: usize = 64;
-/// A cell smaller than this stops subdividing. Without it, two nodes at the
-/// same point would split forever.
-const MIN_CELL: f32 = 1e-3;
-const EMPTY: u32 = u32::MAX;
-
-/// Barnes-Hut quadtree over the current positions, stored as parallel arrays
-/// and rebuilt every tick.
+/// Default [`ForceParams::start_radius`]. On a 13,000-note vault a start this
+/// compact put a hub's own notes at a sixth of the graph's radius from it,
+/// against more than half from a start as wide as the graph.
+pub const START_RADIUS: f32 = 6.0;
+/// Share of a link length under which two nodes count as that far apart.
+pub const NEAR_SHARE: f32 = 0.05;
+/// Nodes per parallel repulsion task: enough work to outweigh the hand-off.
+const REPULSION_CHUNK: usize = 256;
+/// Starting places: the nodes in link order, laid along a spiral.
 ///
-/// Flattened from the octree in `obsidian-3d-graph`'s `physics.rs`: same
-/// centre-of-mass accumulation on insert, same `size / distance < theta`
-/// opening angle on traversal, two dimensions instead of three.
-#[derive(Debug, Default, Clone)]
-struct QuadTree {
-    com: Vec<[f32; 2]>,
-    mass: Vec<f32>,
-    /// Cell width, for the opening-angle test.
-    size: Vec<f32>,
-    center: Vec<[f32; 2]>,
-    children: Vec<[u32; 4]>,
-    /// The single body in a leaf, or `EMPTY`.
-    body: Vec<u32>,
-    child_count: Vec<u8>,
-    insert_stack: Vec<(u32, u32, [f32; 2])>,
-    walk_stack: Vec<u32>,
-}
-
-impl QuadTree {
-    fn clear(&mut self) {
-        self.com.clear();
-        self.mass.clear();
-        self.size.clear();
-        self.center.clear();
-        self.children.clear();
-        self.body.clear();
-        self.child_count.clear();
+/// The order is breadth-first from the busiest node of each component, biggest
+/// component first, so a hub's notes follow it and a chain stays in sequence.
+/// The spiral is Archimedean with even spacing, so consecutive slots touch:
+/// a hub starts beside its notes and a chain starts unfolded. A golden-angle
+/// spiral spreads consecutive slots round the centre, which started every
+/// hub's notes on all sides of the graph and folded chains into zig-zags.
+fn start_positions(
+    n: usize,
+    edges: &[(usize, usize)],
+    degree: &[u32],
+    params: &ForceParams,
+) -> Vec<[f32; 2]> {
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &(a, b) in edges {
+        adj[a].push(b);
+        adj[b].push(a);
     }
-
-    fn push_cell(&mut self, center: [f32; 2], size: f32) -> u32 {
-        let i = self.mass.len() as u32;
-        self.com.push([0.0; 2]);
-        self.mass.push(0.0);
-        self.size.push(size);
-        self.center.push(center);
-        self.children.push([EMPTY; 4]);
-        self.body.push(EMPTY);
-        self.child_count.push(0);
-        i
-    }
-
-    #[inline]
-    fn quadrant(&self, cell: u32, p: [f32; 2]) -> usize {
-        let c = self.center[cell as usize];
-        usize::from(p[0] >= c[0]) | (usize::from(p[1] >= c[1]) << 1)
-    }
-
-    fn child(&mut self, cell: u32, q: usize) -> u32 {
-        let i = cell as usize;
-        if self.children[i][q] != EMPTY {
-            return self.children[i][q];
+    let mut by_degree: Vec<usize> = (0..n).collect();
+    by_degree.sort_by_key(|&i| (std::cmp::Reverse(degree[i]), i));
+    let (mut order, mut seen) = (Vec::with_capacity(n), vec![false; n]);
+    for root in by_degree {
+        if seen[root] {
+            continue;
         }
-        let half = self.size[i] * 0.5;
-        let c = self.center[i];
-        let quarter = half * 0.5;
-        let center = [
-            if q & 1 != 0 { c[0] + quarter } else { c[0] - quarter },
-            if q & 2 != 0 { c[1] + quarter } else { c[1] - quarter },
-        ];
-        let new = self.push_cell(center, half);
-        self.children[i][q] = new;
-        self.child_count[i] += 1;
-        new
-    }
-
-    /// `weight[i]` is body i's mass; bodies with `skip[i]` set are left out.
-    fn build(&mut self, pos: &[[f32; 2]], weight: &[f32], skip: &[bool]) {
-        self.clear();
-        let mut live = pos.iter().zip(skip).filter(|(_, s)| !**s).map(|(p, _)| *p);
-        let Some(first) = live.next() else { return };
-        let (mut lo, mut hi) = (first, first);
-        for p in live {
-            lo = [lo[0].min(p[0]), lo[1].min(p[1])];
-            hi = [hi[0].max(p[0]), hi[1].max(p[1])];
-        }
-        let center = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5];
-        // Square root cell, with slack so a body on the boundary still lands
-        // inside it.
-        let size = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(1.0) * 1.01;
-        self.push_cell(center, size);
-        for (i, &p) in pos.iter().enumerate() {
-            if !skip[i] {
-                self.insert(i as u32, p, pos, weight);
-            }
-        }
-    }
-
-    fn insert(&mut self, body: u32, p: [f32; 2], pos: &[[f32; 2]], weight: &[f32]) {
-        self.insert_stack.clear();
-        self.insert_stack.push((0, body, p));
-        while let Some((cell, body, p)) = self.insert_stack.pop() {
-            let i = cell as usize;
-            let m = self.mass[i];
-            let w = weight[body as usize];
-            let next = m + w;
-            self.com[i] = [(self.com[i][0] * m + p[0] * w) / next, (self.com[i][1] * m + p[1] * w) / next];
-            self.mass[i] = next;
-
-            let held = self.body[i];
-            if held == EMPTY && self.child_count[i] == 0 {
-                self.body[i] = body;
-                continue;
-            }
-            // Two bodies on top of each other: stop splitting and let the mass
-            // speak for both. Their mutual force is softened to nothing anyway.
-            if self.size[i] < MIN_CELL {
-                continue;
-            }
-            if held != EMPTY {
-                self.body[i] = EMPTY;
-                let hp = pos[held as usize];
-                let q = self.quadrant(cell, hp);
-                let c = self.child(cell, q);
-                self.insert_stack.push((c, held, hp));
-            }
-            let q = self.quadrant(cell, p);
-            let c = self.child(cell, q);
-            self.insert_stack.push((c, body, p));
-        }
-    }
-
-    /// Repulsion per unit of `body`'s own mass at `p`, opening a cell only when it
-    /// subtends more than `theta`. The force falls off as 1/d (ForceAtlas2), and
-    /// distances under `near` count as `near`, so close pairs get a firm, finite shove.
-    fn repulsion(&mut self, p: [f32; 2], body: u32, strength: f32, theta: f32, near: f32) -> [f32; 2] {
-        let mut acc = [0.0f32; 2];
-        if self.mass.is_empty() {
-            return acc;
-        }
-        self.walk_stack.clear();
-        self.walk_stack.push(0);
-        while let Some(cell) = self.walk_stack.pop() {
-            let i = cell as usize;
-            let m = self.mass[i];
-            if m == 0.0 {
-                continue;
-            }
-            let d = [p[0] - self.com[i][0], p[1] - self.com[i][1]];
-            let d2 = (d[0] * d[0] + d[1] * d[1]).max(1.0);
-            let dist = d2.sqrt();
-            if self.child_count[i] == 0 || (self.size[i] / dist) < theta {
-                if self.body[i] != body {
-                    let f = strength * m / d2.max(near * near);
-                    acc[0] += d[0] * f;
-                    acc[1] += d[1] * f;
-                }
-            } else {
-                for &c in &self.children[i] {
-                    if c != EMPTY {
-                        self.walk_stack.push(c);
-                    }
+        seen[root] = true;
+        let mut queue = std::collections::VecDeque::from([root]);
+        while let Some(i) = queue.pop_front() {
+            order.push(i);
+            for &j in &adj[i] {
+                if !seen[j] {
+                    seen[j] = true;
+                    queue.push_back(j);
                 }
             }
         }
-        acc
     }
+    // Even spacing `s` along the curve and between its turns fills a disc of the
+    // same radius the start spread asks for.
+    let radius = params.link_distance * (n as f32).sqrt().clamp(1.0, params.start_radius.max(1.0));
+    let s = (radius * (std::f32::consts::PI / n.max(1) as f32).sqrt()).max(1e-3);
+    let mut pos = vec![[0.0f32; 2]; n];
+    for (k, &i) in order.iter().enumerate() {
+        let theta = (4.0 * std::f32::consts::PI * k as f32).sqrt();
+        let r = s * theta / std::f32::consts::TAU;
+        pos[i] = [r * theta.cos(), r * theta.sin()];
+    }
+    pos
 }
 
 /// Force constants. Names follow the settings both references expose, so a
@@ -204,6 +100,12 @@ pub struct ForceParams {
     pub link: f32,
     /// Rest length of a link.
     pub link_distance: f32,
+    /// Widest the starting spiral gets, in link lengths. A small graph starts
+    /// at its natural size (a link length per square root of its node count);
+    /// a big one starts no wider than this and lets the charge open it out, the
+    /// way d3 starts compact. A spiral as wide as the finished graph left a big
+    /// vault's linked notes too far apart ever to meet.
+    pub start_radius: f32,
     /// Velocity retained per tick. Under 1.0 this is what makes the settle
     /// damped instead of a big bang that never stops.
     pub damping: f32,
@@ -225,15 +127,18 @@ pub struct ForceParams {
 impl Default for ForceParams {
     fn default() -> Self {
         Self {
-            center: 1.0,
+            center: 0.1,
             gravity_linear: 0.002,
             repel: 10.0,
             link: 1.0,
             link_distance: 100.0,
+            start_radius: START_RADIUS,
             // Momentum lets a big vault unfold from its spiral while it is still
             // warm; the cooling schedule, not friction, is what brings it to rest.
             damping: 0.85,
-            max_velocity: 40.0,
+            // Fast enough for a compact start to open out into clusters before
+            // it cools; at 40 a big vault froze half way.
+            max_velocity: 200.0,
             dt: 0.3,
             alpha_min: 0.001,
             // From 1 to `alpha_min` in about 600 ticks: twice d3's default, so a
@@ -280,22 +185,22 @@ impl ForceSim {
     /// self-loops are dropped, because a snapshot may be filtered after it is
     /// built and a spring on one node is not a force.
     pub fn new(node_count: usize, edges: &[(usize, usize)], params: ForceParams) -> Self {
-        let golden = (1.0 + 5.0_f32.sqrt()) / 2.0;
-        let scale = params.link_distance * (node_count as f32).sqrt().max(1.0);
-        let pos: Vec<[f32; 2]> = (0..node_count)
-            .map(|i| {
-                let a = std::f32::consts::TAU * i as f32 / golden;
-                let r = scale * ((i as f32 + 1.0) / node_count.max(1) as f32).sqrt();
-                [r * a.cos(), r * a.sin()]
-            })
+        // One spring per linked pair: A→B, B→A and a link written twice are the
+        // same pair, and counting them twice would double their pull and degree.
+        let mut edges: Vec<(usize, usize)> = edges
+            .iter()
+            .copied()
+            .filter(|(a, b)| a != b && *a < node_count && *b < node_count)
+            .map(|(a, b)| (a.min(b), a.max(b)))
             .collect();
-        let edges: Vec<(usize, usize)> =
-            edges.iter().copied().filter(|(a, b)| a != b && *a < node_count && *b < node_count).collect();
+        edges.sort_unstable();
+        edges.dedup();
         let mut degree = vec![0u32; node_count];
         for &(a, b) in &edges {
             degree[a] += 1;
             degree[b] += 1;
         }
+        let pos = start_positions(node_count, &edges, &degree, &params);
         let weight = degree.iter().map(|d| 1.0 + *d as f32).collect();
         let inert = degree.iter().map(|d| *d == 0 && !edges.is_empty()).collect();
         Self {
@@ -441,18 +346,28 @@ impl ForceSim {
         // charge: ForceAtlas2's degree-weighted repulsion, `repel · m_i · m_j / d`.
         // Exact while the vault is small, Barnes-Hut once it is not.
         let repel = self.params.repel * alpha;
-        let near = self.params.link_distance * 0.5;
+        // Pairs closer than this count as this close. Small: a compact start packs
+        // notes well inside a link length, and a wide floor there turned the
+        // push between them to nothing, so a small graph never opened out.
+        let near = self.params.link_distance * NEAR_SHARE;
         if n > BARNES_HUT_THRESHOLD {
             self.tree.build(&self.pos, &self.weight, &self.inert);
-            let theta = self.params.theta;
-            for i in 0..n {
-                if self.inert[i] {
-                    continue;
+            let charge = Charge { strength: repel, theta: self.params.theta, near };
+            // Each node's charge is read-only over the tree, so the nodes split
+            // across cores in chunks, one traversal stack per chunk.
+            let (tree, pos, weight, inert) = (&self.tree, &self.pos, &self.weight, &self.inert);
+            self.force.par_chunks_mut(REPULSION_CHUNK).enumerate().for_each(|(c, chunk)| {
+                let mut stack = Vec::with_capacity(64);
+                for (k, f) in chunk.iter_mut().enumerate() {
+                    let i = c * REPULSION_CHUNK + k;
+                    if inert[i] {
+                        continue;
+                    }
+                    let r = tree.repulsion(pos[i], i as u32, charge, &mut stack);
+                    f[0] += r[0] * weight[i];
+                    f[1] += r[1] * weight[i];
                 }
-                let f = self.tree.repulsion(self.pos[i], i as u32, repel, theta, near);
-                self.force[i][0] += f[0] * self.weight[i];
-                self.force[i][1] += f[1] * self.weight[i];
-            }
+            });
         } else {
             for i in 0..n {
                 if self.inert[i] {
@@ -566,8 +481,12 @@ impl ForceSim {
                 grid.entry(((p[0] / cell).floor() as i32, (p[1] / cell).floor() as i32)).or_default().push(i);
             }
             let mut pairs: Vec<(usize, usize)> = Vec::new();
-            for (&(cx, cy), members) in &grid {
-                for &i in members {
+            // Cells in a fixed order: each part moves the next pair's ends, and a
+            // hash map's own order changes from run to run.
+            let mut cells: Vec<(i32, i32)> = grid.keys().copied().collect();
+            cells.sort_unstable();
+            for (cx, cy) in cells {
+                for &i in &grid[&(cx, cy)] {
                     for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1), (1, -1)] {
                         let Some(others) = grid.get(&(cx + dx, cy + dy)) else { continue };
                         for &j in others {
@@ -719,6 +638,36 @@ mod tests {
     /// gravity well and the edges mean nothing. Measured on a crowd, because on
     /// three nodes gravity alone already sets the spacing near the rest length.
     #[test]
+    fn a_hub_keeps_its_own_notes_round_it() {
+        // Three hubs of 40 notes each, the hubs linked in a ring. Notes are
+        // numbered so a hub's notes are not consecutive: the start must find the
+        // clusters from the links, not from the ids.
+        let (hubs, per) = (3usize, 40usize);
+        let mut edges = vec![(0, 1), (1, 2), (2, 0)];
+        for k in 0..hubs * per {
+            edges.push((k % hubs, hubs + k));
+        }
+        let mut sim = ForceSim::new(hubs + hubs * per, &edges, ForceParams::default());
+        sim.settle(4_000);
+        let p = sim.positions();
+        let d = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
+        for h in 0..hubs {
+            let (mut own, mut other) = (Vec::new(), Vec::new());
+            for k in 0..hubs * per {
+                let dist = d(p[h], p[hubs + k]);
+                if k % hubs == h { own.push(dist) } else { other.push(dist) }
+            }
+            let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
+            assert!(
+                mean(&own) * 1.5 < mean(&other),
+                "hub {h}: own notes at {} should sit well inside the others at {}",
+                mean(&own),
+                mean(&other)
+            );
+        }
+    }
+
+    #[test]
     fn linked_neighbours_settle_closer_than_the_crowd() {
         let chain: Vec<(usize, usize)> = (0..9).map(|i| (i, i + 1)).collect();
         let mut sim = ForceSim::new(40, &chain, ForceParams::default());
@@ -777,8 +726,11 @@ mod tests {
     fn barnes_hut_agrees_with_the_exact_sum() {
         let n = BARNES_HUT_THRESHOLD * 2;
         let edges: Vec<(usize, usize)> = (0..n - 1).map(|i| (i, i + 1)).collect();
-        let exact_params = ForceParams { theta: 0.0, ..ForceParams::default() };
-        let mut tree_sim = ForceSim::new(n, &edges, ForceParams::default());
+        // The tree's accuracy, not the layout: from a wide start the cells are
+        // well separated, which is what the opening angle is tuned for.
+        let tree_params = ForceParams { start_radius: 100.0, ..ForceParams::default() };
+        let exact_params = ForceParams { theta: 0.0, ..tree_params };
+        let mut tree_sim = ForceSim::new(n, &edges, tree_params);
         let mut exact_sim = ForceSim::new(n, &edges, exact_params);
         assert_eq!(tree_sim.positions(), exact_sim.positions(), "same start");
 
