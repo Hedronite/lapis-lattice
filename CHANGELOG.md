@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Index scope: loud failures, stale exclusions, safe paths
+
+- A `.lapisignore` that cannot be read, is over 1 MiB, is not a file, or will not compile still lets the index run (nothing is ignored), but the problem is reported. It shows as an `index_scope` warning in `doctor`, on stderr after `reindex --all`, and in its JSON as `scopeProblems`. A broken ignore file is no longer silently the same as none.
+- A note indexed before a new `.lapisignore` rule or nested vault excluded it now counts as stale (as removed) until `lapis reindex --all` drops it. Before, it stayed searchable, in the graph and over MCP with nothing flagging it. The engine's health count and the CLI's stale check (`vault info`, `search`, `doctor`) both apply the built-in index's scope; an excluded file is never reported as unindexed.
+- Paths the backend reports are trusted only as clean vault-relative paths before the stale check joins them to the disk; absolute and `..` paths are dropped. Stale paths printed by `vault info` have control characters replaced, so an escape sequence in an index path cannot drive the terminal.
+
 ### Graph: fast frames, local drags
 
 - Small notes draw as batched hexagons, one shape per colour, instead of one disc each. On a 13,000-note vault, per-disc overhead was most of every frame. The board's draw time at rest fell from about 23 ms to about 5 ms, and a fresh layout unfolds at about 55 fps where it ran at 7–10. Hubs, pinned, focused and unresolved notes still draw as real circles, on top.

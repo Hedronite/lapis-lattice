@@ -65,6 +65,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         json!({ "provider": o.provider(), "model": o.model(), "dim": o.dim(), "url": o.endpoint() })
     });
     let note = resolved.and_then(|r| r.note);
+    let scope_problems = lapis_lattice::Scope::load(&ctx.vault.root).problems().to_vec();
     if ctx.json {
         return crate::emit_json(&json!({
             "documents": report.documents,
@@ -74,6 +75,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
             "embedError": report.embed_error,
             "embedder": embedder,
             "embedderNote": note,
+            "scopeProblems": scope_problems,
             "elapsedMs": elapsed_ms,
         }));
     }
@@ -85,6 +87,9 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         report.embedded,
         elapsed_ms / 1000.0
     );
+    for p in &scope_problems {
+        eprintln!("lapis: {p}");
+    }
     if let Some(e) = &report.embed_error {
         eprintln!("lapis: vectors skipped, keyword search still works: {e}");
     } else if let Some(n) = &note {

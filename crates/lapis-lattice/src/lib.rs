@@ -27,6 +27,7 @@ pub use analytics::{ANALYTICS_QUERIES, Analytics};
 pub use embed::Embedder;
 pub use graph::{GraphEdge, GraphNode, GraphSnapshot, Neighbor, SNAPSHOT_NODE_CAP};
 pub use kinds::{HTML, MARKDOWN, YAML, kind_for};
+pub use scope::Scope;
 
 /// Written into `meta.producer` at creation; asserted on open.
 pub const PRODUCER: &str = "lapis-lattice";

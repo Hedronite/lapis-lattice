@@ -45,6 +45,8 @@ pub struct Stale {
     pub count: u64,
     pub changed: u64,
     pub unindexed: u64,
+    /// Gone from disk, or (embedded index) still on disk but now outside the
+    /// index's scope: ignored by `.lapisignore` or inside a nested vault.
     pub removed: u64,
     /// The first stale paths in path order, at most 20.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -60,7 +62,10 @@ pub type Indexed = HashMap<String, Option<f64>>;
 /// Run the check now, and refresh the cache.
 pub async fn check(backend: &Backend, root: &Path) -> Result<Stale> {
     let indexed = list_indexed(backend).await?;
-    let stale = compare(root, &indexed, now_secs());
+    // The embedded index follows `.lapisignore` and skips nested vaults; an HTTP
+    // lattice keeps its own rules, which this binary cannot see.
+    let scope = (backend.mode() == "embedded").then(|| lapis_lattice::Scope::load(root));
+    let stale = compare(root, &indexed, now_secs(), scope.as_ref());
     if let Some(file) = cache_file(root) {
         store(&file, &backend.source(), &stale);
     }
@@ -85,6 +90,12 @@ pub fn forget(root: &Path) {
     }
 }
 
+/// `p` with control characters replaced, for a terminal: an index path is data,
+/// and an escape sequence in one must not drive the terminal it is printed to.
+pub fn printable(p: &str) -> String {
+    p.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
+}
+
 /// One stderr line for human `search` output; silent when nothing is stale.
 pub fn warn(count: Option<u64>) {
     if let Some(n) = count.filter(|n| *n > 0) {
@@ -103,7 +114,9 @@ async fn list_indexed(backend: &Backend) -> Result<Indexed> {
             .await?;
         let n = u32::try_from(page.len()).unwrap_or(u32::MAX);
         for d in page {
-            if d.path.ends_with(".md") {
+            // A backend path is only trusted once it is a clean vault-relative
+            // path: absolute and `..` paths are never joined to the disk or shown.
+            if d.path.ends_with(".md") && crate::notes::clean_rel(&d.path).is_ok_and(|c| c == d.path) {
                 out.insert(d.path, d.mtime);
             }
         }
@@ -119,7 +132,12 @@ fn parent(rel: &str) -> &str {
 }
 
 /// Compare the index against the disk under `root`. Pure apart from the walk.
-pub fn compare(root: &Path, indexed: &Indexed, checked_at: u64) -> Stale {
+pub fn compare(
+    root: &Path,
+    indexed: &Indexed,
+    checked_at: u64,
+    scope: Option<&lapis_lattice::Scope>,
+) -> Stale {
     let mut parents: HashSet<&str> = HashSet::new();
     let mut walked: HashSet<&str> = HashSet::new();
     for rel in indexed.keys() {
@@ -130,22 +148,28 @@ pub fn compare(root: &Path, indexed: &Indexed, checked_at: u64) -> Stale {
         }
     }
     let mut walk = Walk {
+        root,
+        scope,
         indexed,
         parents: &parents,
         walked: &walked,
         seen: HashSet::new(),
         changed: Vec::new(),
         unindexed: Vec::new(),
+        excluded: Vec::new(),
     };
     if !indexed.is_empty() {
         walk.dir(root, "");
     }
     let mut removed = Vec::new();
     for rel in indexed.keys() {
-        if !walk.seen.contains(rel.as_str()) && !root.join(rel).is_file() {
+        let out_of_scope = scope.is_some_and(|s| !s.covers(root, rel));
+        if (!walk.seen.contains(rel.as_str()) && !root.join(rel).is_file()) || out_of_scope {
             removed.push(rel.clone());
         }
     }
+    removed.sort();
+    removed.dedup();
     let (changed, unindexed) = (walk.changed.len() as u64, walk.unindexed.len() as u64);
     let removed_n = removed.len() as u64;
     let mut paths: Vec<String> = walk.changed.into_iter().chain(walk.unindexed).chain(removed).collect();
@@ -162,12 +186,16 @@ pub fn compare(root: &Path, indexed: &Indexed, checked_at: u64) -> Stale {
 }
 
 struct Walk<'a> {
+    root: &'a Path,
+    scope: Option<&'a lapis_lattice::Scope>,
     indexed: &'a Indexed,
     parents: &'a HashSet<&'a str>,
     walked: &'a HashSet<&'a str>,
     seen: HashSet<String>,
     changed: Vec<String>,
     unindexed: Vec<String>,
+    /// Files out of scope; counted (if indexed) by the removed pass, never as unindexed.
+    excluded: Vec<String>,
 }
 
 impl Walk<'_> {
@@ -187,6 +215,11 @@ impl Walk<'_> {
                     self.dir(&ent.path(), &child);
                 }
             } else if ft.is_file() && notes_here && name.ends_with(".md") {
+                if self.scope.is_some_and(|s| !s.covers(self.root, &child)) {
+                    self.excluded.push(child.clone());
+                    self.seen.insert(child);
+                    continue;
+                }
                 match self.indexed.get(&child) {
                     None => self.unindexed.push(child.clone()),
                     Some(Some(at)) if disk_mtime(&ent).is_some_and(|m| m > at + MTIME_SLACK) => {
@@ -277,6 +310,23 @@ mod tests {
     }
 
     #[test]
+    fn an_excluded_note_counts_as_removed_and_its_folder_is_not_unindexed() {
+        let d = vault("scope");
+        std::fs::write(d.join("notes/kept.md"), "# k\n").unwrap();
+        std::fs::write(d.join("notes/gen.md"), "# g\n").unwrap();
+        std::fs::write(d.join("notes/new-gen.md"), "# n\n").unwrap();
+        std::fs::write(d.join(".lapisignore"), "notes/*gen.md\n").unwrap();
+        let mut idx = Indexed::new();
+        idx.insert("notes/kept.md".into(), Some(mtime(&d, "notes/kept.md") + 10.0));
+        idx.insert("notes/gen.md".into(), Some(mtime(&d, "notes/gen.md") + 10.0));
+        let scope = lapis_lattice::Scope::load(&d);
+        let s = compare(&d, &idx, 0, Some(&scope));
+        assert_eq!((s.removed, s.unindexed, s.changed), (1, 0, 0), "{s:?}");
+        assert_eq!(s.paths, ["notes/gen.md"]);
+        assert_eq!(printable("a\u{1b}[31mb\n"), "a?[31mb?");
+    }
+
+    #[test]
     fn counts_changed_unindexed_and_removed_notes() {
         let d = vault("kinds");
         for rel in
@@ -292,7 +342,7 @@ mod tests {
         idx.insert("notes/gone.md".into(), Some(1.0));
         std::fs::write(d.join("notes/new.md"), "# new\n").unwrap();
 
-        let s = compare(&d, &idx, 7);
+        let s = compare(&d, &idx, 7, None);
         assert_eq!((s.changed, s.unindexed, s.removed, s.count), (1, 1, 1, 3), "{s:?}");
         assert_eq!(s.paths, ["notes/b.md", "notes/gone.md", "notes/new.md"]);
         assert_eq!(s.checked_at, 7);
@@ -305,12 +355,12 @@ mod tests {
         std::fs::write(d.join("notes/a.md"), "# a\n").unwrap();
         let mut idx = Indexed::new();
         idx.insert("notes/a.md".into(), Some(mtime(&d, "notes/a.md")));
-        assert_eq!(compare(&d, &idx, 0).count, 0);
+        assert_eq!(compare(&d, &idx, 0, None).count, 0);
         // No mtime from the backend: drift cannot be judged, so it is not counted.
         idx.insert("notes/a.md".into(), None);
-        assert_eq!(compare(&d, &idx, 0).count, 0);
+        assert_eq!(compare(&d, &idx, 0, None).count, 0);
         // Nothing indexed yet: no folder holds an indexed note, so nothing is unindexed.
-        assert_eq!(compare(&d, &Indexed::new(), 0).count, 0);
+        assert_eq!(compare(&d, &Indexed::new(), 0, None).count, 0);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -321,7 +371,7 @@ mod tests {
         std::fs::write(d.join("Later.md"), "# l\n").unwrap();
         let mut idx = Indexed::new();
         idx.insert("Welcome.md".into(), Some(mtime(&d, "Welcome.md")));
-        let s = compare(&d, &idx, 0);
+        let s = compare(&d, &idx, 0, None);
         assert_eq!((s.unindexed, s.paths.as_slice()), (1, ["Later.md".to_string()].as_slice()));
         let _ = std::fs::remove_dir_all(&d);
     }
