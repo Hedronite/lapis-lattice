@@ -76,6 +76,19 @@ pub fn clean_rel(rel: &str) -> Result<String> {
 /// (so `notes/SPEC` reads `notes/SPEC.md`).
 /// Errors with exit-3 semantics on escape or not-found.
 pub fn resolve(root: &Path, rel: &str) -> Result<(String, PathBuf)> {
+    locate(root, rel).map(|(rel, lexical, _)| (rel, lexical))
+}
+
+/// [`resolve`], returning the canonical path: the file itself, every symlink
+/// already followed. Readers open this, so a symlink swapped after the check
+/// cannot send the read elsewhere. Writers keep [`resolve`]'s lexical path, so
+/// the common writer can still refuse to replace a symlink.
+pub fn resolve_target(root: &Path, rel: &str) -> Result<(String, PathBuf)> {
+    locate(root, rel).map(|(rel, _, target)| (rel, target))
+}
+
+/// The vault-relative path, its lexical path under `root`, and its canonical path.
+fn locate(root: &Path, rel: &str) -> Result<(String, PathBuf, PathBuf)> {
     let clean = clean_rel(rel)?;
     let abs = root.join(&clean);
     if abs.is_file() {
@@ -94,16 +107,44 @@ pub fn resolve(root: &Path, rel: &str) -> Result<(String, PathBuf)> {
     Err(LapisError::Path(format!("not found: {clean}")))
 }
 
-/// `abs` once it is known to canonicalize inside the vault. An in-vault symlink
-/// that points out of it is refused (exit 3), so no read, edit or index call
-/// reaches a file outside the vault through one.
-fn inside(root: &Path, rel: String, abs: PathBuf) -> Result<(String, PathBuf)> {
+/// `abs` once it is known to canonicalize inside the vault, with that canonical
+/// path. An in-vault symlink that points out of it is refused (exit 3), so no
+/// read, edit or index call reaches a file outside the vault through one.
+fn inside(root: &Path, rel: String, abs: PathBuf) -> Result<(String, PathBuf, PathBuf)> {
     let root_canon = root.canonicalize().map_err(|e| LapisError::Path(format!("{rel}: {e}")))?;
     let target = abs.canonicalize().map_err(|e| LapisError::Path(format!("{rel}: {e}")))?;
     if !target.starts_with(&root_canon) {
         return Err(LapisError::Path(format!("{rel}: symlink escapes the vault")));
     }
-    Ok((rel, abs))
+    Ok((rel, abs, target))
+}
+
+/// Where a new file at `rel` is written: the deepest folder on its way that
+/// already exists must resolve inside the vault, and nothing may exist at the
+/// target yet, not even a dangling symlink. Returns the path under that folder's
+/// canonical location, so a folder symlinked out of the vault cannot carry a
+/// create, restore, trash or copy outside it, and the write does not re-follow
+/// the links that were just checked. Missing folders below it are new, so the
+/// caller's `create_dir_all` makes real directories. Exit 3 on escape.
+pub fn contained_new(root: &Path, rel: &str) -> Result<PathBuf> {
+    let clean = clean_rel(rel)?;
+    let root_canon = root.canonicalize().map_err(|e| LapisError::Path(format!("{clean}: {e}")))?;
+    let target = root.join(&clean);
+    if std::fs::symlink_metadata(&target).is_ok() {
+        return Err(LapisError::Path(format!("{clean}: already exists")));
+    }
+    let mut missing = Vec::new();
+    let mut base = target.as_path();
+    while std::fs::symlink_metadata(base).is_err() {
+        let (Some(name), Some(parent)) = (base.file_name(), base.parent()) else { break };
+        missing.push(name.to_os_string());
+        base = parent;
+    }
+    let base = base.canonicalize().map_err(|e| LapisError::Path(format!("{clean}: {e}")))?;
+    if !base.starts_with(&root_canon) {
+        return Err(LapisError::Path(format!("{clean}: a folder on the way escapes the vault")));
+    }
+    Ok(missing.iter().rev().fold(base, |p, name| p.join(name)))
 }
 
 /// Note object per `schema/note.schema.json`.
@@ -139,7 +180,7 @@ pub fn read_for_tui(root: &Path, rel: &str) -> Result<Note> {
 }
 
 fn read_impl(root: &Path, rel: &str, display: bool) -> Result<Note> {
-    let (path, abs) = resolve(root, rel)?;
+    let (path, abs) = resolve_target(root, rel)?;
     let kind = kind_of(&path);
     let meta = std::fs::metadata(&abs)?;
     let size = meta.len();
@@ -460,6 +501,32 @@ mod tests {
         assert!(read(&v, "notes/leak.md").is_err(), "and so is a read");
         assert_eq!(resolve(&v, "notes/alias.md").unwrap().0, "notes/alias.md", "a link inside is fine");
         std::fs::remove_file(outside).unwrap();
+        std::fs::remove_dir_all(v).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_file_cannot_land_outside_through_a_symlinked_folder() {
+        let v = tmp_vault();
+        let outside = std::env::temp_dir().join(format!("lapis-notes-out-{}", rand_suffix()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, v.join("notes/away")).unwrap();
+        std::os::unix::fs::symlink(v.join("notes"), v.join("alias")).unwrap();
+        let err = contained_new(&v, "notes/away/new.md").unwrap_err();
+        assert_eq!(err.exit_code(), 3);
+        assert!(contained_new(&v, "notes/away/deeper/new.md").is_err(), "nor any folder below it");
+        // A new folder under a real one is fine, and lands under the vault's canonical root.
+        let ok = contained_new(&v, "notes/fresh/sub/new.md").unwrap();
+        assert!(ok.starts_with(v.canonicalize().unwrap()) && ok.ends_with("notes/fresh/sub/new.md"));
+        assert!(contained_new(&v, "alias/new.md").is_ok(), "a folder symlinked inside the vault is allowed");
+        assert!(contained_new(&v, "notes/plain.md").is_err(), "an existing file is never a new one");
+        std::os::unix::fs::symlink(outside.join("nothing.md"), v.join("notes/dangling.md")).unwrap();
+        assert!(contained_new(&v, "notes/dangling.md").is_err(), "nor is a dangling symlink");
+        assert_eq!(
+            resolve_target(&v, "alias/plain.md").unwrap().1,
+            v.canonicalize().unwrap().join("notes/plain.md")
+        );
+        std::fs::remove_dir_all(outside).unwrap();
         std::fs::remove_dir_all(v).unwrap();
     }
 
