@@ -216,11 +216,7 @@ mod tests {
         std::fs::write(outside.join(IGNORE_FILE), "notes/\n[OUTSIDE_SECRET_7\n").unwrap();
         std::os::unix::fs::symlink(outside.join(IGNORE_FILE), v.join(IGNORE_FILE)).unwrap();
         let s = Scope::load(&v);
-        assert!(
-            s.problems()[0].contains("is a symlink and was not read"),
-            "{:?}",
-            s.problems()
-        );
+        assert!(s.problems()[0].contains("is a symlink and was not read"), "{:?}", s.problems());
         assert!(s.covers(&v, "notes/a.md"), "nothing is ignored");
         assert!(!s.ignores("notes", true), "the linked file's patterns do not apply");
         assert!(
