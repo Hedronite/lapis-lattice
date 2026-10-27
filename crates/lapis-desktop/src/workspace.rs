@@ -101,6 +101,7 @@ struct Workspace {
     /// The tab strip, so the active tab can be brought into view.
     tab_scroll: gpui_kit::ScrollHandle,
     query_epoch: u64,
+    search_lanes: palette::Lanes,
     indexing: bool,
     register: crate::vim::Register,
     command: Option<command::Prompt>,
@@ -149,6 +150,7 @@ impl Workspace {
             list_scroll: gpui_kit::ScrollHandle::new(),
             tab_scroll: gpui_kit::ScrollHandle::new(),
             query_epoch: 0,
+            search_lanes: Default::default(),
             indexing: false,
             register: crate::vim::Register::default(),
             command: None,

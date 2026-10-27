@@ -24,14 +24,49 @@ pub(super) struct Palette {
     pub(super) refining: bool,
     /// The hybrid ranking has answered (or failed); later keyword replies are stale.
     ranked: bool,
-    pub(super) vector_note: Option<String>,
+    /// The vector ranking failed, so the keyword hits stay. Only the fact is
+    /// kept: the error text can carry paths and URLs, and the palette never shows it.
+    pub(super) vector_missed: bool,
 }
 
 /// Which of the two searches an answer came from.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Arm {
-    Keyword,
-    Hybrid,
+    Keyword = 0,
+    Hybrid = 1,
+}
+
+/// One search per arm at a time. A query entered while that arm is still busy
+/// waits, replacing any older waiting query, so a run of new queries costs at
+/// most one search behind the one in flight, and a query the reader has already
+/// moved past never starts.
+#[derive(Default)]
+pub(super) struct Lanes {
+    busy: [bool; 2],
+    waiting: [Option<(u64, String)>; 2],
+}
+
+impl Lanes {
+    /// True: start `query` on `arm` now. False: it waits for the arm to free up.
+    pub(super) fn submit(&mut self, arm: Arm, epoch: u64, query: &str) -> bool {
+        let i = arm as usize;
+        if self.busy[i] {
+            self.waiting[i] = Some((epoch, query.to_string()));
+            return false;
+        }
+        self.busy[i] = true;
+        true
+    }
+
+    /// `arm` answered. Hands back its waiting query when that is still the
+    /// current one (`current` is `None` once the palette has closed), and keeps
+    /// the arm busy for it.
+    pub(super) fn finish(&mut self, arm: Arm, current: Option<u64>) -> Option<(u64, String)> {
+        let i = arm as usize;
+        let next = self.waiting[i].take().filter(|(epoch, _)| Some(*epoch) == current);
+        self.busy[i] = next.is_some();
+        next
+    }
 }
 
 impl Workspace {
@@ -50,7 +85,7 @@ impl Workspace {
                     p.hits.clear();
                     p.selected = 0;
                     p.refining = false;
-                    p.vector_note = None;
+                    p.vector_missed = false;
                 }
                 cx.notify();
             }
@@ -66,7 +101,7 @@ impl Workspace {
             modalities: vec![],
             refining: false,
             ranked: false,
-            vector_note: None,
+            vector_missed: false,
         });
         cx.notify();
     }
@@ -88,27 +123,46 @@ impl Workspace {
         p.state = State::Loading;
         p.refining = false;
         p.ranked = false;
-        p.vector_note = None;
+        p.vector_missed = false;
         self.query_epoch += 1;
         let epoch = self.query_epoch;
         // Both searches start now: keyword hits show in a fraction of a second,
-        // the hybrid ranking replaces them when the embedder has answered.
+        // the hybrid ranking replaces them when the embedder has answered. An arm
+        // still busy with an older query takes this one when it is done.
         for arm in [Arm::Keyword, Arm::Hybrid] {
-            let service = self.services.clone();
-            let query = query.clone();
-            let task = cx.background_executor().spawn(async move {
-                match arm {
-                    Arm::Keyword => service.search_fast(&query),
-                    Arm::Hybrid => service.search(&query),
-                }
-            });
-            cx.spawn_in(window, async move |this, cx| {
-                let result = task.await;
-                let _ = this.update_in(cx, |this, _, cx| this.apply_search(epoch, arm, result, cx));
-            })
-            .detach();
+            if self.search_lanes.submit(arm, epoch, &query) {
+                self.run_search(arm, epoch, query.clone(), window, cx);
+            }
         }
         cx.notify();
+    }
+
+    fn run_search(
+        &mut self,
+        arm: Arm,
+        epoch: u64,
+        query: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let service = self.services.clone();
+        let task = cx.background_executor().spawn(async move {
+            match arm {
+                Arm::Keyword => service.search_fast(&query),
+                Arm::Hybrid => service.search(&query),
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.apply_search(epoch, arm, result, cx);
+                let current = this.palette.as_ref().map(|_| this.query_epoch);
+                if let Some((epoch, query)) = this.search_lanes.finish(arm, current) {
+                    this.run_search(arm, epoch, query, window, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Merge one search answer into the open palette. Whichever arrives first shows;
@@ -138,10 +192,10 @@ impl Workspace {
                 p.state = if empty_index { State::NeedsIndex(page.can_build_index) } else { State::Ready };
                 p.refining = arm == Arm::Keyword;
             }
-            Err(e) if arm == Arm::Hybrid && matches!(p.state, State::Ready) => {
+            Err(_) if arm == Arm::Hybrid && matches!(p.state, State::Ready) => {
                 // Keyword hits are already showing; keep them and say why they stay.
                 p.refining = false;
-                p.vector_note = Some(e);
+                p.vector_missed = true;
             }
             Err(e) if arm == Arm::Keyword => {
                 // The hybrid answer may still arrive; only show the error if it already failed.
@@ -226,7 +280,7 @@ impl Workspace {
             State::Ready => {
                 let status = if p.refining {
                     " · refining with vectors…".to_string()
-                } else if p.vector_note.is_some() {
+                } else if p.vector_missed {
                     " · keyword only (vector ranking unavailable)".to_string()
                 } else {
                     String::new()
