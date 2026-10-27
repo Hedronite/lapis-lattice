@@ -2,10 +2,8 @@
 
 ## [Unreleased]
 
-### Phantom child and small caps
+### Graph frame budget and logging
 
-- A timed-out or overflowing `phantom-fractal` is stopped with everything it started: it runs in its own process group, and the stop kills the group. A backgrounded grandchild used to survive, holding the output pipes open.
-- `$LAPIS_PHANTOM_BINARY` must be an absolute path. A relative one is ignored with a one-line warning rather than resolved against whatever folder Lapis was started in.
 - A dashed graph link is added only when its dashes fit the frame's segment budget as well as the dash budget, so a frame never passes the budget the renderer is sized for.
 - The desktop's stderr logger writes the home folder as `~`, so a pasted log does not name the machine's user.
 

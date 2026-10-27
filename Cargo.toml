@@ -54,10 +54,6 @@ toml = "1"
 unicode-width = "0.2"
 yaml_serde = "0.10"
 
-# Killing a timed-out Phantom child's whole process group (killpg).
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 [profile.release]
 lto = "thin"
 codegen-units = 1

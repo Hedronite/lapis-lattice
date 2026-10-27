@@ -127,9 +127,6 @@ pub fn run_within(path: &Path, args: &[&str], timeout: Duration) -> Result<Reply
         .stderr(Stdio::piped())
         .env_clear()
         .envs(std::env::vars_os().filter(|(k, _)| keep_env(k)));
-    // Its own process group, so a stop reaches anything it started as well.
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let mut child = command.spawn().map_err(|source| RunError::Spawn { path: path.to_path_buf(), source })?;
     let (tx, rx) = mpsc::channel();
     if let Some(out) = child.stdout.take() {
@@ -205,17 +202,7 @@ fn drain(stream: &'static str, from: impl Read + Send + 'static, cap: usize, tx:
 }
 
 /// Kill and reap, so a stopped child leaves no zombie behind.
-/// A grandchild killed only through the child would keep the output pipes open
-/// and the drain threads blocked, so the whole process group goes.
 fn stop(child: &mut Child) {
-    #[cfg(unix)]
-    if let Ok(group) = libc::pid_t::try_from(child.id()) {
-        // SAFETY: killpg only sends a signal; the group id is the child's own pid,
-        // which `process_group(0)` made its group, and it is not yet reaped.
-        unsafe {
-            libc::killpg(group, libc::SIGKILL);
-        }
-    }
     let _ = child.kill();
     let _ = child.wait();
 }

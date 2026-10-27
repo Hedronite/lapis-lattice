@@ -172,21 +172,21 @@ fn empty_path_entry_is_still_skipped() {
 /// G0b: a relative `$LAPIS_PHANTOM_BINARY` is made absolute before the name
 /// and executable checks; another name is still rejected.
 #[test]
-fn relative_configured_path_is_refused() {
+fn relative_configured_path_is_stored_absolute() {
     let _g = serial();
     let cwd = temp_dir("rel-cfg");
     std::fs::create_dir_all(cwd.join("bin")).unwrap();
     stub(&cwd.join("bin"), discover::BINARY);
+    stub(&cwd.join("bin"), "fract");
+    let want = found(&cwd.join("bin"), discover::BINARY);
     let rel = PathBuf::from("bin").join(discover::BINARY);
-    assert_eq!(discover::discover_from(Some(&cwd), None, Some(&rel)), None, "relative is not a choice");
+    let got = discover::discover_from(Some(&cwd), None, Some(&rel)).unwrap();
+    assert!(got.is_absolute());
+    assert_eq!(got, want);
     let up = PathBuf::from("bin/../bin").join(discover::BINARY);
-    assert_eq!(discover::discover_from(Some(&cwd), None, Some(&up)), None);
-    // The same binary named by its full path is found, `..` and all.
-    let full = cwd.join("bin/../bin").join(discover::BINARY);
-    assert_eq!(
-        discover::discover_from(Some(&cwd), None, Some(&full)),
-        Some(found(&cwd.join("bin"), discover::BINARY))
-    );
+    assert_eq!(discover::discover_from(Some(&cwd), None, Some(&up)), Some(want));
+    let fract = PathBuf::from("bin").join("fract");
+    assert_eq!(discover::discover_from(Some(&cwd), None, Some(&fract)), None);
 }
 
 /// `lapis desktop --check` with nothing on `PATH` but `fract`: exit 0 and a
