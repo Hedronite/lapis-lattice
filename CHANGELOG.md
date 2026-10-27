@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Vault containment
+
+- New files stay inside the vault. `create` (and `capture`, `daily` and the other periodic notes), `restore`, `trash` and the desktop's Save a copy used to join the path to the vault root and write, so a folder symlinked out of the vault could carry the write outside it. They now go through `notes::contained_new`. It resolves the deepest folder that already exists, refuses one outside the vault (exit 3), and refuses a target that exists in any form, a dangling symlink included. The write then lands under that folder's real path, without following the links again.
+- The index walk no longer follows links. A symlinked folder is never walked: its notes are indexed where they really live, so it cannot lead out of the vault or loop back into itself. A symlinked file is indexed only when it resolves inside the vault, and a single-path reindex checks the same.
+- Reads open the canonical file (`notes::resolve_target`), so a link swapped after the containment check cannot redirect the read. Edits still go through the lexical path, so the shared writer keeps refusing to replace a symlink.
+
 ### Graph: fast frames, local drags
 
 - Small notes draw as batched hexagons, one shape per colour, instead of one disc each. On a 13,000-note vault, per-disc overhead was most of every frame. The board's draw time at rest fell from about 23 ms to about 5 ms, and a fresh layout unfolds at about 55 fps where it ran at 7–10. Hubs, pinned, focused and unresolved notes still draw as real circles, on top.
