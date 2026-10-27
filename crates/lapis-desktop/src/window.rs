@@ -301,8 +301,17 @@ impl Root {
         } else {
             self.scene.nodes.iter().map(|n| [n.x, n.y]).collect()
         };
-        let nodes = self.scene.nodes.iter().zip(xy).map(|(n, p)| (n.id.clone(), p)).collect();
-        let memory = std::sync::Arc::new(crate::graph_memory::Remembered::new(nodes, self.pins.clone()));
+        let nodes: std::collections::HashMap<String, [f32; 2]> =
+            self.scene.nodes.iter().zip(xy).map(|(n, p)| (n.id.clone(), p)).collect();
+        // Pins of notes no longer in the graph (deleted, renamed, newly ignored)
+        // are not written back: the file would keep their paths forever.
+        let pins = self
+            .pins
+            .iter()
+            .filter(|(id, _)| nodes.contains_key(*id))
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        let memory = std::sync::Arc::new(crate::graph_memory::Remembered::new(nodes, pins));
         self.memory = Some(memory.clone());
         let vault = self.vault.clone();
         cx.background_executor()

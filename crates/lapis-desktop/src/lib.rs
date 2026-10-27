@@ -136,7 +136,14 @@ pub(crate) fn log_to_stderr() {
         }
         fn log(&self, record: &log::Record) {
             if self.enabled(record.metadata()) {
-                eprintln!("lapis desktop: {} {}: {}", record.level(), record.target(), record.args());
+                // A dependency's message can carry local paths; the home folder
+                // shows as `~`, so a pasted log does not name the user's machine.
+                let text = record.args().to_string();
+                let text = match std::env::var("HOME") {
+                    Ok(home) if home.len() > 1 => text.replace(&home, "~"),
+                    _ => text,
+                };
+                eprintln!("lapis desktop: {} {}: {text}", record.level(), record.target());
             }
         }
         fn flush(&self) {}

@@ -16,25 +16,66 @@ pub const IGNORE_FILE: &str = ".lapisignore";
 /// Folders that mark a nested vault.
 const VAULT_MARKERS: [&str; 2] = [".lapis", ".obsidian"];
 
+/// Largest `.lapisignore` read. Patterns for a vault fit in a few kilobytes.
+pub const IGNORE_CAP: u64 = 1 << 20;
+
 /// The ignore rules for one vault, read once per walk.
 pub struct Scope {
     ignore: Option<Gitignore>,
+    problems: Vec<String>,
 }
 
 impl Scope {
-    /// Read `vault/.lapisignore`. A missing file ignores nothing, and a line that
-    /// is not a valid pattern is skipped rather than failing the index.
+    /// Read `vault/.lapisignore`. A missing file ignores nothing. A symlinked
+    /// file is never read, so a link at the root cannot lead out of the vault.
+    /// A file that cannot be read, is over [`IGNORE_CAP`], or has lines that are
+    /// not valid patterns still lets the index run on what it could read, and
+    /// says so in [`Scope::problems`], so a broken file is never silently the
+    /// same as none.
     pub fn load(vault: &Path) -> Self {
         let path = vault.join(IGNORE_FILE);
-        if !path.is_file() {
-            return Self { ignore: None };
+        let mut problems = Vec::new();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else { return Self { ignore: None, problems } };
+        if meta.is_symlink() {
+            problems.push(format!("{IGNORE_FILE} is a symlink and was not read; nothing is ignored"));
+            return Self { ignore: None, problems };
         }
+        if !meta.is_file() {
+            problems.push(format!("{IGNORE_FILE} is not a file; nothing is ignored"));
+            return Self { ignore: None, problems };
+        }
+        if meta.len() > IGNORE_CAP {
+            problems.push(format!(
+                "{IGNORE_FILE} is over {IGNORE_CAP} bytes and was not read; nothing is ignored"
+            ));
+            return Self { ignore: None, problems };
+        }
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                problems.push(format!("{IGNORE_FILE} could not be read ({e}); nothing is ignored"));
+                return Self { ignore: None, problems };
+            }
+        };
         let mut builder = GitignoreBuilder::new(vault);
-        let text = std::fs::read_to_string(&path).unwrap_or_default();
-        for line in text.lines() {
-            let _ = builder.add_line(Some(path.clone()), line);
+        for (n, line) in text.lines().enumerate() {
+            if let Err(e) = builder.add_line(Some(path.clone()), line) {
+                problems.push(format!("{IGNORE_FILE} line {}: {e}; the line is skipped", n + 1));
+            }
         }
-        Self { ignore: builder.build().ok() }
+        match builder.build() {
+            Ok(g) => Self { ignore: Some(g), problems },
+            Err(e) => {
+                problems.push(format!("{IGNORE_FILE} could not be compiled ({e}); nothing is ignored"));
+                Self { ignore: None, problems }
+            }
+        }
+    }
+
+    /// What went wrong reading `.lapisignore`, for `doctor` and `reindex --all`.
+    /// Empty when the file is fine or absent.
+    pub fn problems(&self) -> &[String] {
+        &self.problems
     }
 
     /// True when `rel` (vault-relative, `/`-separated) matches `.lapisignore`,
@@ -158,6 +199,51 @@ mod tests {
     }
 
     #[test]
+    fn an_oversized_ignore_file_is_reported_not_read() {
+        let v = vault("big-ignore");
+        std::fs::write(v.join(IGNORE_FILE), "x".repeat(IGNORE_CAP as usize + 1)).unwrap();
+        let s = Scope::load(&v);
+        assert!(s.covers(&v, "x"), "nothing is ignored");
+        assert!(s.problems()[0].contains("not read"));
+        let _ = std::fs::remove_dir_all(v);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_ignore_file_is_reported_and_not_read() {
+        let v = vault("link-ignore");
+        let outside = vault("link-ignore-outside");
+        std::fs::write(outside.join(IGNORE_FILE), "notes/\n[OUTSIDE_SECRET_7\n").unwrap();
+        std::os::unix::fs::symlink(outside.join(IGNORE_FILE), v.join(IGNORE_FILE)).unwrap();
+        let s = Scope::load(&v);
+        assert!(s.problems()[0].contains("is a symlink and was not read"), "{:?}", s.problems());
+        assert!(s.covers(&v, "notes/a.md"), "nothing is ignored");
+        assert!(!s.ignores("notes", true), "the linked file's patterns do not apply");
+        assert!(
+            !s.problems().iter().any(|p| p.contains("OUTSIDE_SECRET_7")),
+            "the outside content never leaks: {:?}",
+            s.problems()
+        );
+        let _ = std::fs::remove_dir_all(outside);
+        let _ = std::fs::remove_dir_all(v);
+    }
+    #[test]
+    fn a_note_excluded_after_indexing_counts_as_stale_until_a_full_reindex() {
+        let v = vault("late-ignore");
+        std::fs::create_dir_all(v.join("gen")).unwrap();
+        std::fs::write(v.join("notes.md"), "# Notes\n").unwrap();
+        std::fs::write(v.join("gen/out.md"), "# Out\n").unwrap();
+        let mut e = crate::Engine::open(&v).unwrap();
+        e.reindex().unwrap();
+        assert_eq!(e.health().unwrap().stale_documents, 0);
+        std::fs::write(v.join(IGNORE_FILE), "gen/\n").unwrap();
+        assert_eq!(e.health().unwrap().stale_documents, 1, "the excluded note is still indexed, and flagged");
+        e.reindex().unwrap();
+        assert_eq!(e.health().unwrap().stale_documents, 0, "a full reindex drops it");
+        let _ = std::fs::remove_dir_all(v);
+    }
+
+    #[test]
     fn lapisignore_takes_gitignore_patterns() {
         let v = vault("patterns");
         std::fs::write(
@@ -174,6 +260,12 @@ mod tests {
         assert!(!s.covers(&v, "root-only.md"));
         assert!(s.covers(&v, "sub/root-only.md"), "an anchored pattern stays at the root");
         assert!(s.covers(&v, "notes/a.md"), "a bad line is skipped, not fatal");
+        assert!(s.problems().is_empty(), "a lenient pattern is no problem: {:?}", s.problems());
+        assert!(Scope::load(&v.join("nowhere")).problems().is_empty(), "no file, no problem");
+        std::fs::write(v.join(IGNORE_FILE), [0xff, 0xfe, b'\n']).unwrap();
+        let unreadable = Scope::load(&v);
+        assert!(unreadable.covers(&v, "notes/a.md"), "an unreadable file ignores nothing");
+        assert!(unreadable.problems()[0].contains("could not be read"), "{:?}", unreadable.problems());
         let _ = std::fs::remove_dir_all(v);
     }
 }

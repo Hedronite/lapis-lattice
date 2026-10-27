@@ -308,9 +308,11 @@ fn http_markdown_paths(url: &str, timeout: std::time::Duration) -> Result<Vec<St
                 runtime.block_on(async {
                     let mut out = Vec::new();
                     let mut offset = 0u32;
+                    let mut pages = crate::paging::Pages::default();
                     loop {
                         let params = crate::http::ListParams { limit: 1000, offset, ..Default::default() };
                         let page = client.documents(&params).await?;
+                        pages.next(page.first().map(|d| d.path.as_str()))?;
                         let n = u32::try_from(page.len()).unwrap_or(u32::MAX);
                         out.extend(page.into_iter().map(|d| d.path).filter(|p| p.ends_with(".md")));
                         if n < 1000 {

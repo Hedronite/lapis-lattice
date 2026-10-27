@@ -60,6 +60,7 @@ pub fn stale_count(conn: &Connection, vault: &Path) -> Result<u64> {
         return Ok(0);
     }
     let on_disk = walk(vault)?;
+    let in_scope: HashSet<&str> = on_disk.iter().map(String::as_str).collect();
     let mut indexed = HashSet::new();
     let mut stale = 0u64;
     let mut stmt = conn.prepare("SELECT path, mtime FROM documents")?;
@@ -70,7 +71,9 @@ pub fn stale_count(conn: &Connection, vault: &Path) -> Result<u64> {
     for (rel, stored_mtime) in rows {
         indexed.insert(rel.clone());
         let abs = vault.join(&rel);
-        if !abs.is_file() {
+        // Gone from disk, or still on disk but now out of scope (a new ignore
+        // rule, a folder that became its own vault): stale until a full reindex.
+        if !abs.is_file() || !in_scope.contains(rel.as_str()) {
             stale += 1;
             continue;
         }

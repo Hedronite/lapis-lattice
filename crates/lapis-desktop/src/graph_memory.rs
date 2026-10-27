@@ -77,19 +77,53 @@ pub fn file_for(dir: &Path, vault: &Path) -> PathBuf {
 }
 
 /// What `dir` remembers for `vault`, if anything usable.
+/// Most bytes a memory file is read from, and most notes it may hold: about
+/// 90 bytes a note, so room for a vault several times the snapshot cap.
+const READ_CAP: u64 = 32 << 20;
+const NODE_CAP: usize = 200_000;
+
 pub fn load_from(dir: &Path, vault: &Path) -> Option<Remembered> {
-    let text = std::fs::read_to_string(file_for(dir, vault)).ok()?;
-    serde_json::from_str::<Remembered>(&text).ok().filter(|r| r.version == VERSION)
+    let file = file_for(dir, vault);
+    let meta = std::fs::metadata(&file).ok()?;
+    if !meta.is_file() || meta.len() > READ_CAP {
+        return None;
+    }
+    let text = std::fs::read_to_string(&file).ok()?;
+    serde_json::from_str::<Remembered>(&text)
+        .ok()
+        .filter(|r| r.version == VERSION && r.nodes.len() <= NODE_CAP && r.pins.len() <= NODE_CAP)
 }
 
-/// Write `memory` for `vault` into `dir`: a temporary file, then a rename, so a
-/// reader never sees half a file.
+/// Write `memory` for `vault` into `dir`. The file holds note paths, so the
+/// folder is created 0700 and the file 0600, through a temporary file created
+/// exclusively (a planted link is never written through) and renamed into
+/// place, so a reader never sees half a file. A vault with no path is never
+/// saved: every such vault would share one file.
 pub fn save_to(dir: &Path, vault: &Path, memory: &Remembered) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
+    use std::io::Write;
+    if vault.as_os_str().is_empty() {
+        return Err(std::io::Error::other("no vault path to remember the layout under"));
+    }
+    let mut folder = std::fs::DirBuilder::new();
+    folder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut folder, 0o700);
+    folder.create(dir)?;
     let path = file_for(dir, vault);
-    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, serde_json::to_vec(memory).map_err(std::io::Error::other)?)?;
-    std::fs::rename(&tmp, &path)
+    let nanos =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+    let tmp = path.with_extension(format!("json.{}.{nanos}.tmp", std::process::id()));
+    let body = serde_json::to_vec(memory).map_err(std::io::Error::other)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let placed =
+        options.open(&tmp).and_then(|mut f| f.write_all(&body)).and_then(|()| std::fs::rename(&tmp, &path));
+    if placed.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    placed
 }
 
 /// [`load_from`] the default cache directory.
@@ -125,6 +159,22 @@ mod tests {
         let memory = Remembered::new(nodes, pins);
         save_to(&cache, &vault, &memory).unwrap();
         assert_eq!(load_from(&cache, &vault), Some(memory));
+        let _ = std::fs::remove_dir_all(cache.parent().unwrap());
+    }
+
+    #[test]
+    fn the_memory_file_is_owner_only_and_needs_a_vault_path() {
+        let (cache, vault) = dirs("private");
+        save_to(&cache, &vault, &Remembered::new(HashMap::new(), BTreeMap::new())).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&file_for(&cache, &vault)), 0o600);
+            assert_eq!(mode(&cache), 0o700);
+        }
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 1, "no temporary file left behind");
+        assert!(save_to(&cache, Path::new(""), &Remembered::default()).is_err(), "no shared empty-path file");
         let _ = std::fs::remove_dir_all(cache.parent().unwrap());
     }
 
