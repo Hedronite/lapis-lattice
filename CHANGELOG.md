@@ -13,6 +13,14 @@
 - The index walk no longer follows links. A symlinked folder is never walked: its notes are indexed where they really live, so it cannot lead out of the vault or loop back into itself. A symlinked file is indexed only when it resolves inside the vault, and a single-path reindex checks the same.
 - Reads open the canonical file (`notes::resolve_target`), so a link swapped after the containment check cannot redirect the read. Edits still go through the lexical path, so the shared writer keeps refusing to replace a symlink.
 
+### Private caches, bounded listings, clean URLs
+
+- The stale-index cache no longer stores the backend's address. An HTTP lattice URL can carry `user:pass@`, so the cache records a hash of it. The file is written owner-only (folder 0700, file 0600) through an exclusively created temporary file, and is read with a 4 MiB cap.
+- The desktop's graph memory gets the same treatment (owner-only, exclusive temporary file, a 32 MiB and 200,000-note read cap). It never saves under an empty vault path, and pins of notes that are no longer in the graph are dropped when it saves.
+- Paged document listings end. The stale check and the RAG gate's lattice listing stopped only on a short page, so a lattice that ignores `offset` would keep them reading forever. Both now stop with a lattice error (exit 2) when a page repeats the one before, or after 1,000 pages. In `LAPIS_RAG_GATE=hard` mode that error refuses the write, as a down lattice does.
+- Ollama addresses are shown without credentials or query strings: in errors, in `doctor`, and in `reindex --all --json`'s `embedder.url`. Errors from the HTTP client, which quote the URL they tried, are scrubbed the same way.
+- A failed embed reports the HTTP status only, not the start of the reply body. The embed client no longer follows redirects, so note text cannot be sent to a host nobody configured.
+
 ### Graph: fast frames, local drags
 
 - Small notes draw as batched hexagons, one shape per colour, instead of one disc each. On a 13,000-note vault, per-disc overhead was most of every frame. The board's draw time at rest fell from about 23 ms to about 5 ms, and a fresh layout unfolds at about 55 fps where it ran at 7–10. Hubs, pinned, focused and unresolved notes still draw as real circles, on top.
