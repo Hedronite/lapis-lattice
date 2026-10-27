@@ -12,6 +12,12 @@
 - New files stay inside the vault. `create` (and `capture`, `daily` and the other periodic notes), `restore`, `trash` and the desktop's Save a copy used to join the path to the vault root and write, so a folder symlinked out of the vault could carry the write outside it. They now go through `notes::contained_new`. It resolves the deepest folder that already exists, refuses one outside the vault (exit 3), and refuses a target that exists in any form, a dangling symlink included. The write then lands under that folder's real path, without following the links again.
 - The index walk no longer follows links. A symlinked folder is never walked: its notes are indexed where they really live, so it cannot lead out of the vault or loop back into itself. A symlinked file is indexed only when it resolves inside the vault, and a single-path reindex checks the same.
 - Reads open the canonical file (`notes::resolve_target`), so a link swapped after the containment check cannot redirect the read. Edits still go through the lexical path, so the shared writer keeps refusing to replace a symlink.
+### Index scope: loud failures, stale exclusions, safe paths
+
+- A `.lapisignore` that cannot be read, is over 1 MiB, is not a file, or will not compile still lets the index run (nothing is ignored), but the problem is reported. It shows as an `index_scope` warning in `doctor`, on stderr after `reindex --all`, and in its JSON as `scopeProblems`. A broken ignore file is no longer silently the same as none.
+- A note indexed before a new `.lapisignore` rule or nested vault excluded it now counts as stale (as removed) until `lapis reindex --all` drops it. Before, it stayed searchable, in the graph and over MCP with nothing flagging it. The engine's health count and the CLI's stale check (`vault info`, `search`, `doctor`) both apply the built-in index's scope; an excluded file is never reported as unindexed.
+- Paths the backend reports are trusted only as clean vault-relative paths before the stale check joins them to the disk; absolute and `..` paths are dropped. Stale paths printed by `vault info` have control characters replaced, so an escape sequence in an index path cannot drive the terminal.
+- A `.lapisignore` that is a symlink is not read, so a link at the vault root cannot carry ignore rules in from outside the vault; the skip is reported like the other loud failures, and nothing is ignored.
 
 ### Private caches, bounded listings, clean URLs
 

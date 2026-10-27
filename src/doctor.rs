@@ -61,6 +61,17 @@ pub async fn run(ctx: &Ctx) -> Result<()> {
             ("none".to_string(), serde_json::Value::Null)
         }
     };
+    // A broken `.lapisignore` still indexes, but never silently as if absent.
+    if ctx.cfg.lattice.is_embedded() {
+        let scope = lapis_lattice::Scope::load(&root);
+        match scope.problems() {
+            [] => check!("index_scope", "ok", "nested vaults skipped; .lapisignore read"),
+            [first, rest @ ..] => {
+                check!("index_scope", "warn", first.clone());
+                notes.extend(rest.iter().cloned());
+            }
+        }
+    }
     if health.is_ok() {
         match crate::stale::check(&ctx.backend()?, &root).await {
             Ok(s) if s.count == 0 => check!("index_fresh", "ok", "every indexed folder matches the disk"),

@@ -231,7 +231,7 @@ async fn vault_info(ctx: &Ctx) -> Result<()> {
                 s.count, s.changed, s.unindexed, s.removed
             );
             for p in &s.paths {
-                println!("         {p}");
+                println!("         {}", stale::printable(p));
             }
         }
     }
