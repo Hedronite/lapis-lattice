@@ -29,8 +29,8 @@ pub mod taxonomy;
 
 pub use contain::{clean_rel, contained_new};
 pub use create::{
-    AUTHORITATIVE_MARKER, CANON_TYPES, CreateRequest, HAL_VERSION, WrittenNote, compose_text, create_new,
-    create_set, target_path, to_yaml, write_composed,
+    AUTHORITATIVE_MARKER, CANON_TYPES, Classify, CreateRequest, HAL_VERSION, WrittenNote, compose_text,
+    create_new, create_set, target_path, to_yaml, write_composed,
 };
 pub use error::{Error, Result};
 pub use overlay::{Buckets, Corpus, OVERLAY_REL, Overlay, OverlaySource, load_overlay};
