@@ -65,10 +65,13 @@ pub struct WrittenNote {
     pub taxonomy: &'static str,
 }
 
-/// The file path for a new note: inbox-bucket default, directory vs file,
-/// slug, then the two refusals — the vault root and an existing target —
-/// with the CLI's messages.
-fn target_path(root: &Path, req: &CreateRequest, inbox: &str) -> Result<String> {
+/// The vault-relative path [`create_new`] would write, without writing it:
+/// inbox-bucket default, directory vs file, slug, then the two refusals —
+/// the vault root and an existing target — with the CLI's messages.
+///
+/// The CLI needs this for its create flow (compose → RAG gate → write)
+/// and for dry runs, which must produce the same path a real write would.
+pub fn target_path(root: &Path, req: &CreateRequest, inbox: &str) -> Result<String> {
     let file = format!("{}.md", slug(&req.title));
     let rel = match req.path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
         None => format!("{}/{}", inbox.trim_matches('/'), file),
