@@ -25,6 +25,9 @@ pub mod error;
 pub mod fsutil;
 pub mod overlay;
 pub mod slug;
+#[cfg(doctest)]
+#[doc = include_str!("../../../README.md")]
+struct RootReadmeDoctests;
 pub mod taxonomy;
 
 pub use contain::{clean_rel, contained_new};

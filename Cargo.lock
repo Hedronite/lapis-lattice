@@ -4248,6 +4248,7 @@ dependencies = [
 name = "lapis-notes"
 version = "0.4.2"
 dependencies = [
+ "lapis-lattice",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
