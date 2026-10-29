@@ -45,11 +45,15 @@ pub fn refresh(conn: &Connection, vault: &Path) -> Result<RefreshReport> {
                 r.get::<_, Option<i64>>(2)?.unwrap_or(-1),
             ))
         })?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<std::result::Result<Vec<_>, rusqlite::Error>>()?;
     drop(stmt);
     let in_index: HashSet<String> = indexed.iter().map(|(p, _, _)| p.clone()).collect();
 
+    // The write phase is one transaction: it lands whole or not at all, so a
+    // failure mid-walk can never leave a half-refreshed index behind. A clean
+    // run issues no write statements, and a transaction that wrote nothing
+    // commits no pages, so a second call still writes nothing.
+    let tx = conn.unchecked_transaction()?;
     let mut added = 0u64;
     let mut updated = 0u64;
     let mut removed = 0u64;
@@ -108,6 +112,7 @@ pub fn refresh(conn: &Connection, vault: &Path) -> Result<RefreshReport> {
         crate::index::resolve_edges(conn, &files)?;
         crate::sqlite::meta_set(conn, "graph_built", "1")?;
     }
+    tx.commit()?;
     Ok(RefreshReport { added, updated, removed, embedded: 0, embed_error: None })
 }
 
@@ -127,7 +132,7 @@ fn stat_of(p: &Path) -> Option<(i64, i64)> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Engine, ListParams};
+    use crate::{Engine, Error, ListParams};
     use std::path::PathBuf;
     use std::time::SystemTime;
 
@@ -155,6 +160,36 @@ mod tests {
         )
         .unwrap();
         d
+    }
+
+    /// A corrupt row is an error, never a silent drop (Vini G1 nits): a row
+    /// `documents` cannot read must not pretend to be absent, or the diff pass
+    /// would add or remove notes on the strength of garbage.
+    #[test]
+    fn an_unreadable_row_fails_the_refresh() {
+        let v = vault();
+        let mut e = Engine::open(&v).unwrap();
+        e.reindex().unwrap();
+        // A TEXT value inside the INTEGER size column: SQLite accepts it,
+        // the row read cannot convert it, and the refresh must refuse rather
+        // than silently pretend the row is absent. (mtime is NOT NULL, so
+        // corruption lands here first.)
+        e.conn.execute_batch("UPDATE documents SET size = 'not-a-number';").unwrap();
+        match e.refresh() {
+            Err(err) => {
+                assert!(
+                    matches!(err, Error::Sqlite(_)),
+                    "expected the row read error to surface, got {err:?}"
+                )
+            }
+            Ok(r) => panic!("a corrupt row was silently skipped: {r:?}"),
+        }
+        assert_eq!(
+            e.health().unwrap().documents_indexed,
+            2,
+            "nothing was written while the read was refused"
+        );
+        let _ = std::fs::remove_dir_all(&v);
     }
 
     fn paths(e: &Engine, token: &str) -> Vec<String> {
