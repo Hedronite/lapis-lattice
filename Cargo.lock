@@ -4191,6 +4191,7 @@ dependencies = [
  "jiff",
  "lapis-desktop",
  "lapis-lattice",
+ "lapis-notes",
  "libc",
  "notify 8.2.0",
  "pdf-extract",
@@ -4241,6 +4242,17 @@ dependencies = [
  "serde_json",
  "sqlite-vec",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "lapis-notes"
+version = "0.4.2"
+dependencies = [
+ "lapis-lattice",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "yaml_serde",
 ]
 
 [[package]]

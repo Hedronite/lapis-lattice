@@ -1,0 +1,17 @@
+[package]
+name = "lapis-notes"
+version = "0.4.2"
+edition = "2024"
+description = "Creating notes without the CLI: HAL create-set, slugging, the inbox bucket, containment, and the write."
+license = "MIT"
+repository = "https://github.com/Hedronite/lapis-lattice"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+yaml_serde = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+lapis-lattice = { path = "../lapis-lattice" }

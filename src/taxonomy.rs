@@ -2,30 +2,19 @@
 //!
 //! SPEC.md § Create-set: "via `taxonomy.py` rules ported or called". We call:
 //! the canon lives in `projects/atrium-lattice/taxonomy.py` and is run under
-//! the lattice venv as a child process. If that venv is not present (a vault
-//! without a lattice, CI, tests) we fall back to the first path segment.
+//! the lattice venv as a child process. `lapis-notes` never spawns one, so
+//! the create-set takes this route as its classify hook. If that venv is not
+//! present (a vault without a lattice, CI, tests) the hook answers `None` and
+//! `lapis-notes` falls back to the first path segment.
 
 use std::path::Path;
 use std::process::Command;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Classified {
-    pub domain: Option<String>,
-    pub doc_type: Option<String>,
-    /// `"taxonomy.py"` or `"fallback"`, reported in `--json` so an agent knows.
-    pub source: &'static str,
-}
+use lapis_notes::Classified;
 
 const LATTICE_REL: &str = "projects/atrium-lattice";
 
-pub fn classify(vault_root: &Path, rel: &str, requested_type: Option<&str>) -> Classified {
-    if let Some(c) = via_taxonomy_py(vault_root, rel, requested_type) {
-        return c;
-    }
-    fallback(rel, requested_type)
-}
-
-fn via_taxonomy_py(vault_root: &Path, rel: &str, requested_type: Option<&str>) -> Option<Classified> {
+pub fn via_taxonomy_py(vault_root: &Path, rel: &str, requested_type: Option<&str>) -> Option<Classified> {
     let lattice = vault_root.join(LATTICE_REL);
     let py = lattice.join(".venv/bin/python");
     if !py.is_file() || !lattice.join("taxonomy.py").is_file() {
@@ -51,40 +40,19 @@ fn via_taxonomy_py(vault_root: &Path, rel: &str, requested_type: Option<&str>) -
     Some(Classified { domain: get("domain"), doc_type: get("doc_type"), source: "taxonomy.py" })
 }
 
-pub fn fallback(rel: &str, requested_type: Option<&str>) -> Classified {
-    let first = rel.split('/').next().filter(|s| !s.is_empty() && rel.contains('/'));
-    Classified {
-        domain: first.map(|s| s.to_ascii_lowercase()),
-        doc_type: requested_type.map(str::to_string),
-        source: "fallback",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn fallback_uses_first_segment() {
-        let c = fallback("notes/x.md", None);
-        assert_eq!(c.domain.as_deref(), Some("notes"));
-        assert_eq!(c.doc_type, None);
-        let c = fallback("ROOT.md", Some("note"));
-        assert_eq!(c.domain, None);
-        assert_eq!(c.doc_type.as_deref(), Some("note"));
-    }
-
-    #[test]
-    fn classify_without_lattice_is_fallback() {
+    fn without_lattice_the_hook_answers_none() {
         // Unique per call: pid alone repeats across parallel tests in one
         // binary, and the clock is coarser than a nanosecond.
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("lapis-tax-{}-{seq}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let c = classify(&dir, "inbox/a.md", Some("capture"));
-        assert_eq!(c.source, "fallback");
-        assert_eq!(c.domain.as_deref(), Some("inbox"));
+        assert_eq!(via_taxonomy_py(&dir, "inbox/a.md", Some("capture")), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
