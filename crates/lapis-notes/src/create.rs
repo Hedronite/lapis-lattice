@@ -160,7 +160,7 @@ pub fn compose_text(hal: &Map<String, Value>, body: &str) -> Result<String> {
 /// A caller-supplied route to the canon: the vault-relative path maps to its
 /// class, or `None`. The CLI wraps its `taxonomy.py` child-process lookup in
 /// one; a phone passes `Option::None` for the whole hook.
-type Classify = dyn Fn(&str) -> Option<Classified>;
+pub type Classify<'a> = dyn Fn(&str) -> Option<Classified> + 'a;
 
 fn is_canon(doc_type: &str) -> bool {
     CANON_TYPES.contains(&doc_type)
@@ -182,7 +182,11 @@ pub fn write_composed(vault: &Path, rel: &str, text: &str) -> Result<u64> {
 /// template and rewrite-gate policies. `classify` is the caller's route to
 /// the canon (the CLI wires its `taxonomy.py` lookup here); `None` uses the
 /// pure fallback. The crate never spawns a process.
-pub fn create_new(vault: &Path, req: &CreateRequest, classify: Option<&Classify>) -> Result<WrittenNote> {
+pub fn create_new<'a>(
+    vault: &Path,
+    req: &CreateRequest,
+    classify: Option<&'a Classify<'a>>,
+) -> Result<WrittenNote> {
     if req.title.trim().is_empty() {
         return Err(Error::Usage("--title is required".into()));
     }
@@ -381,6 +385,26 @@ mod tests {
         r.inbox = Some("inbox".into());
         let w = create_new(&v, &r, Some(&canon)).unwrap();
         assert_eq!(w.taxonomy, "fallback", "a hook that answers None falls back");
+        let _ = std::fs::remove_dir_all(v);
+    }
+
+    /// A capturing closure hooks in: the alias is bounded by its lifetime, so
+    /// local state does not need to be `'static` (E0521 regression).
+    #[test]
+    fn a_capturing_closure_hooks_in() {
+        let v = dir("gold-cap");
+        let outside_hint = format!("notes-{}", 7);
+        let hook = move |rel: &str| {
+            // Captures `outside_hint`, a local `String`.
+            let domain = rel.split('/').next().map(str::to_string).or_else(|| Some(outside_hint.clone()));
+            Some(Classified { domain, doc_type: None, source: "caller" })
+        };
+        let mut r = CreateRequest { path: Some("Notes/".into()), ..req("Local", "2026-10-29") };
+        r.inbox = Some("inbox".into());
+        let w = create_new(&v, &r, Some(&hook)).unwrap();
+        assert_eq!(w.taxonomy, "caller");
+        let text = std::fs::read_to_string(v.join(&w.path)).unwrap();
+        assert!(text.contains("domain: Notes\n"), "the hook answered: {text:?}");
         let _ = std::fs::remove_dir_all(v);
     }
 
