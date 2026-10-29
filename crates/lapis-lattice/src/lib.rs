@@ -217,8 +217,15 @@ impl Engine {
     }
     /// Open with the index in a caller-chosen `index_dir`, not the vault's
     /// `.lapis/`: build, search, reindex and every helper work the same, and the
-    /// vault tree gains no file. The directory is created if needed, like
-    /// `.lapis/` is. For a host that may not write the vault, a phone.
+    /// vault tree gains no file. The directory is created if needed, and when
+    /// this crate creates it, it is `0700` on unix (an existing directory keeps
+    /// its mode). The default [`Engine::open`] and [`Engine::open_with`] do not
+    /// change: `<vault>/.lapis/` is created as before.
+    ///
+    /// The caller is trusted: it should canonicalize and confine `index_dir` to
+    /// its own app-data directory and must not place it inside the vault — an
+    /// in-vault index would make the engine walk its own database and dirty the
+    /// very tree it must leave untouched.
     pub fn open_in(
         vault: impl AsRef<Path>,
         index_dir: impl AsRef<Path>,
@@ -239,7 +246,13 @@ impl Engine {
             Some(d) => d.to_path_buf(),
             None => vault.join(location::DEFAULT_DIR),
         };
-        std::fs::create_dir_all(&dir)?;
+        // Only the caller-chosen dir gets the private mode; the default
+        // `.lapis/` path behaves exactly as before.
+        if index_dir.is_some() {
+            location::create_dir_private(&dir)?;
+        } else {
+            std::fs::create_dir_all(&dir)?;
+        }
         let db = location::db_file(&dir);
         // Before the connection exists: sqlite-vec registers as an auto-extension,
         // so `vec0` is present on this connection and every later one without a
@@ -254,6 +267,8 @@ impl Engine {
         Ok(Self { vault, db, conn, embedder })
     }
 
+    /// The SQLite file this engine holds, wherever the default or
+    /// [`Engine::open_in`] put it. Relative if `index_dir` was relative.
     pub fn db_path(&self) -> PathBuf {
         self.db.clone()
     }
