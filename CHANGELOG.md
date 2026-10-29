@@ -88,6 +88,8 @@
 - A relative `$LAPIS_PHANTOM_BINARY` is refused, so the binary cannot depend on where `lapis` is run. It is not joined to the current directory and does not fall back to `PATH`; Lapis reports `Phantom not found`.
 - On unix the `phantom-fractal` child runs in its own process group, and a timeout or an output overflow kills the whole group. Anything the child started, such as a background job still holding its output, is stopped with it.
 - On Windows only the direct `phantom-fractal` child is killed. Process groups and `killpg` are unix only, and no Job Object is used, so a process the child started can outlive it.
+- Lapis accepts only Phantom envelopes with `"schema": 1` and refuses any other, missing or non-integer `schema` before reading `data`; `desktop --check` then exits non-zero. It never checks `store_schema` or `extractor_version`. A relative `$LAPIS_PHANTOM_BINARY` now prints one warning that names the variable but not its value, a panic can no longer leave the `phantom-fractal` child running, and `PHANTOM_PIN` with `scripts/phantom-smoke.sh` records the Phantom commit the live smoke builds.
+- Lapis reads whether a Phantom list was cut short from `data.truncated`, where Phantom puts it, and no longer reads `meta.truncated` or `meta.next` from Phantom replies. Lapis's own 256-value cut still marks a reply truncated.
 - Graph preview: a note path containing ` · ` shows whole on the preview card. Without the desktop services, the preview reads at most what it shows and stays inside the vault. Errors on the graph board no longer show where the vault lives on disk.
 
 ### Reindex everything

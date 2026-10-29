@@ -238,3 +238,47 @@ fn cargo_tree_has_no_phantom_crate() {
     let phantom: Vec<_> = tree.lines().filter(|l| l.to_ascii_lowercase().starts_with("phantom")).collect();
     assert!(phantom.is_empty(), "Phantom crate(s) in `cargo tree -p lapis`: {phantom:?}");
 }
+
+/// G5d (E-1): the warning for a relative `$LAPIS_PHANTOM_BINARY` names the
+/// variable and never its value. An absolute or unset path gets none.
+#[test]
+fn relative_configured_path_warns_without_its_value() {
+    let rel = Path::new("private-dir-e1/phantom-fractal");
+    let w = discover::warning(Some(rel)).expect("a warning");
+    assert!(w.contains(discover::ENV), "{w}");
+    assert!(!w.contains("private-dir-e1"), "{w}");
+    assert_eq!(discover::warning(Some(Path::new("/abs/phantom-fractal"))), None);
+    assert_eq!(discover::warning(None), None);
+}
+
+/// G5d end to end: a relative configured binary is still refused (G4.2), and
+/// `desktop --check` prints the warning once on stderr, without the value.
+#[test]
+fn desktop_check_warns_once_on_a_relative_configured_path() {
+    let _g = serial();
+    let cwd = temp_dir("warn-cwd");
+    let vault = temp_dir("warn-vault");
+    let config = temp_dir("warn-config");
+    let other = temp_dir("warn-path");
+    std::fs::create_dir_all(cwd.join("private-dir-e1")).unwrap();
+    stub(&cwd.join("private-dir-e1"), discover::BINARY);
+    stub(&other, discover::BINARY);
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lapis"))
+        .args(["--vault"])
+        .arg(&vault)
+        .args(["desktop", "--check"])
+        .current_dir(&cwd)
+        .env(discover::ENV, PathBuf::from("private-dir-e1").join(discover::BINARY))
+        .env("PATH", path_of(&[&other]))
+        .env("XDG_CONFIG_HOME", &config)
+        .env_remove("LAPIS_VAULT")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "exit {:?}\n{stdout}\n{stderr}", out.status);
+    assert!(stdout.contains("Phantom not found"), "{stdout}");
+    assert_eq!(stderr.matches(discover::RELATIVE_WARNING).count(), 1, "{stderr}");
+    assert!(stderr.contains("LAPIS_PHANTOM_BINARY"), "{stderr}");
+    assert!(!stderr.contains("private-dir-e1") && !stdout.contains("private-dir-e1"), "{stdout}\n{stderr}");
+}

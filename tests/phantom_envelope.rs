@@ -1,6 +1,6 @@
 //! G0c, G3a-G3c, T1-T2: the re-check before spawn, the inbound envelope, exits,
 //! and what Lapis refuses to do with Phantom's JSON. Envelope fixtures follow
-//! Phantom SPEC §9 and Phantom's G1 proto at `2063a55`
+//! Phantom SPEC §9 and Phantom's proto at `486e5f3`, `schema` included
 //! (`crates/phantom-fractal-proto/src/lib.rs`). Phantom runs as stub scripts.
 
 #![cfg(unix)]
@@ -57,10 +57,10 @@ fn phantom_stub(stdout: &str, code: i32) -> (PathBuf, PathBuf) {
     stub(&temp_dir("stub"), discover::BINARY, stdout, code)
 }
 
-const SUCCESS: &str = r#"{"ok":true,"data":{"version":"0.0.1","schema":1},"error":null}"#;
-/// `Envelope::<String>::failure(ErrorKind::NotFound, "missing")` at `2063a55`.
+const SUCCESS: &str = r#"{"schema":1,"ok":true,"data":{"version":"0.0.1","schema":1},"error":null}"#;
+/// `Envelope::<String>::failure(ErrorKind::NotFound, "missing")` at `486e5f3`.
 const NOT_FOUND: &str =
-    r#"{"ok":false,"data":null,"error":{"kind":"not_found","message":"missing","exit":3}}"#;
+    r#"{"schema":1,"ok":false,"data":null,"error":{"kind":"not_found","message":"missing","exit":3}}"#;
 
 fn parse(raw: &str) -> Result<envelope::Reply, ParseError> {
     envelope::parse(raw.as_bytes())
@@ -73,7 +73,7 @@ fn g3a_success_envelope_parses() {
     let reply = parse(SUCCESS).unwrap();
     assert_eq!(
         reply.envelope,
-        Envelope { ok: true, data: Some(json!({"version": "0.0.1", "schema": 1})), error: None, meta: None }
+        Envelope { ok: true, data: Some(json!({"version": "0.0.1", "schema": 1})), error: None }
     );
     assert!(!reply.truncated);
 }
@@ -87,37 +87,36 @@ fn g3a_error_envelope_parses() {
             ok: false,
             data: None,
             error: Some(EnvelopeError { kind: "not_found".into(), message: "missing".into(), exit: 3 }),
-            meta: None,
         }
     );
 }
 
 #[test]
 fn g3a_section_9_meta_parses() {
-    let raw = r#"{"ok":true,"data":[],"error":null,"meta":{"latency_ms":4,"truncated":true,"next":"c2","count":0,
+    let raw = r#"{"schema":1,"ok":true,"data":[],"error":null,"meta":{"latency_ms":4,"truncated":true,"next":"c2","count":0,
         "limit":50,"offset":0,"stale":false,"index_head":"abc","worktree_dirty":false,"rank_epoch":1,"used_tokens":9}}"#;
     let reply = parse(raw).unwrap();
-    assert!(reply.envelope.meta.as_ref().unwrap().truncated);
-    assert!(reply.truncated, "Phantom's own meta.truncated is kept");
+    assert!(reply.envelope.ok);
+    assert!(!reply.truncated, "meta is not read (G5g); Phantom says truncated inside data");
 }
 
 // ------------------------------------------------------------------ G3b
 
-/// The raw JSON of `unknown_json_fields_are_ignored` at `2063a55`.
+/// The raw JSON of `unknown_json_fields_are_ignored` at `486e5f3`.
 #[test]
 fn g3b_unknown_fields_parse_equal_to_the_stripped_envelope() {
     let raw = r#"{
         "ok": false,
         "data": null,
         "error": { "kind": "ambiguous", "message": "two hits", "exit": 6, "hint": "pick one" },
+        "schema": 1,
         "meta": { "latency_ms": 4 },
         "trace": []
     }"#;
-    let stripped = r#"{"ok":false,"data":null,"error":{"kind":"ambiguous","message":"two hits","exit":6},"meta":{"latency_ms":4}}"#;
+    let stripped = r#"{"schema":1,"ok":false,"data":null,"error":{"kind":"ambiguous","message":"two hits","exit":6},"meta":{"latency_ms":4}}"#;
     assert_eq!(parse(raw).unwrap(), parse(stripped).unwrap());
 
-    let raw =
-        r#"{"api_version":"1.0","ok":true,"data":{"version":"0.0.1","schema":1},"error":null,"x":{"y":[1]}}"#;
+    let raw = r#"{"schema":1,"api_version":"1.0","ok":true,"data":{"version":"0.0.1","schema":1},"error":null,"x":{"y":[1]}}"#;
     assert_eq!(parse(raw).unwrap(), parse(SUCCESS).unwrap());
 }
 
@@ -127,7 +126,7 @@ fn g3b_unknown_fields_parse_equal_to_the_stripped_envelope() {
 fn g3c_exits_zero_through_six_are_kept() {
     let kinds = ["ok", "usage", "no_index", "not_found", "lock_held", "schema_newer", "ambiguous"];
     for (exit, kind) in kinds.iter().enumerate() {
-        let raw = json!({"ok": false, "data": null, "error": {"kind": kind, "message": "m", "exit": exit}});
+        let raw = json!({"schema": 1, "ok": false, "data": null, "error": {"kind": kind, "message": "m", "exit": exit}});
         let reply = parse(&raw.to_string()).unwrap();
         let e = reply.envelope.error.unwrap();
         assert_eq!((e.exit, e.kind.as_str()), (exit as i64, *kind));
@@ -137,18 +136,17 @@ fn g3c_exits_zero_through_six_are_kept() {
 #[test]
 fn g3c_exit_outside_zero_through_six_is_a_typed_error() {
     for exit in [-1i64, 7, 42, 255] {
-        let raw =
-            json!({"ok": false, "data": null, "error": {"kind": "usage", "message": "m", "exit": exit}});
+        let raw = json!({"schema": 1, "ok": false, "data": null, "error": {"kind": "usage", "message": "m", "exit": exit}});
         assert_eq!(parse(&raw.to_string()), Err(ParseError::UnknownExit(exit)));
     }
 }
 
 #[test]
 fn g3c_malformed_envelopes_are_typed_errors() {
-    for raw in ["", "not json", "[]", r#"{"data":1}"#, r#"{"ok":"yes"}"#] {
+    for raw in ["", "not json", "[]", r#"{"schema":1,"data":1}"#, r#"{"schema":1,"ok":"yes"}"#] {
         assert!(matches!(parse(raw), Err(ParseError::NotEnvelope(_))), "{raw:?}");
     }
-    assert_eq!(parse(r#"{"ok":false,"data":null,"error":null}"#), Err(ParseError::MissingError));
+    assert_eq!(parse(r#"{"schema":1,"ok":false,"data":null,"error":null}"#), Err(ParseError::MissingError));
 }
 
 #[test]
@@ -347,7 +345,7 @@ fn t1_absolute_path_in_json_is_not_opened() {
     let fifo = dir.join("phantom.db");
     assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
     let db = fifo.display().to_string();
-    let raw = json!({"ok": true, "data": {"db": db, "rows": [db, {"path": db}]}, "error": null,
+    let raw = json!({"schema": 1, "ok": true, "data": {"db": db, "rows": [db, {"path": db}]}, "error": null,
         "meta": {"index_head": db}})
     .to_string();
     let (bin, _) = phantom_stub(&raw, 0);
@@ -386,8 +384,7 @@ fn t2_data_array_is_capped_at_256_with_one_spawn() {
     let _g = serial();
     let rows: Vec<Value> = (0..=DATA_CAP).map(|i| json!({"id": i})).collect();
     assert_eq!(rows.len(), 257);
-    let raw =
-        json!({"ok": true, "data": rows, "error": null, "meta": {"next": "cursor-2", "truncated": false}});
+    let raw = json!({"schema": 1, "ok": true, "data": rows, "error": null, "meta": {"next": "cursor-2", "truncated": false}});
     let (bin, log) = phantom_stub(&raw.to_string(), 0);
     let reply = run::run(&bin, &["find", "x"]).unwrap();
     let kept = reply.envelope.data.as_ref().unwrap().as_array().unwrap();
@@ -401,7 +398,7 @@ fn t2_data_array_is_capped_at_256_with_one_spawn() {
 #[test]
 fn t2_exactly_256_is_not_truncated() {
     let rows: Vec<Value> = (0..DATA_CAP).map(|i| json!(i)).collect();
-    let reply = parse(&json!({"ok": true, "data": rows, "error": null}).to_string()).unwrap();
+    let reply = parse(&json!({"schema": 1, "ok": true, "data": rows, "error": null}).to_string()).unwrap();
     assert_eq!(reply.envelope.data.unwrap().as_array().unwrap().len(), 256);
     assert!(!reply.truncated);
 }
@@ -460,13 +457,13 @@ fn desktop_check_reports_a_typed_error_for_a_broken_phantom() {
 #[test]
 fn rows_are_text_from_the_capped_reply() {
     let rows: Vec<Value> = (0..=DATA_CAP).map(|i| json!(format!("/abs/src/{i}.rs"))).collect();
-    let reply = parse(&json!({"ok": true, "data": rows, "error": null}).to_string()).unwrap();
+    let reply = parse(&json!({"schema": 1, "ok": true, "data": rows, "error": null}).to_string()).unwrap();
     let text = reply.rows();
     assert_eq!(text.len(), 256);
     assert_eq!(text[0], "/abs/src/0.rs");
     assert!(reply.truncated);
 
-    let reply = parse(r#"{"ok":true,"data":[{"id":1},2,null],"error":null}"#).unwrap();
+    let reply = parse(r#"{"schema":1,"ok":true,"data":[{"id":1},2,null],"error":null}"#).unwrap();
     assert_eq!(reply.rows(), [r#"{"id":1}"#, "2", "null"]);
 
     assert_eq!(parse(SUCCESS).unwrap().rows(), [r#"{"version":"0.0.1","schema":1}"#]);
