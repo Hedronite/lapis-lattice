@@ -16,6 +16,24 @@ pub fn db_file(index_dir: &Path) -> PathBuf {
     index_dir.join("lattice.sqlite")
 }
 
+/// Create `dir` for a caller-chosen index, when missing, as `0700` on unix:
+/// the index carries every note's text. Directories this crate creates on the
+/// way are `0700` too; a directory that already exists keeps its mode, and
+/// nothing else is touched. Windows keeps its default ACL.
+pub fn create_dir_private(dir: &Path) -> std::io::Result<()> {
+    if dir.exists() {
+        return Ok(());
+    }
+    #[allow(unused_mut)]
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.recursive(true).create(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +136,42 @@ mod tests {
         assert!(Engine::stored_embedder(&v).is_none(), "no index inside the vault, so nothing stored there");
         assert_eq!(tree(&v), before, "still nothing in the vault, embedder or not");
         let _ = std::fs::remove_dir_all(&v);
+        let _ = std::fs::remove_dir_all(&idx);
+    }
+
+    /// The caller-chosen directory is created `0700` on unix, parents
+    /// included; an existing directory keeps its mode.
+    #[cfg(unix)]
+    #[test]
+    fn open_in_creates_a_private_index_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let v = vault();
+        let idx = std::env::temp_dir().join("lapis-engine-mobile-private");
+        let _ = std::fs::remove_dir_all(&idx);
+        // A shared base that predates the engine stays as it is.
+        std::fs::create_dir_all(&idx).unwrap();
+        std::fs::set_permissions(&idx, std::fs::Permissions::from_mode(0o750)).unwrap();
+        Engine::open_in(&v, &idx, None).unwrap();
+        let mode = idx.metadata().unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o750, "an existing directory keeps its mode");
+        // A fresh chain: the leaf and the created parent are both private.
+        let fresh = idx.join("new/deeper/index");
+        Engine::open_in(&v, &fresh, None).unwrap();
+        for d in [idx.join("new"), idx.join("new/deeper"), idx.join("new/deeper/index")] {
+            let mode = d.metadata().unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "created directory is private: {}", d.display());
+        }
+        // The default path is untouched by the private helper: an existing
+        // `.lapis` keeps its mode through `Engine::open`.
+        let v2 = vault();
+        std::fs::create_dir_all(v2.join(".lapis")).unwrap();
+        std::fs::set_permissions(v2.join(".lapis"), std::fs::Permissions::from_mode(0o750)).unwrap();
+        Engine::open(&v2).unwrap();
+        let mode = v2.join(".lapis").metadata().unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o750, "the default path keeps its mode");
+        for d in [&v, &v2] {
+            let _ = std::fs::remove_dir_all(d);
+        }
         let _ = std::fs::remove_dir_all(&idx);
     }
 

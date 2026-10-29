@@ -15,6 +15,7 @@ mod graph;
 mod index;
 mod kinds;
 mod location;
+mod refresh;
 mod scope;
 mod sqlite;
 
@@ -30,6 +31,7 @@ pub use analytics::{ANALYTICS_QUERIES, Analytics};
 pub use embed::Embedder;
 pub use graph::{GraphEdge, GraphNode, GraphSnapshot, Neighbor, SNAPSHOT_NODE_CAP};
 pub use kinds::{HTML, MARKDOWN, YAML, kind_for};
+pub use refresh::RefreshReport;
 pub use scope::Scope;
 
 /// Written into `meta.producer` at creation; asserted on open.
@@ -215,8 +217,15 @@ impl Engine {
     }
     /// Open with the index in a caller-chosen `index_dir`, not the vault's
     /// `.lapis/`: build, search, reindex and every helper work the same, and the
-    /// vault tree gains no file. The directory is created if needed, like
-    /// `.lapis/` is. For a host that may not write the vault, a phone.
+    /// vault tree gains no file. The directory is created if needed, and when
+    /// this crate creates it, it is `0700` on unix (an existing directory keeps
+    /// its mode). The default [`Engine::open`] and [`Engine::open_with`] do not
+    /// change: `<vault>/.lapis/` is created as before.
+    ///
+    /// The caller is trusted: it should canonicalize and confine `index_dir` to
+    /// its own app-data directory and must not place it inside the vault — an
+    /// in-vault index would make the engine walk its own database and dirty the
+    /// very tree it must leave untouched.
     pub fn open_in(
         vault: impl AsRef<Path>,
         index_dir: impl AsRef<Path>,
@@ -237,7 +246,13 @@ impl Engine {
             Some(d) => d.to_path_buf(),
             None => vault.join(location::DEFAULT_DIR),
         };
-        std::fs::create_dir_all(&dir)?;
+        // Only the caller-chosen dir gets the private mode; the default
+        // `.lapis/` path behaves exactly as before.
+        if index_dir.is_some() {
+            location::create_dir_private(&dir)?;
+        } else {
+            std::fs::create_dir_all(&dir)?;
+        }
         let db = location::db_file(&dir);
         // Before the connection exists: sqlite-vec registers as an auto-extension,
         // so `vec0` is present on this connection and every later one without a
@@ -252,6 +267,8 @@ impl Engine {
         Ok(Self { vault, db, conn, embedder })
     }
 
+    /// The SQLite file this engine holds, wherever the default or
+    /// [`Engine::open_in`] put it. Relative if `index_dir` was relative.
     pub fn db_path(&self) -> PathBuf {
         self.db.clone()
     }
@@ -269,6 +286,18 @@ impl Engine {
         Ok(r)
     }
 
+    /// Bring the index up to date with the vault: added, updated and removed
+    /// notes since the last build, compared by mtime and size, with [`Scope`]
+    /// and the same chunking as a full reindex. A second call with nothing
+    /// changed writes nothing, so this is safe on every app launch.
+    pub fn refresh(&mut self) -> Result<RefreshReport> {
+        let mut r = refresh::refresh(&self.conn, &self.vault)?;
+        let mut arm = IndexReport { documents: 0, chunks: 0, edges: 0, embedded: 0, embed_error: None };
+        self.embed_into(&mut arm, None);
+        r.embedded = arm.embedded;
+        r.embed_error = arm.embed_error;
+        Ok(r)
+    }
     /// Reindex exactly one vault-relative path, in place. A removed file is
     /// dropped from the index. Costs one file read, not a vault walk, and
     /// embeds only that path's chunks.

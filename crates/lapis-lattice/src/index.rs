@@ -149,7 +149,7 @@ fn clean_rel(rel: &str) -> Result<String> {
 /// Remove one path from documents, chunks, chunks_fts and edges. The FTS rows
 /// must be retired with the external-content 'delete' command *before* the
 /// chunk rows go, or the index keeps stale postings.
-fn forget_path(conn: &Connection, rel: &str) -> Result<()> {
+pub(crate) fn forget_path(conn: &Connection, rel: &str) -> Result<()> {
     // Same reason as the full reindex: `vec0` has no cascade of its own, and the
     // chunk ids have to go before the chunks do.
     crate::sqlite::forget_vectors_for_path(conn, rel)?;
@@ -182,7 +182,7 @@ fn forget_path(conn: &Connection, rel: &str) -> Result<()> {
 /// Index one file, stored as `rel` and read from `abs`, the path its caller
 /// already checked: document row, chunk rows, matching FTS rows, outbound edges.
 /// Returns the number of chunks written.
-fn index_one(conn: &Connection, abs: &Path, rel: &str) -> Result<u64> {
+pub(crate) fn index_one(conn: &Connection, abs: &Path, rel: &str) -> Result<u64> {
     let meta = fs::metadata(abs)?;
     let mtime = meta
         .modified()
@@ -220,9 +220,9 @@ fn index_one(conn: &Connection, abs: &Path, rel: &str) -> Result<u64> {
     let priority = fm.get("priority").cloned();
     let tags_json = tags_json(fm.get("tags"));
     conn.execute(
-        "INSERT OR REPLACE INTO documents(path,title,domain,doc_type,status,priority,tags_json,mtime,hash,kind)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-        params![rel, title, domain, doc_type, status, priority, tags_json, mtime, hash(&text), kind],
+        "INSERT OR REPLACE INTO documents(path,title,domain,doc_type,status,priority,tags_json,mtime,hash,kind,size)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        params![rel, title, domain, doc_type, status, priority, tags_json, mtime, hash(&text), kind, meta.len() as i64],
     )?;
     let mut n = 0u64;
     for (i, (heading, chunk)) in chunks.into_iter().enumerate() {
@@ -252,7 +252,7 @@ fn walk(root: &Path) -> Result<Vec<String>> {
 
 /// Every indexable file with the path the walk checked: a linked file's
 /// canonical target, or the entry itself.
-fn walk_checked(root: &Path) -> Result<Vec<(String, PathBuf)>> {
+pub(crate) fn walk_checked(root: &Path) -> Result<Vec<(String, PathBuf)>> {
     let mut out = Vec::new();
     // If the root cannot be canonicalized, the raw root stands in. That fails
     // closed: a link's canonical target never `starts_with` a lexical root, so
@@ -395,7 +395,7 @@ fn chunk_body(body: &str) -> Vec<(Option<String>, String)> {
     chunks
 }
 
-fn resolve_edges(conn: &Connection, files: &[String]) -> Result<()> {
+pub(crate) fn resolve_edges(conn: &Connection, files: &[String]) -> Result<()> {
     let re = Regex::new(r"(?i)^(?:.*/)?([^/]+?)(?:\.md)?$").expect("stem");
     let mut upd = conn.prepare("UPDATE edges SET dst_path = ?1, resolved = 1 WHERE rowid = ?2")?;
     let mut sel = conn.prepare("SELECT rowid, dst_raw FROM edges WHERE resolved = 0")?;

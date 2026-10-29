@@ -148,6 +148,9 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     )?;
     // Pre-G1 vaults have chunks without title and FTS with path UNINDEXED.
     let _ = conn.execute("ALTER TABLE chunks ADD COLUMN title TEXT", []);
+    // Pre-Pendant vaults have documents without a size; refresh fills it in
+    // the first time it sees a row without one and stores it from then on.
+    let _ = conn.execute("ALTER TABLE documents ADD COLUMN size INTEGER", []);
     ensure_chunks_fts(conn)?;
     Ok(())
 }
