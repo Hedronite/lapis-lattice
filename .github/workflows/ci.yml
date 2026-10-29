@@ -177,3 +177,54 @@ jobs:
           test -s target/tops/lcov.info
           cargo crap --workspace --lcov target/tops/lcov.info --format json > target/tops/crap.json
           test -s target/tops/crap.json
+
+  # Engine crates for phone apps: check only, no link. The C in rusqlite
+  # (bundled) and sqlite-vec has to compile for each target.
+  phone-targets:
+    name: phone ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-ios
+          - os: ubuntu-latest
+            target: aarch64-linux-android
+    env:
+      # For this check only: rustc's own default for aarch64-apple-ios. Unset, cc
+      # builds the C for the SDK's version (26.5 on Xcode 26.6), newer than the
+      # Rust objects. An app picks its own minimum when it builds.
+      IPHONEOS_DEPLOYMENT_TARGET: "10.0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, 2026-10-16
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.target }}
+      - name: Android NDK r27d
+        id: ndk
+        if: matrix.target == 'aarch64-linux-android'
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.6.0
+        with:
+          ndk-version: r27d
+          add-to-path: false
+      - name: point cc at the NDK clang (API 21, rustc's default for the target)
+        if: matrix.target == 'aarch64-linux-android'
+        run: |
+          bin="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "CC_aarch64_linux_android=$bin/aarch64-linux-android21-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$bin/llvm-ar" >> "$GITHUB_ENV"
+      - name: toolchain versions
+        run: |
+          rustc -Vv
+          cargo -V
+          if [ "${{ matrix.target }}" = aarch64-apple-ios ]; then
+            xcodebuild -version
+            echo "iphoneos SDK $(xcrun --sdk iphoneos --show-sdk-version)"
+          else
+            echo "NDK ${{ steps.ndk.outputs.ndk-full-version }}"
+          fi
+      - run: cargo check -p lapis-lattice -p lapis-notes --target ${{ matrix.target }}

@@ -180,6 +180,58 @@ Coding agents with a shell should use the skill in `.agents/skills/lapis/` (see 
 { "mcpServers": { "lapis": { "command": "lapis", "args": ["mcp"] } } }
 ```
 
+## Using Lapis as a library
+
+Two crates in this repo are libraries an app can link, a phone app included. `lapis-lattice` is the index: open, refresh, search. `lapis-notes` creates a note with the same bytes `lapis create` writes. Neither pulls in `tokio`, `reqwest` or GPUI, neither spawns a process, and CI checks both for `aarch64-apple-ios` and `aarch64-linux-android`.
+
+`lapis-notes` is not on crates.io. Depend on both from this repo and pin the commit you tested:
+
+```toml
+[dependencies]
+lapis-lattice = { git = "https://github.com/Hedronite/lapis-lattice", rev = "<commit>" }
+lapis-notes = { git = "https://github.com/Hedronite/lapis-lattice", rev = "<commit>" }
+```
+
+Open the index with `Engine::open_in` and keep its directory in your app's data, never inside the vault: an index in the vault would be walked as part of it. Call `refresh` on every launch. It compares the vault with the index by modification time and size, and writes nothing when nothing changed. `create_new` takes the date to stamp, so the app owns the clock, and an optional classifier. With `None`, the domain is the note's first folder.
+
+```rust
+use lapis_lattice::Engine;
+use lapis_notes::{CreateRequest, create_new};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+    let base = std::env::temp_dir().join(format!("lapis-readme-{}-{nanos}", std::process::id()));
+    let vault = base.join("Notes"); // the user's Markdown files
+    let index_dir = base.join("app-data/lapis"); // the app's data, never inside the vault
+    std::fs::create_dir_all(vault.join("inbox"))?;
+    std::fs::write(vault.join("inbox/hello.md"), "# Hello\n\nFirst note.\n")?;
+
+    let mut engine = Engine::open_in(&vault, &index_dir, None)?;
+    let launch = engine.refresh()?; // safe on every launch
+    assert_eq!(launch.added, 1);
+
+    let request = CreateRequest {
+        title: "Grocery list".into(),
+        body: Some("- lapis lazuli\n".into()),
+        created: "2026-10-29".into(), // the app owns the clock
+        ..Default::default()
+    };
+    let note = create_new(&vault, &request, None)?; // no classifier: the domain is `inbox`
+    assert_eq!(note.path, "inbox/grocery-list.md");
+
+    let changed = engine.refresh()?;
+    assert_eq!((changed.added, changed.updated, changed.removed), (1, 0, 0));
+    let hits = engine.search("lazuli", 5)?;
+    assert_eq!(hits[0].path, "inbox/grocery-list.md");
+    assert!(!vault.join(".lapis").exists(), "the vault gains no index files");
+
+    std::fs::remove_dir_all(&base)?;
+    Ok(())
+}
+```
+
+Both crates bundle C (SQLite and sqlite-vec). For iOS, set `IPHONEOS_DEPLOYMENT_TARGET` to your app's minimum, or the C is built for the SDK's version. For Android, point `CC_aarch64_linux_android` and `AR_aarch64_linux_android` at the NDK's `aarch64-linux-android<api>-clang` and `llvm-ar`.
+
 ## What works / what does not
 
 | Works today | Not yet |
