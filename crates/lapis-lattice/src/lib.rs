@@ -15,6 +15,7 @@ mod graph;
 mod index;
 mod kinds;
 mod location;
+mod refresh;
 mod scope;
 mod sqlite;
 
@@ -30,6 +31,7 @@ pub use analytics::{ANALYTICS_QUERIES, Analytics};
 pub use embed::Embedder;
 pub use graph::{GraphEdge, GraphNode, GraphSnapshot, Neighbor, SNAPSHOT_NODE_CAP};
 pub use kinds::{HTML, MARKDOWN, YAML, kind_for};
+pub use refresh::RefreshReport;
 pub use scope::Scope;
 
 /// Written into `meta.producer` at creation; asserted on open.
@@ -269,6 +271,18 @@ impl Engine {
         Ok(r)
     }
 
+    /// Bring the index up to date with the vault: added, updated and removed
+    /// notes since the last build, compared by mtime and size, with [`Scope`]
+    /// and the same chunking as a full reindex. A second call with nothing
+    /// changed writes nothing, so this is safe on every app launch.
+    pub fn refresh(&mut self) -> Result<RefreshReport> {
+        let mut r = refresh::refresh(&self.conn, &self.vault)?;
+        let mut arm = IndexReport { documents: 0, chunks: 0, edges: 0, embedded: 0, embed_error: None };
+        self.embed_into(&mut arm, None);
+        r.embedded = arm.embedded;
+        r.embed_error = arm.embed_error;
+        Ok(r)
+    }
     /// Reindex exactly one vault-relative path, in place. A removed file is
     /// dropped from the index. Costs one file read, not a vault walk, and
     /// embeds only that path's chunks.
