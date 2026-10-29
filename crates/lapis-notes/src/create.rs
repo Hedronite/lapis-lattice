@@ -388,15 +388,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(v);
     }
 
-    /// A capturing closure hooks in: the alias is bounded by its lifetime, so
-    /// local state does not need to be `'static` (E0521 regression).
+    /// A borrowing closure hooks in: the hook borrows a local, so it must
+    /// compile without requiring `'static` storage for the hook. A `move`
+    /// closure owning its captures would be `'static` and prove nothing here.
     #[test]
     fn a_capturing_closure_hooks_in() {
         let v = dir("gold-cap");
-        let outside_hint = format!("notes-{}", 7);
-        let hook = move |rel: &str| {
-            // Captures `outside_hint`, a local `String`.
-            let domain = rel.split('/').next().map(str::to_string).or_else(|| Some(outside_hint.clone()));
+        let hint = String::from("notes-7");
+        let h: &str = &hint;
+        let hook = |rel: &str| {
+            let domain = rel.split('/').next().map(str::to_string).or_else(|| Some(h.to_string()));
             Some(Classified { domain, doc_type: None, source: "caller" })
         };
         let mut r = CreateRequest { path: Some("Notes/".into()), ..req("Local", "2026-10-29") };
