@@ -133,4 +133,15 @@ impl From<lapis_lattice::Error> for LapisError {
     }
 }
 
+impl From<lapis_notes::Error> for LapisError {
+    fn from(e: lapis_notes::Error) -> Self {
+        match e {
+            lapis_notes::Error::Usage(m) => LapisError::Usage(m),
+            lapis_notes::Error::Path(m) => LapisError::Path(m),
+            lapis_notes::Error::Internal(m) => LapisError::Internal(m),
+            lapis_notes::Error::Io(io) => LapisError::from(io),
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, LapisError>;

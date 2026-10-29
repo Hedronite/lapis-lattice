@@ -20,6 +20,8 @@ use crate::notes;
 use crate::taxonomy;
 use crate::templates;
 
+pub use lapis_notes::{slug, to_yaml};
+
 /// Source shown by an editor, excluding only Markdown frontmatter.
 pub fn editor_body<'a>(path: &str, original: &'a str) -> &'a str {
     if notes::kind_of(path) == notes::Kind::Markdown { hal::raw_parts(original).1 } else { original }
@@ -36,12 +38,6 @@ pub fn editor_content(path: &str, original: &str, text: &str) -> String {
         text.into()
     }
 }
-
-pub const HAL_VERSION: &str = "1.0";
-pub const AUTHORITATIVE_MARKER: &str = "<!--hal:authoritative:yaml-->";
-/// Types that get the authoritative marker after the closing `---`.
-const CANON_TYPES: &[&str] =
-    &["foundry-doc", "foundry-product", "status", "cross-reference", "maintenance-canon"];
 
 #[derive(Debug, Clone, Default)]
 pub struct CreateOpts {
@@ -98,22 +94,6 @@ pub fn today() -> String {
     jiff::Zoned::now().strftime("%Y-%m-%d").to_string()
 }
 
-pub fn slug(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut dash = false;
-    for ch in s.chars() {
-        if ch.is_alphanumeric() {
-            out.extend(ch.to_lowercase());
-            dash = false;
-        } else if !dash && !out.is_empty() {
-            out.push('-');
-            dash = true;
-        }
-    }
-    let out = out.trim_end_matches('-').to_string();
-    if out.is_empty() { "note".to_string() } else { out }
-}
-
 pub const DEFAULT_INIT_VAULT: &str = "~/Notes";
 const VAULT_GITIGNORE: &str = ".lapis/\nlattice.sqlite*\n*.duckdb\n";
 const WELCOME_MD: &str = "---\nname: Welcome\nstatus: draft\ntags: []\n---\n# Welcome\n\nThis is your vault. Notes are ordinary Markdown files.\n\n- Open the TUI: `lapis`\n- Search (no daemon): `lapis search welcome`\n- MCP: `lapis mcp`\n";
@@ -146,70 +126,6 @@ pub fn init_vault(raw: Option<&str>) -> Result<InitResult> {
     Ok(InitResult { path: root.display().to_string(), created })
 }
 
-/// Decide the vault-relative file path for a new note. Never overwrites.
-fn target_path(root: &Path, opts: &CreateOpts) -> Result<String> {
-    let file = format!("{}.md", slug(&opts.title));
-    let rel = match opts.path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
-        None => format!("{}/{}", opts.inbox.trim_matches('/'), file),
-        Some(p) => {
-            let is_dir = p.ends_with('/') || root.join(notes::clean_rel(p)?).is_dir();
-            let clean = notes::clean_rel(p)?;
-            if is_dir {
-                format!("{clean}/{file}")
-            } else if clean.ends_with(".md") {
-                clean
-            } else {
-                format!("{clean}.md")
-            }
-        }
-    };
-    if !rel.contains('/') {
-        // No Welcome.md-style root drops: a note needs a folder (SPEC D-BUCKETS).
-        return Err(LapisError::Usage(format!(
-            "refusing to create at the vault root: {rel} (use --path <folder>/)"
-        )));
-    }
-    if root.join(&rel).exists() {
-        return Err(LapisError::Usage(format!("already exists: {rel}")));
-    }
-    Ok(rel)
-}
-
-/// Build the create-set mapping in canonical key order.
-fn create_set(rel: &str, opts: &CreateOpts, root: &Path) -> (Map<String, Value>, &'static str) {
-    let class = taxonomy::classify(root, rel, opts.doc_type.as_deref());
-    let doc_type = opts.doc_type.clone().or(class.doc_type.clone()).unwrap_or_else(|| "note".to_string());
-    let domain = opts.domain.clone().or(class.domain.clone());
-    let today = today();
-    let mut m = Map::new();
-    m.insert("name".into(), Value::String(opts.title.clone()));
-    // The RAG gate requires `title`; `name` stays for readers that key on it.
-    m.insert("title".into(), Value::String(opts.title.clone()));
-    m.insert("type".into(), Value::String(doc_type.clone()));
-    m.insert("doc_type".into(), Value::String(doc_type));
-    if let Some(d) = domain {
-        m.insert("domain".into(), Value::String(d));
-    }
-    m.insert("status".into(), Value::String("draft".into()));
-    m.insert("created".into(), Value::String(today.clone()));
-    m.insert("updated".into(), Value::String(today));
-    m.insert("hal_version".into(), Value::String(HAL_VERSION.into()));
-    if let Some(op) = opts.operator.as_deref().filter(|s| !s.trim().is_empty()) {
-        m.insert("operator".into(), Value::String(op.to_string()));
-    }
-    m.insert("tags".into(), Value::Array(opts.tags.iter().map(|t| Value::String(t.clone())).collect()));
-    (m, class.source)
-}
-
-/// Serialize a mapping as YAML frontmatter text (no delimiters).
-pub fn to_yaml(m: &Map<String, Value>) -> Result<String> {
-    let v = serde_json::Value::Object(m.clone());
-    let y: yaml_serde::Value =
-        yaml_serde::to_value(&v).map_err(|e| LapisError::Internal(format!("yaml: {e}")))?;
-    let s = yaml_serde::to_string(&y).map_err(|e| LapisError::Internal(format!("yaml: {e}")))?;
-    Ok(s.strip_prefix("---\n").unwrap_or(&s).trim_end().to_string())
-}
-
 /// Resolve a template (built-in or `.lapis/templates/<name>.md`), substitute
 /// placeholders, split HAL.
 fn load_template(
@@ -238,10 +154,6 @@ pub fn template_vars_at(title: &str, director: Option<&str>, day: jiff::civil::D
 pub fn iso_week(d: &jiff::civil::Date) -> String {
     let w = d.iso_week_date();
     format!("{}-W{:02}", w.year(), w.week())
-}
-
-fn is_canon(doc_type: &str) -> bool {
-    CANON_TYPES.contains(&doc_type)
 }
 
 /// Stale-write guard and dry-run switch shared by append / toggle.
@@ -273,20 +185,27 @@ impl Guard {
     }
 }
 
-fn write_atomic(abs: &Path, text: &str) -> Result<u64> {
-    if let Some(parent) = abs.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    crate::safe_file::replace(abs, text.as_bytes(), None)?;
-    Ok(text.len() as u64)
-}
-
 pub fn create(root: &Path, opts: &CreateOpts) -> Result<Written> {
     if opts.title.trim().is_empty() {
         return Err(LapisError::Usage("--title is required".into()));
     }
-    let rel = target_path(root, opts)?;
-    let (mut hal, tax_source) = create_set(&rel, opts, root);
+    let req = lapis_notes::CreateRequest {
+        title: opts.title.clone(),
+        path: opts.path.clone(),
+        doc_type: opts.doc_type.clone(),
+        domain: opts.domain.clone(),
+        tags: opts.tags.clone(),
+        body: opts.body.clone(),
+        operator: opts.operator.clone(),
+        inbox: Some(opts.inbox.clone()),
+        created: today(),
+    };
+    let rel = lapis_notes::target_path(root, &req, &opts.inbox)?;
+    // `lapis-notes` never spawns a process, so the canon is the CLI's hook. The
+    // hook type is 'static, so it owns its copies of the root and the type.
+    let (vault, requested) = (root.to_path_buf(), opts.doc_type.clone());
+    let classify = move |rel: &str| taxonomy::via_taxonomy_py(&vault, rel, requested.as_deref());
+    let (mut hal, tax_source) = lapis_notes::create_set(&rel, &req, Some(&classify));
 
     let mut body = opts.body.clone().unwrap_or_default();
     if let Some(name) = &opts.template {
@@ -322,9 +241,7 @@ pub fn create(root: &Path, opts: &CreateOpts) -> Result<Written> {
     if body.trim().is_empty() {
         body = format!("# {}\n", opts.title);
     }
-    let doc_type = hal.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let marker = if is_canon(&doc_type) { format!("{AUTHORITATIVE_MARKER}\n\n") } else { String::new() };
-    let drafted = format!("---\n{}\n---\n{marker}{}\n", to_yaml(&hal)?, body.trim_end());
+    let drafted = lapis_notes::compose_text(&hal, &body)?;
     let text = crate::rag_gate::apply_on_write(root, &rel, &drafted)?;
     let (hal, title) = if text == drafted {
         (hal, opts.title.clone())
@@ -352,7 +269,7 @@ pub fn create(root: &Path, opts: &CreateOpts) -> Result<Written> {
             diff: None,
         });
     }
-    let bytes = write_atomic(&notes::contained_new(root, &rel)?, &text)?;
+    let bytes = lapis_notes::write_composed(root, &rel, &text)?;
     Ok(Written {
         path: rel,
         title,
@@ -389,7 +306,8 @@ pub fn append_with(root: &Path, rel: &str, text: &str, guard: &Guard) -> Result<
     current.push_str(text.trim_end());
     current.push('\n');
     let current = crate::rag_gate::apply_on_write(root, &rel, &current)?;
-    let bytes = if guard.dry_run { current.len() as u64 } else { write_atomic(&abs, &current)? };
+    let bytes =
+        if guard.dry_run { current.len() as u64 } else { lapis_notes::fsutil::write_atomic(&abs, &current)? };
     let p = hal::parse(&current);
     let title = hal::title_from_hal(&p.hal).unwrap_or_else(|| notes::stem_of(&rel));
     Ok(Written {
@@ -603,6 +521,7 @@ pub fn trash(root: &Path, rel: &str, trash_bucket: &str) -> Result<Trashed> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lapis_notes::AUTHORITATIVE_MARKER;
     use std::path::PathBuf;
 
     #[test]

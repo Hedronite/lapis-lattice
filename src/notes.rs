@@ -3,7 +3,7 @@
 //!
 //! Never walks the tree. Never loads anything but the one requested file.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -39,36 +39,10 @@ pub fn kind_of(path: &str) -> Kind {
 }
 
 /// Normalize a vault-relative path: POSIX separators, no leading `./`,
-/// no `..`, not absolute. Returns the cleaned relative string.
+/// no `..`, not absolute. Returns the cleaned relative string
+/// ([`lapis_notes::clean_rel`]).
 pub fn clean_rel(rel: &str) -> Result<String> {
-    let rel = rel.trim();
-    if rel.is_empty() {
-        return Err(LapisError::Usage("path is required".into()));
-    }
-    let p = Path::new(rel);
-    if p.is_absolute() || rel.starts_with('/') || rel.starts_with('\\') {
-        return Err(LapisError::Path(format!("path must be vault-relative, got absolute: {rel}")));
-    }
-    let mut parts: Vec<String> = Vec::new();
-    for c in p.components() {
-        match c {
-            Component::Normal(s) => {
-                let s = s.to_str().ok_or_else(|| LapisError::Path("non-UTF-8 path".into()))?;
-                parts.push(s.to_string());
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
-                return Err(LapisError::Path(format!("path escapes the vault: {rel}")));
-            }
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(LapisError::Path(format!("path must be vault-relative: {rel}")));
-            }
-        }
-    }
-    if parts.is_empty() {
-        return Err(LapisError::Path(format!("path resolves to the vault root: {rel}")));
-    }
-    Ok(parts.join("/"))
+    Ok(lapis_notes::clean_rel(rel)?)
 }
 
 /// Resolve a vault-relative path to an absolute one inside `root`.
@@ -125,26 +99,10 @@ fn inside(root: &Path, rel: String, abs: PathBuf) -> Result<(String, PathBuf, Pa
 /// canonical location, so a folder symlinked out of the vault cannot carry a
 /// create, restore, trash or copy outside it, and the write does not re-follow
 /// the links that were just checked. Missing folders below it are new, so the
-/// caller's `create_dir_all` makes real directories. Exit 3 on escape.
+/// caller's `create_dir_all` makes real directories. Exit 3 on escape
+/// ([`lapis_notes::contained_new`]).
 pub fn contained_new(root: &Path, rel: &str) -> Result<PathBuf> {
-    let clean = clean_rel(rel)?;
-    let root_canon = root.canonicalize().map_err(|e| LapisError::Path(format!("{clean}: {e}")))?;
-    let target = root.join(&clean);
-    if std::fs::symlink_metadata(&target).is_ok() {
-        return Err(LapisError::Path(format!("{clean}: already exists")));
-    }
-    let mut missing = Vec::new();
-    let mut base = target.as_path();
-    while std::fs::symlink_metadata(base).is_err() {
-        let (Some(name), Some(parent)) = (base.file_name(), base.parent()) else { break };
-        missing.push(name.to_os_string());
-        base = parent;
-    }
-    let base = base.canonicalize().map_err(|e| LapisError::Path(format!("{clean}: {e}")))?;
-    if !base.starts_with(&root_canon) {
-        return Err(LapisError::Path(format!("{clean}: a folder on the way escapes the vault")));
-    }
-    Ok(missing.iter().rev().fold(base, |p, name| p.join(name)))
+    Ok(lapis_notes::contained_new(root, rel)?)
 }
 
 /// Note object per `schema/note.schema.json`.

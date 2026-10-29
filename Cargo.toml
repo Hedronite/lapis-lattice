@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/lapis-desktop", "crates/lapis-lattice", "crates/tome-eval", "crates/tome-tree"]
+members = [".", "crates/lapis-desktop", "crates/lapis-lattice", "crates/lapis-notes", "crates/tome-eval", "crates/tome-tree"]
 # Vendored patched dependency, not a workspace member (see [patch.crates-io]).
 exclude = ["vendor/gpui-base"]
 
@@ -30,6 +30,7 @@ pdfium-render = { version = "=0.9.4", optional = true, default-features = false,
 base64 = "0.22"
 lapis-desktop = { path = "crates/lapis-desktop" }
 lapis-lattice = { path = "crates/lapis-lattice", version = "0.4.2" }
+lapis-notes = { path = "crates/lapis-notes" }
 tome-eval = { path = "crates/tome-eval", optional = true }
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
