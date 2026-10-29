@@ -12,6 +12,8 @@
 //! whole group, so nothing it started outlives it holding the pipes.
 //! `process_group` and `killpg` are unix only: on Windows only the direct
 //! child is killed, since no Job Object holds what it started.
+//! The child is held in a guard whose `Drop` stops it (G5e), so a panic
+//! between spawn and the stop paths leaves nothing running either.
 
 use std::ffi::OsStr;
 use std::io::Read;
@@ -41,6 +43,16 @@ pub enum RunError {
     Timeout { after: Duration },
     /// The process wrote more than `cap` bytes to `stream` and was killed.
     Overflow { stream: &'static str, cap: usize },
+}
+
+#[cfg(test)]
+type Hook = Box<dyn Fn()>;
+
+#[cfg(test)]
+thread_local! {
+    /// Test only (G5e): runs on the calling thread right after spawn, so a
+    /// test can panic between spawn and the stop paths.
+    pub static AFTER_SPAWN: std::cell::RefCell<Option<Hook>> = const { std::cell::RefCell::new(None) };
 }
 
 /// How long one call may run before the child is killed.
@@ -133,12 +145,19 @@ pub fn run_within(path: &Path, args: &[&str], timeout: Duration) -> Result<Reply
         .envs(std::env::vars_os().filter(|(k, _)| keep_env(k)));
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    let mut child = command.spawn().map_err(|source| RunError::Spawn { path: path.to_path_buf(), source })?;
+    let child = command.spawn().map_err(|source| RunError::Spawn { path: path.to_path_buf(), source })?;
+    let mut child = Running { child, reaped: false };
+    #[cfg(test)]
+    AFTER_SPAWN.with_borrow(|hook| {
+        if let Some(hook) = hook {
+            hook()
+        }
+    });
     let (tx, rx) = mpsc::channel();
-    if let Some(out) = child.stdout.take() {
+    if let Some(out) = child.child.stdout.take() {
         drain("stdout", out, STDOUT_CAP, tx.clone());
     }
-    if let Some(err) = child.stderr.take() {
+    if let Some(err) = child.child.stderr.take() {
         drain("stderr", err, STDERR_CAP, tx);
     }
     // Both streams end when the child exits, unless something it started still
@@ -151,26 +170,29 @@ pub fn run_within(path: &Path, args: &[&str], timeout: Duration) -> Result<Reply
             Ok(Drained { stream: "stdout", bytes, over: false }) => stdout = bytes,
             Ok(Drained { bytes, over: false, .. }) => stderr = bytes,
             Ok(Drained { stream, over: true, .. }) => {
-                stop(&mut child);
+                child.stop();
                 let cap = if stream == "stdout" { STDOUT_CAP } else { STDERR_CAP };
                 return Err(RunError::Overflow { stream, cap });
             }
             Err(_) => {
-                stop(&mut child);
+                child.stop();
                 return Err(RunError::Timeout { after: timeout });
             }
         }
     }
     let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
+        match child.child.try_wait() {
+            Ok(Some(status)) => {
+                child.reaped = true;
+                break status;
+            }
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
             Ok(None) => {
-                stop(&mut child);
+                child.stop();
                 return Err(RunError::Timeout { after: timeout });
             }
             Err(source) => {
-                stop(&mut child);
+                child.stop();
                 return Err(RunError::Spawn { path: path.to_path_buf(), source });
             }
         }
@@ -205,6 +227,29 @@ fn drain(stream: &'static str, from: impl Read + Send + 'static, cap: usize, tx:
         let over = bytes.len() > cap;
         let _ = tx.send(Drained { stream, bytes, over });
     });
+}
+
+/// G5e (E-2): the spawned child. Dropping it stops the child and its group,
+/// a panic included. A child already reaped is never signalled again, since
+/// its pid may belong to another process by then.
+struct Running {
+    child: Child,
+    reaped: bool,
+}
+
+impl Running {
+    fn stop(&mut self) {
+        if !self.reaped {
+            stop(&mut self.child);
+            self.reaped = true;
+        }
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 /// Kill the child's process group, then reap the child, so neither a

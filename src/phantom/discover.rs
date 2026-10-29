@@ -10,9 +10,11 @@
 //! A found path is always absolute (G0a): relative `PATH` entries are joined to
 //! the current directory. A relative `$LAPIS_PHANTOM_BINARY` is refused (G4.2):
 //! it is `None`, never joined to the current directory and never a reason to
-//! search `PATH`, so the binary cannot change with where `lapis` is run. The
-//! parent directory is canonicalized so `..` is gone. The file name itself
-//! is kept, so a `phantom-fractal` symlink is not renamed by resolving it.
+//! search `PATH`, so the binary cannot change with where `lapis` is run. It
+//! costs one warning on stderr that names the variable, never its value
+//! (G5d, E-1). The parent directory is canonicalized so `..` is gone. The
+//! file name itself is kept, so a `phantom-fractal` symlink is not renamed by
+//! resolving it.
 //! [`super::run`] re-checks that path immediately before it spawns (G0c).
 //!
 //! Std only, so the `tests/phantom_*.rs` files can include this module directly.
@@ -26,11 +28,24 @@ pub const BINARY: &str = "phantom-fractal";
 /// Environment variable naming a configured `phantom-fractal` path.
 pub const ENV: &str = "LAPIS_PHANTOM_BINARY";
 
+/// Printed once when `$LAPIS_PHANTOM_BINARY` is relative (G5d, E-1). It names
+/// the variable and never its value.
+pub const RELATIVE_WARNING: &str =
+    "lapis: warning: LAPIS_PHANTOM_BINARY is not an absolute path, so Lapis ignores it";
+
 /// Discovery against this process's `PATH`, `$LAPIS_PHANTOM_BINARY`, and
 /// current directory.
 pub fn from_env() -> Option<PathBuf> {
     let configured = std::env::var_os(ENV).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if let Some(w) = warning(configured.as_deref()) {
+        eprintln!("{w}");
+    }
     discover(std::env::var_os("PATH").as_deref(), configured.as_deref())
+}
+
+/// [`RELATIVE_WARNING`] when a configured path is set and relative.
+pub fn warning(configured: Option<&Path>) -> Option<&'static str> {
+    configured.is_some_and(|p| !p.is_absolute()).then_some(RELATIVE_WARNING)
 }
 
 /// [`discover_from`] with relative paths resolved against the current directory.
