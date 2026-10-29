@@ -19,7 +19,7 @@
 
 ---
 
-> **Status:** In production use as daily-driver / dogfood Markdown vault (TUI/CLI/MCP + embedded FTS5). Hardening: beta. Latest GitHub Release and crates.io `lapis-lattice` are `0.4.1`. `0.4.2` (this tree, including `--rerank-jev`) is the next tag. Not a toy reference.
+> **Status:** In production use as daily-driver / dogfood Markdown vault (TUI/CLI/MCP + embedded FTS5). Hardening: beta. Latest GitHub Release and crates.io `lapis-lattice` are `0.4.2` (including `--rerank-jev`). Not a toy reference.
 
 
 Lapis is a notes vault for people who work with agents. Notes stay ordinary Markdown files in a folder you own. A TUI, a JSON CLI, a skill, and an MCP server share those files. Search and hop-1 neighbors use an **embedded SQLite + FTS5** index at `<vault>/.lapis/lattice.sqlite` (`meta.producer = lapis-lattice`). An HTTP lattice is opt-in (`lattice.mode = http`).
@@ -72,9 +72,9 @@ Repo: [Hedronite/lapis-lattice](https://github.com/Hedronite/lapis-lattice).
 | Artifact | Install | What you get |
 |---|---|---|
 | **CLI / TUI / MCP** (`lapis` binary) | `install.sh` or `cargo install --git … --bin lapis` | The app: vault, TUI, JSON CLI, MCP |
-| **Engine library** (`lapis-lattice`) | `cargo add lapis-lattice` (live: `0.4.1`) | Embedded SQLite+FTS5 index crate — no `lapis` binary |
+| **Engine library** (`lapis-lattice`) | `cargo add lapis-lattice` (live: `0.4.2`) | Embedded SQLite+FTS5 index crate — no `lapis` binary |
 
-**One command** — `install.sh` downloads the latest GitHub Release binary (currently `v0.4.1`, `lapis --version` → `0.4.1`) for Apple Silicon, Linux x64, or Linux arm64. Rust is only needed if there is no asset for your machine (Intel Mac today):
+**One command** — `install.sh` downloads the latest GitHub Release binary (currently `v0.4.2`, `lapis --version` → `0.4.2`) for Apple Silicon, Linux x64, or Linux arm64. Rust is only needed if there is no asset for your machine (Intel Mac today):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Hedronite/lapis-lattice/main/scripts/install.sh | bash
@@ -87,8 +87,7 @@ cargo install --git https://github.com/Hedronite/lapis-lattice --locked --bin la
 lapis init ~/Notes
 ```
 
-Engine only (library, not the app). Live on crates.io today: `0.4.1`. After
-`v0.4.2` is tagged and published:
+Engine only (library, not the app). Live on crates.io: `0.4.2`.
 
 ```bash
 cargo add lapis-lattice@0.4.2
@@ -197,13 +196,13 @@ Coding agents with a shell should use the skill in `.agents/skills/lapis/` (see 
 
 **Beta**.
 
-| | Live today | Next (after `v0.4.2` tag + `cargo publish`) |
-|---|---|---|
-| GitHub Release binary | `v0.4.1` (`lapis --version` → `0.4.1`) | `v0.4.2` binary asset (`--version` → `0.4.2`) |
-| crates.io `lapis-lattice` | [`0.4.1`](https://crates.io/crates/lapis-lattice/0.4.1) | `0.4.2` (`cargo add lapis-lattice@0.4.2`) |
-| `main` (this repo) | — | Cargo `0.4.2`; `lapis --version` → `0.4.2` |
+| | Live today |
+|---|---|
+| GitHub Release binary | `v0.4.2` (`lapis --version` → `0.4.2`): darwin-arm64, linux-arm64, linux-x64, `SHA256SUMS` |
+| crates.io `lapis-lattice` | [`0.4.2`](https://crates.io/crates/lapis-lattice/0.4.2) (`cargo add lapis-lattice@0.4.2`) |
+| `main` (this repo) | Cargo `0.4.2`; `lapis --version` → `0.4.2`. Changes since the tag are under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md) |
 
-The `v0.4.0` Release binary still reports crate `0.1.0` and is not rewritten. `cargo add lapis-lattice` resolves to **0.4.1** until `0.4.2` is published. Neither that library pin nor `cargo install lapis` is the app binary.
+The `v0.4.0` Release binary still reports crate `0.1.0` and is not rewritten. `cargo add lapis-lattice` resolves to **0.4.2**. Neither that library pin nor `cargo install lapis` is the app binary.
 
 Requirements: macOS (Apple Silicon prebuilt) or Linux. Embeddings (Ollama / ONNX) are optional. Do **not** install Turso, DuckDB, Xcode, or Python to use the default binary.
 
