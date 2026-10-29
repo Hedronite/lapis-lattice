@@ -146,7 +146,7 @@ mod tests {
     fn open_in_creates_a_private_index_dir() {
         use std::os::unix::fs::PermissionsExt;
         let v = vault();
-        let idx = std::env::temp_dir().join("lapis-engine-mobile-private");
+        let idx = dir("private-base");
         let _ = std::fs::remove_dir_all(&idx);
         // A shared base that predates the engine stays as it is.
         std::fs::create_dir_all(&idx).unwrap();
