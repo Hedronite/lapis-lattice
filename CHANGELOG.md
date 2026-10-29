@@ -130,6 +130,7 @@
 ### Dependencies
 
 - `lapis-lattice` moved to rusqlite 0.40, and its behavior is unchanged.
+- pulldown-cmark moved from 0.13.4 to 0.13.5 in `Cargo.lock`, which fixes RUSTSEC-2026-0414: exponential event growth with `ENABLE_WIKILINKS`, which the desktop's live view turns on.
 
 ### Graph
 
