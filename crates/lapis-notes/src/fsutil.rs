@@ -85,6 +85,18 @@ pub fn replace(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> io::Result
 /// there first; the staged temporary is removed either way, so an abandoned
 /// publication leaves no litter and the first writer's bytes stay on disk.
 /// New files are `0600`, the same mode the staged write carries.
+/// Write the final bytes of a note over an existing path, atomically: parent
+/// directories are real directories, the write is staged, and a rename swaps
+/// the whole text in. Rename replaces the target, so only callers that
+/// legitimately replace a file use this; the create path takes
+/// [`publish_new`]'s link, and never overwrites.
+pub fn write_atomic(abs: &Path, text: &str) -> io::Result<u64> {
+    if let Some(parent) = abs.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    replace(abs, text.as_bytes(), None)?;
+    Ok(text.len() as u64)
+}
 pub fn publish_new(abs: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = abs.parent() {
         fs::create_dir_all(parent)?;

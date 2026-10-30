@@ -236,24 +236,24 @@ mod tests {
         // A directory directly inside the vault.
         match Engine::open_in(&v, v.join("idx"), None) {
             Err(Error::Usage(m)) => assert!(m.contains("inside the vault"), "{m}"),
-            other => panic!("expected a refusal for an in-vault index"),
+            _other => panic!("expected a refusal for an in-vault index"),
         }
         // The vault itself is also refused.
         match Engine::open_in(&v, &v, None) {
             Err(Error::Usage(m)) => assert!(m.contains("inside the vault"), "{m}"),
-            other => panic!("expected a refusal for the vault itself"),
+            _other => panic!("expected a refusal for the vault itself"),
         }
         // A `..` component pointed back inside.
         let outside = dir("outside");
         match Engine::open_in(&v, outside.join("walk/../back-in"), None) {
             Err(Error::Usage(m)) => assert!(m.contains(".."), "{m}"),
-            other => panic!("expected a refusal for a .. component"),
+            _other => panic!("expected a refusal for a .. component"),
         }
         // A symlink into the vault, so canonicalization is what sees it.
         symlink(v.join("notes"), outside.join("in-vault")).unwrap();
         match Engine::open_in(&v, outside.join("in-vault"), None) {
             Err(Error::Usage(m)) => assert!(m.contains("inside the vault"), "{m}"),
-            other => panic!("expected a refusal for a symlinked in-vault index"),
+            _other => panic!("expected a refusal for a symlinked in-vault index"),
         }
         assert_eq!(tree(&v), before, "a refused call touches nothing");
         assert!(!outside.join("walk").exists(), "the refused directory was not created");
@@ -273,7 +273,7 @@ mod tests {
         let r = e.reindex().unwrap();
         assert_eq!(r.documents, 2, "the outside index builds");
         drop(e);
-        assert_eq!(sibling.canonicalize().unwrap().join("lattice.sqlite").exists(), true);
+        assert!(sibling.canonicalize().unwrap().join("lattice.sqlite").exists());
 
         let nested = sibling.join("fresh").join("deeper");
         let e = Engine::open_in(&v, &nested, None).unwrap();
