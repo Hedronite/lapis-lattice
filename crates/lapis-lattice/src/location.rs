@@ -163,7 +163,11 @@ mod tests {
         assert_eq!(r.documents, 2, "builds the index outside the vault");
         assert!(!e.search("alpha", 5).unwrap().is_empty(), "searches over it");
         // The confinement resolves the requested directory.
-        assert_eq!(e.db_path(), idx.canonicalize().unwrap().join("lattice.sqlite"), "the db lives where asked");
+        assert_eq!(
+            e.db_path(),
+            idx.canonicalize().unwrap().join("lattice.sqlite"),
+            "the db lives where asked"
+        );
         assert_eq!(e.reindex_path("notes/Alpha.md").unwrap().documents, 1, "single-path reindex works too");
         drop(e);
         assert_eq!(tree(&v), before, "the vault tree gains no file");
