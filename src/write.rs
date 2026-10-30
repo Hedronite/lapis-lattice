@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn daily_creates_once_then_opens() {
         let v = vault();
-        let d = periodic(&v, Period::Daily, Some("2026-09-09"), Some("Halo".into())).unwrap();
+        let d = periodic(&v, Period::Daily, Some("2026-09-09"), Some("Ops".into())).unwrap();
         assert_eq!(d.path, "Daily/2026-09-09.md");
         assert!(d.created);
         let n = notes::read(&v, &d.path).unwrap();
@@ -741,7 +741,7 @@ mod tests {
         let mut o = opts("Lapis status");
         o.path = Some("notes/".into());
         o.doc_type = Some("status".into());
-        o.operator = Some("Halo".into());
+        o.operator = Some("Ops".into());
         o.tags = vec!["lapis".into()];
         let w = create(&v, &o).unwrap();
         assert_eq!(w.path, "notes/lapis-status.md");
@@ -754,7 +754,7 @@ mod tests {
         );
         assert!(raw.contains("hal_version: '1.0'") || raw.contains("hal_version: \"1.0\""), "{raw}");
         assert!(raw.contains("\n---\n<!--hal:authoritative:yaml-->\n\n# Lapis status\n"), "{raw}");
-        assert!(raw.contains("operator: Halo"));
+        assert!(raw.contains("operator: Ops"));
         assert!(matches!(create(&v, &o), Err(LapisError::Usage(_))));
         let _ = std::fs::remove_dir_all(&v);
     }

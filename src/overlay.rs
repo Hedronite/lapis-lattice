@@ -30,10 +30,10 @@ mod tests {
 
     #[test]
     fn partial_overlay_fills_defaults() {
-        let o: Overlay = serde_json::from_str(r#"{"buckets":{"inbox":"Inbox"},"operator":"Halo"}"#).unwrap();
+        let o: Overlay = serde_json::from_str(r#"{"buckets":{"inbox":"Inbox"},"operator":"Ops"}"#).unwrap();
         assert_eq!(o.buckets.inbox, "Inbox");
         assert_eq!(o.buckets.quick, "quick");
-        assert_eq!(o.operator.as_deref(), Some("Halo"));
+        assert_eq!(o.operator.as_deref(), Some("Ops"));
     }
 
     #[test]

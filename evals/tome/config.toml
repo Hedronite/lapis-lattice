@@ -1,4 +1,4 @@
-# tome-eval configuration (tome-tree spike, Jupi). Rulings: Eli GO R0–R2, 2026-09-28.
+# tome-eval configuration (tome-tree spike). Rulings R0–R2 approved 2026-09-28.
 # Every model / budget / provenance value lives here, never in code. Swap the model here.
 
 [answer]
@@ -64,7 +64,7 @@ transport = "http"                             # http | none
 endpoint = "https://api.typesafe.ai/v1/systemone"
 key_env = "TYPESAFE_API_KEY"                   # name only; the key is read from the environment
 # Grade + baseline rerank gate on this floor. The tome WALK does not (spike policy,
-# Eli ruling 2026-09-28): it ranks on score only, records every candidate's score and
+# ruling 2026-09-28): it ranks on score only, records every candidate's score and
 # confidence, and the summary counts would_fail_closed_at_0_6. Fixed at 0.6; never tuned
 # to eval data.
 confidence_floor = 0.6

@@ -1,4 +1,4 @@
-//! tome-eval: the tome-tree spike A/B harness (Jupi). Baseline = `lapis search`
+//! tome-eval: the tome-tree spike A/B harness. Baseline = `lapis search`
 //! (+ Jev shadow rerank) over the lattice HTTP tome chunks; tome = `walk()` with a
 //! Jev judge. One shared answerer from `evals/tome/config.toml`; Jev only scores.
 //!

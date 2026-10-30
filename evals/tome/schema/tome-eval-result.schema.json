@@ -546,7 +546,7 @@
               ],
               "minimum": 0,
               "maximum": 2,
-              "description": "0 wrong / 1 partial / 2 exact (Marci plan scale)."
+              "description": "0 wrong / 1 partial / 2 exact (plan scale)."
             },
             "confidence": {
               "type": [
@@ -617,7 +617,7 @@
               ],
               "minimum": 0,
               "maximum": 1,
-              "description": "Marci plan citation precision: cited pages within gold ±1 / cited."
+              "description": "Plan citation precision: cited pages within gold ±1 / cited."
             }
           }
         },
@@ -1055,7 +1055,7 @@
             },
             "rules": {
               "type": "array",
-              "description": "Marci plan §4 win rule, evaluated one by one.",
+              "description": "Plan §4 win rule, evaluated one by one.",
               "items": {
                 "type": "object",
                 "additionalProperties": false,
