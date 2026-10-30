@@ -150,7 +150,13 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute("ALTER TABLE chunks ADD COLUMN title TEXT", []);
     // Pre-Pendant vaults have documents without a size; refresh fills it in
     // the first time it sees a row without one and stores it from then on.
-    let _ = conn.execute("ALTER TABLE documents ADD COLUMN size INTEGER", []);
+    if let Err(e) = conn.execute("ALTER TABLE documents ADD COLUMN size INTEGER", []) {
+        // "Already migrated" is the duplicate-column error; anything else is
+        // real corruption or I/O trouble and must surface.
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e.into());
+        }
+    }
     ensure_chunks_fts(conn)?;
     Ok(())
 }

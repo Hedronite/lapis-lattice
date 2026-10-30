@@ -19,7 +19,9 @@ pub fn db_file(index_dir: &Path) -> PathBuf {
 /// Create `dir` for a caller-chosen index, when missing, as `0700` on unix:
 /// the index carries every note's text. Directories this crate creates on the
 /// way are `0700` too; a directory that already exists keeps its mode, and
-/// nothing else is touched. Windows keeps its default ACL.
+/// nothing else is touched. An existing path — including a symlink to a
+/// directory — is accepted as is, because the caller is trusted. Windows
+/// keeps its default ACL.
 pub fn create_dir_private(dir: &Path) -> std::io::Result<()> {
     if dir.exists() {
         return Ok(());
