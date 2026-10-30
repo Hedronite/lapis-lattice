@@ -77,13 +77,21 @@ pub fn replace(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> io::Result
     }
     Ok(())
 }
-/// Write the final bytes of a new note atomically: the missing parent folders
-/// are real directories (the containment check already ruled out links), then
-/// the staged-plus-rename below. Returns the byte count written.
-pub fn write_atomic(abs: &Path, text: &str) -> io::Result<u64> {
+/// Publish the bytes of a new note: create the missing folder, then stage and
+/// hard-link, so a target that appears between the containment check and this
+/// publish is refused instead of overwritten.
+///
+/// The hard link fails when the target exists, never mudling a file that got
+/// there first; the staged temporary is removed either way, so an abandoned
+/// publication leaves no litter and the first writer's bytes stay on disk.
+/// New files are `0600`, the same mode the staged write carries.
+pub fn publish_new(abs: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = abs.parent() {
         fs::create_dir_all(parent)?;
     }
-    replace(abs, text.as_bytes(), None)?;
-    Ok(text.len() as u64)
+    let staged = stage(abs, bytes)?;
+    match fs::hard_link(&staged.0, abs) {
+        Ok(()) => Ok(()),
+        Err(e) => Err(e),
+    }
 }
