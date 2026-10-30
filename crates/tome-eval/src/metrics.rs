@@ -1,4 +1,4 @@
-//! Page precision/recall, percentiles, run summary and the Marci §4 win rule.
+//! Page precision/recall, percentiles, run summary and the plan §4 win rule.
 
 use std::collections::BTreeMap;
 
@@ -125,7 +125,7 @@ fn ratio(a: Option<f64>, b: Option<f64>) -> Option<f64> {
     }
 }
 
-/// Marci plan §4: keep only if all five rules hold. Incomplete when anything is ungraded.
+/// Plan §4: keep only if all five rules hold. Incomplete when anything is ungraded.
 pub fn verdict(base: &ArmSummary, tome: &ArmSummary, pq: &[PerQuestion], smoke: bool) -> Verdict {
     let wins = pq.iter().filter(|q| q.outcome == "tome_win").count() as u32;
     let losses = pq.iter().filter(|q| q.outcome == "baseline_win").count() as u32;

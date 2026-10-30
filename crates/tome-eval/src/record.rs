@@ -34,7 +34,7 @@ pub enum Correctness {
 }
 
 impl Correctness {
-    /// Marci plan scale: wrong 0 / partial 1 / right 2 (errors count 0).
+    /// Plan scale: wrong 0 / partial 1 / right 2 (errors count 0).
     pub fn score(self) -> u8 {
         match self {
             Correctness::Exact => 2,

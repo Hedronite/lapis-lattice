@@ -9,6 +9,8 @@
 # quoted string on one of its lines is removed only when it is exactly one of
 # its own patterns, allowed literals or file keys; everything else still counts.
 # testdata/ directories are scanned like everything else (no directory skip).
+# Seat names are banned as whole words in any case. Code that shares a word
+# with one (a protocol field, an upstream crate) is an exact-literal ALLOW entry.
 # Fails closed: no file list, an empty list, or an unreadable tracked file is
 # a failure, never "clean".
 set -euo pipefail
@@ -56,6 +58,7 @@ pats = [
     r"ts\.net\b",
     r"tailnet",
     r"protonmail",
+    r"\b(?:vini|merci|eli|marci|jupi|sati|lea|leo|elio|oli|uri|nepi|halo)\b",
 ]
 pats = [(p, re.compile(p, re.IGNORECASE)) for p in pats]
 skip_files = {"docs/internal-history.md"}
@@ -95,11 +98,28 @@ ALLOW = {
     # The engine crate ships its own license file with the same copyright line.
     "crates/lapis-lattice/LICENSE": ["Copyright (c) 2026 Hedronite / VirtualMachinist"],
     "src/taxonomy.rs": ["`projects/atrium-lattice/taxonomy.py`", "\"projects/atrium-lattice\""],
+    # The MCP resource field and the vendored LSP and URL code use the word.
+    "src/mcp.rs": [
+        "(uri: &str)",
+        "uri.strip_prefix(",
+        "\"uri\": rel_to_note_uri(",
+        "request.uri",
+        "let uri = rel_to_note_uri(",
+        "assert_eq!(uri, ",
+        "note_uri_to_rel(&uri)",
+    ],
+    "vendor/gpui-base/src/input/editor/lsp/definitions.rs": ["uri: location.target_uri"],
+    "vendor/gpui-base/src/input/editor/lsp/mod.rs": ["virtual/external URI)"],
+    "vendor/gpui-base/src/text/utils.rs": [
+        "remain URI-backed",
+        "Resource::Uri(uri) => assert_eq!(uri.as_ref(), url)",
+        "expected Uri for",
+    ],
 }
-# One upstream Rust crate (named in LOCK_ALLOW) in the tracked workspace
-# lockfiles only (repo root and the vendored workspace root).
+# Upstream Rust crates whose names hit a pattern (named in LOCK_ALLOW), in the
+# tracked workspace lockfiles only (repo root and the vendored workspace root).
 LOCK_FILES = {"Cargo.lock", "vendor/gpui-base/Cargo.lock"}
-LOCK_ALLOW = ["name = \"tower\"", "\"tower\",", "\"tower ", "\"tower-"]
+LOCK_ALLOW = ["name = \"tower\"", "\"tower\",", "\"tower ", "\"tower-", "\"fluent-uri\""]
 ALLOW = {k: sorted(v, key=len, reverse=True) for k, v in ALLOW.items()}
 import ast
 SELF_KNOWN = {p for p, _ in pats} | set(LOCK_ALLOW) | set(canonical_slugs) | set(ALLOW)

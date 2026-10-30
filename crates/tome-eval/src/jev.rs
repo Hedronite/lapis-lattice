@@ -236,7 +236,7 @@ impl SystemOne {
 #[path = "../../../src/jev/batch.rs"]
 mod batch;
 
-/// Fixed reporting floor for `would_fail_closed_at_0_6` (Eli ruling 2026-09-28).
+/// Fixed reporting floor for `would_fail_closed_at_0_6` (ruling 2026-09-28).
 /// It matches `[jev] confidence_floor` and is never tuned to eval data.
 pub const FAIL_CLOSED_FLOOR: f64 = 0.6;
 
@@ -253,7 +253,7 @@ pub const FAIL_CLOSED_FLOOR: f64 = 0.6;
 ///   array and no per-id score is `parse`, and the walk pre-ranks.
 /// - `batch_cost` is 1, so a 16-root batch spends one of `root_calls`.
 ///
-/// Spike policy (Eli ruling 2026-09-28): the walk ranks on score ONLY, with no
+/// Spike policy (ruling 2026-09-28): the walk ranks on score ONLY, with no
 /// confidence gate. Per-candidate score and confidence come from `Walk::judged`.
 /// A missing or out-of-range score, or a dead transport, is `judge_unavailable`.
 pub struct JevJudge {

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Lapis as a library for phone apps
+
+- `Engine::open_in(vault, index_dir, embedder)` keeps the index in a directory the caller chooses, and the vault tree gains no file. `Engine::stored_embedder_in` reads that index's embedder. `Engine::open` and `Engine::open_with` still use `<vault>/.lapis/`.
+- A directory `open_in` creates for the index is `0700` on unix; an existing one keeps its mode. The caller keeps it in its own app data: `open_in` refuses an `index_dir` that is the vault or inside it, and a refused call creates nothing.
+- `Engine::refresh` brings the index up to date with the vault by modification time and size, and reports how many notes were added, updated and removed. With nothing changed it writes nothing, so it is safe on every launch. `documents` gains a `size` column, added in place. Rows from an older index have none, so the first refresh re-indexes each of them once.
+- New crate `lapis-notes` (not published): the create-set, slugging, the inbox bucket from the overlay, containment and `create_new`, with no `clap`, `tokio`, `reqwest` or GPUI. The caller passes the date and an optional classifier, and the crate never spawns a process. The CLI, MCP, TUI and desktop create notes through it, `taxonomy.py` stays the CLI's classifier, and `tests/notes_golden.rs` pins the bytes `lapis create` writes.
+- CI checks `lapis-lattice` and `lapis-notes` for `aarch64-apple-ios` and `aarch64-linux-android`. The README has a "Using Lapis as a library" section.
+
 ### Graph frame budget and logging
 
 - A dashed graph link is added only when its dashes fit the frame's segment budget as well as the dash budget, so a frame never passes the budget the renderer is sized for.
@@ -136,7 +144,7 @@
 
 ### Graph
 
-- The graph has the Lapis look: a lapis glow and a quiet starfield that drifts slightly with a pan, notes coloured by their top-level folder (six soft hues rotated from the theme accent, so the accent stays for the focused note and seeds), a faint halo on hubs, and hollow rings for unresolved links.
+- The graph has the Lapis look: a lapis glow and a quiet starfield that drifts slightly with a pan, notes coloured by their top-level folder (six soft hues rotated from the theme accent, so the accent stays for the focused note and seeds), a faint ring of light on hubs, and hollow rings for unresolved links.
 - Hovering or selecting a note gives it a gold ring and a label pill, draws its links in gold, and fades the rest of the board, labels included.
 - The controls are a floating toolbar over the board (filter, layout, depth in local mode, orphans, unresolved, domain, colour group; fit, unpin, refresh, reset). A legend lists folder colours, colour groups and the counts, and a preview card shows the hovered note's title, path and opening lines. Loading, empty and failed boards say so in a card in the middle.
 

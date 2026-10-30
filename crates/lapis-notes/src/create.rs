@@ -76,7 +76,10 @@ pub fn target_path(root: &Path, req: &CreateRequest, inbox: &str) -> Result<Stri
     let rel = match req.path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
         None => format!("{}/{}", inbox.trim_matches('/'), file),
         Some(p) => {
-            let is_dir = p.ends_with('/') || root.join(clean_rel(p)?).is_dir();
+            // A symlinked directory is not followed: it is a target name, and
+            // the no-replace publish below refuses an existing entry.
+            let is_dir = p.ends_with('/')
+                || std::fs::symlink_metadata(root.join(clean_rel(p)?)).map(|m| m.is_dir()).unwrap_or(false);
             let clean = clean_rel(p)?;
             if is_dir {
                 format!("{clean}/{file}")
@@ -166,13 +169,21 @@ fn is_canon(doc_type: &str) -> bool {
     CANON_TYPES.contains(&doc_type)
 }
 
-/// Write a composed text to its `contained_new` location: missing folders
-/// become real directories, the write is staged and renamed, and a folder
-/// symlinked out of the vault cannot carry the bytes outside it. Returns the
-/// byte count.
+/// Write a composed text to its `contained_new` location, without a way for a
+/// swap to carry the bytes out of the vault.
+///
+/// Missing folders become real directories; after that the canonical parent is
+/// re-checked against the canonical vault, so a folder swapped for a symlink
+/// out of the vault — after the check — is refused. The bytes then publish
+/// through a no-replace hard link, so a target that appeared inside the
+/// check-to-publish window is refused with its own bytes kept on disk.
+/// Returns the byte count.
 pub fn write_composed(vault: &Path, rel: &str, text: &str) -> Result<u64> {
     let abs: PathBuf = contained_new(vault, rel)?;
-    Ok(crate::fsutil::write_atomic(&abs, text)?)
+    // The publish step re-checks the canonical parent inside the vault, so the
+    // folder swap cannot matter to the caller.
+    crate::fsutil::publish_new(&abs, text.as_bytes(), vault)?;
+    Ok(text.len() as u64)
 }
 
 /// Create a note: decide the path, build the create-set, default the body,
@@ -213,6 +224,23 @@ fn slug(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A two-note vault: Welcome.md at the root, notes/Alpha below it.
+    fn vault() -> PathBuf {
+        let d = dir("vault");
+        std::fs::create_dir_all(d.join("notes")).unwrap();
+        std::fs::write(
+            d.join("Welcome.md"),
+            "---\nname: Welcome\ntags: [intro]\n---\n# Welcome\n\nSee [[Alpha]].\n",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("notes/Alpha.md"),
+            "---\nname: Alpha\npriority: high\ntags: [graph]\n---\n# Alpha\n\nBack to [[Welcome]].\n",
+        )
+        .unwrap();
+        d
+    }
 
     fn dir(name: &str) -> PathBuf {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -407,6 +435,55 @@ mod tests {
         let text = std::fs::read_to_string(v.join(&w.path)).unwrap();
         assert!(text.contains("domain: Notes\n"), "the hook answered: {text:?}");
         let _ = std::fs::remove_dir_all(v);
+    }
+
+    /// A target that appears inside the check-to-publish window is refused,
+    /// and the bytes that got there first stay untouched.
+    #[test]
+    fn a_target_created_before_the_publish_is_refused_with_bytes_kept() {
+        let v = vault();
+        // The publish step is driven directly, since write_composed would
+        // re-run contained_new and refuse before the window matters: this
+        // test is about the window inside publish.
+        let target = v.join("notes/incident.md");
+        std::fs::write(&target, b"first bytes").unwrap();
+        match crate::fsutil::publish_new(&target, b"---\ntags: []\n---\nInterrupted body", &v) {
+            Err(err) => {
+                assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists, "got {err}")
+            }
+            Ok(()) => panic!("the window write overwrote the first bytes"),
+        }
+        assert_eq!(std::fs::read(&target).unwrap(), b"first bytes", "the earlier bytes keep the target");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// A parent swapped for a symlink out of the vault between the check and
+    /// the publish is refused: the mkdir+re-check sees the escape, and
+    /// nothing is written outside.
+    #[cfg(unix)]
+    #[test]
+    fn a_swapped_parent_not_followed_out_of_the_vault() {
+        let v = vault();
+        std::fs::create_dir_all(v.join("away")).unwrap();
+        let outside = dir("outside");
+        let rel = "away/leak.md";
+        // The check runs clean while the folder is a real directory.
+        let contained = crate::contained_new(&v, rel).unwrap();
+        assert_eq!(contained, v.canonicalize().unwrap().join("away/leak.md"));
+        // The parent is swapped for a symlink that leaves the vault; the
+        // publish step is driven directly (the same contained path), so the
+        // recheck inside publish is what refuses it.
+        std::fs::remove_dir(v.join("away")).unwrap();
+        std::os::unix::fs::symlink(&outside, v.join("away")).unwrap();
+        match crate::fsutil::publish_new(&contained, "---\ntags: []\n---\nLeaked body".as_bytes(), &v) {
+            Err(err) => {
+                assert!(err.to_string().contains("escapes the vault"), "got {err}")
+            }
+            Ok(()) => panic!("the swapped parent carried the write out"),
+        }
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0, "nothing written outside the vault");
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_dir_all(&v);
     }
 
     /// taxonomy fallback vs the explicit override, miss the same parts.

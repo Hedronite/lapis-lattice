@@ -167,9 +167,9 @@ mod tests {
             date: "2026-09-09".into(),
             week: "2026-W37".into(),
             month: "2026-09".into(),
-            director: "Marci".into(),
+            director: "Ops".into(),
         };
         let s = substitute("{{operator}}/{{date}}-{{slug}} {{week}} {{month}} {{title}}{{cursor}}", &v);
-        assert_eq!(s, "Marci/2026-09-09-hello-world 2026-W37 2026-09 Hello World");
+        assert_eq!(s, "Ops/2026-09-09-hello-world 2026-W37 2026-09 Hello World");
     }
 }

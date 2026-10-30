@@ -222,10 +222,13 @@ impl Engine {
     /// its mode). The default [`Engine::open`] and [`Engine::open_with`] do not
     /// change: `<vault>/.lapis/` is created as before.
     ///
-    /// The caller is trusted: it should canonicalize and confine `index_dir` to
-    /// its own app-data directory and must not place it inside the vault — an
-    /// in-vault index would make the engine walk its own database and dirty the
-    /// very tree it must leave untouched.
+    /// Confinement is enforced, not advisory, and happens before any write so
+    /// a refused call creates nothing: the requested directory is resolved
+    /// down to its deepest existing ancestor (symlinks followed, the same as
+    /// a reader would), `..` is refused, and a directory inside the vault —
+    /// equal to the vault counts — is refused. The caller should still
+    /// confine `index_dir` to its own app-data directory: an index anywhere
+    /// else outside the vault is accepted.
     pub fn open_in(
         vault: impl AsRef<Path>,
         index_dir: impl AsRef<Path>,
@@ -243,11 +246,11 @@ impl Engine {
             return Err(Error::Usage(format!("vault is not a directory: {}", vault.display())));
         }
         let dir = match index_dir {
-            Some(d) => d.to_path_buf(),
+            // Confinement is enforced before anything is written: reads only.
+            // The default `.lapis/` path behaves exactly as before.
+            Some(d) => location::confined_index_dir(&vault, d)?,
             None => vault.join(location::DEFAULT_DIR),
         };
-        // Only the caller-chosen dir gets the private mode; the default
-        // `.lapis/` path behaves exactly as before.
         if index_dir.is_some() {
             location::create_dir_private(&dir)?;
         } else {
@@ -268,7 +271,8 @@ impl Engine {
     }
 
     /// The SQLite file this engine holds, wherever the default or
-    /// [`Engine::open_in`] put it. Relative if `index_dir` was relative.
+    /// [`Engine::open_in`] put it: `<vault>/.lapis/lattice.sqlite` by
+    /// default, and the confinement-resolved directory for `open_in`.
     pub fn db_path(&self) -> PathBuf {
         self.db.clone()
     }

@@ -117,7 +117,7 @@ root_calls = 4
 root_top_k = 6
 ```
 
-The shipped System One questions still ask whether a *chunk* answers the query, and the recorded confidence is the minimum of the noul, relevance, and cite confidences. A TOC root is not a chunk. On a real book that showed up as relevance around 1.4 with confidence 0.29–0.41: the model was unsure, and the cite score pulled the minimum down. That confidence is kept on the walk and does not abort it. Eli's ruling matches the eval schema: rank on score only.
+The shipped System One questions still ask whether a *chunk* answers the query, and the recorded confidence is the minimum of the noul, relevance, and cite confidences. A TOC root is not a chunk. On a real book that showed up as relevance around 1.4 with confidence 0.29–0.41: the model was unsure, and the cite score pulled the minimum down. That confidence is kept on the walk and does not abort it. The spike ruling matches the eval schema: rank on score only.
 
 `JevJudge::score` blocks on the current tokio runtime with `block_in_place`. The `lapis` binary uses a multi-thread runtime. A current-thread runtime panics, and calling `walk` from inside an existing `block_on` can deadlock.
 
