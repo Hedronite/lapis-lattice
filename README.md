@@ -192,7 +192,7 @@ lapis-lattice = { git = "https://github.com/Hedronite/lapis-lattice", rev = "<co
 lapis-notes = { git = "https://github.com/Hedronite/lapis-lattice", rev = "<commit>" }
 ```
 
-Open the index with `Engine::open_in` and keep its directory in your app's data, never inside the vault: an index in the vault would be walked as part of it. Call `refresh` on every launch. It compares the vault with the index by modification time and size, and writes nothing when nothing changed. `create_new` takes the date to stamp, so the app owns the clock, and an optional classifier. With `None`, the domain is the note's first folder.
+Open the index with `Engine::open_in` and keep its directory in your app's data. `open_in` refuses an `index_dir` that is the vault or inside it, through a symlink too, before it writes anything: the vault walk would index the index. Call `refresh` on every launch. It compares the vault with the index by modification time and size, and writes nothing when nothing changed. `create_new` takes the date to stamp, so the app owns the clock, and an optional classifier. With `None`, the domain is the note's first folder.
 
 ```rust
 use lapis_lattice::Engine;

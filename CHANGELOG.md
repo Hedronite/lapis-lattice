@@ -5,7 +5,7 @@
 ### Lapis as a library for phone apps
 
 - `Engine::open_in(vault, index_dir, embedder)` keeps the index in a directory the caller chooses, and the vault tree gains no file. `Engine::stored_embedder_in` reads that index's embedder. `Engine::open` and `Engine::open_with` still use `<vault>/.lapis/`.
-- A directory `open_in` creates for the index is `0700` on unix; an existing one keeps its mode. The caller keeps it in its own app data, never inside the vault.
+- A directory `open_in` creates for the index is `0700` on unix; an existing one keeps its mode. The caller keeps it in its own app data: `open_in` refuses an `index_dir` that is the vault or inside it, and a refused call creates nothing.
 - `Engine::refresh` brings the index up to date with the vault by modification time and size, and reports how many notes were added, updated and removed. With nothing changed it writes nothing, so it is safe on every launch. `documents` gains a `size` column, added in place. Rows from an older index have none, so the first refresh re-indexes each of them once.
 - New crate `lapis-notes` (not published): the create-set, slugging, the inbox bucket from the overlay, containment and `create_new`, with no `clap`, `tokio`, `reqwest` or GPUI. The caller passes the date and an optional classifier, and the crate never spawns a process. The CLI, MCP, TUI and desktop create notes through it, `taxonomy.py` stays the CLI's classifier, and `tests/notes_golden.rs` pins the bytes `lapis create` writes.
 - CI checks `lapis-lattice` and `lapis-notes` for `aarch64-apple-ios` and `aarch64-linux-android`. The README has a "Using Lapis as a library" section.
