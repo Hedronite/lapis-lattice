@@ -6,7 +6,49 @@
 //! tree gains no file. Helpers that find the index go through [`db_file`] and
 //! [`DEFAULT_DIR`] so the chosen directory and the default cannot drift apart.
 
+use crate::{Error, Result};
 use std::path::{Path, PathBuf};
+
+/// Resolve a caller-chosen index directory for [`Engine::open_in`], before
+/// anything is written.
+///
+/// `..` components are refused. The deepest existing ancestor is
+/// canonicalized, and the remainder — names of not-yet-existing entries
+/// only — is appended after it. A directory that resolves inside the
+/// vault, the vault itself included, is refused. Reads only: a refused call
+/// creates no directory and touches the vault tree nowhere.
+pub fn confined_index_dir(vault: &Path, index_dir: &Path) -> Result<PathBuf> {
+    for c in index_dir.components() {
+        if matches!(c, std::path::Component::ParentDir) {
+            return Err(Error::Usage(format!(
+                "{}: an index directory must not contain ..",
+                index_dir.display()
+            )));
+        }
+    }
+    if index_dir.as_os_str().is_empty() {
+        return Err(Error::Usage("index directory is empty".into()));
+    }
+    let mut inner = index_dir.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    while !inner.exists() {
+        let (Some(name), Some(parent)) = (inner.file_name(), inner.parent()) else {
+            // The filesystem root itself: a fine place to stop looking.
+            break;
+        };
+        tail.push(name.to_os_string());
+        inner = parent.to_path_buf();
+    }
+    let base = inner.canonicalize()?;
+    if base == vault || base.starts_with(vault) {
+        return Err(Error::Usage(format!(
+            "{} resolves to {} which is inside the vault; the index must live outside it",
+            index_dir.display(),
+            base.display()
+        )));
+    }
+    Ok(tail.iter().rev().fold(base, |p, n| p.join(n)))
+}
 
 /// The vault-relative directory of the default index, `<vault>/.lapis/`.
 pub const DEFAULT_DIR: &str = ".lapis";
@@ -120,7 +162,8 @@ mod tests {
         let r = e.reindex().unwrap();
         assert_eq!(r.documents, 2, "builds the index outside the vault");
         assert!(!e.search("alpha", 5).unwrap().is_empty(), "searches over it");
-        assert_eq!(e.db_path(), idx.join("lattice.sqlite"), "the db lives where asked");
+        // The confinement resolves the requested directory.
+        assert_eq!(e.db_path(), idx.canonicalize().unwrap().join("lattice.sqlite"), "the db lives where asked");
         assert_eq!(e.reindex_path("notes/Alpha.md").unwrap().documents, 1, "single-path reindex works too");
         drop(e);
         assert_eq!(tree(&v), before, "the vault tree gains no file");
@@ -175,6 +218,68 @@ mod tests {
             let _ = std::fs::remove_dir_all(d);
         }
         let _ = std::fs::remove_dir_all(&idx);
+    }
+
+    /// Confinement in code: inside the vault — directly, through `..`, or
+    /// through a symlink — is refused, and a refusal creates nothing.
+    #[cfg(unix)]
+    #[test]
+    fn open_in_refuses_an_index_inside_the_vault_and_creates_nothing() {
+        use std::os::unix::fs::symlink;
+        let v = vault();
+        let before = tree(&v);
+
+        // A directory directly inside the vault.
+        match Engine::open_in(&v, v.join("idx"), None) {
+            Err(Error::Usage(m)) => assert!(m.contains("inside the vault"), "{m}"),
+            other => panic!("expected a refusal for an in-vault index"),
+        }
+        // The vault itself is also refused.
+        match Engine::open_in(&v, &v, None) {
+            Err(Error::Usage(m)) => assert!(m.contains("inside the vault"), "{m}"),
+            other => panic!("expected a refusal for the vault itself"),
+        }
+        // A `..` component pointed back inside.
+        let outside = dir("outside");
+        match Engine::open_in(&v, outside.join("walk/../back-in"), None) {
+            Err(Error::Usage(m)) => assert!(m.contains(".."), "{m}"),
+            other => panic!("expected a refusal for a .. component"),
+        }
+        // A symlink into the vault, so canonicalization is what sees it.
+        symlink(v.join("notes"), outside.join("in-vault")).unwrap();
+        match Engine::open_in(&v, outside.join("in-vault"), None) {
+            Err(Error::Usage(m)) => assert!(m.contains("inside the vault"), "{m}"),
+            other => panic!("expected a refusal for a symlinked in-vault index"),
+        }
+        assert_eq!(tree(&v), before, "a refused call touches nothing");
+        assert!(!outside.join("walk").exists(), "the refused directory was not created");
+        // The symlink test fixture is cleaned up before the tree check runs.
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    /// Outside is fine: a sibling directory next to the vault, and a
+    /// not-yet-existing nested directory under it, both accepted.
+    #[cfg(unix)]
+    #[test]
+    fn open_in_accepts_an_outside_sibling_and_a_nested_new_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let v = vault();
+        let sibling = dir("sibling");
+        let mut e = Engine::open_in(&v, &sibling, None).unwrap();
+        let r = e.reindex().unwrap();
+        assert_eq!(r.documents, 2, "the outside index builds");
+        drop(e);
+        assert_eq!(sibling.canonicalize().unwrap().join("lattice.sqlite").exists(), true);
+
+        let nested = sibling.join("fresh").join("deeper");
+        let e = Engine::open_in(&v, &nested, None).unwrap();
+        assert_eq!(e.db_path(), nested.canonicalize().unwrap().join("lattice.sqlite"));
+        for d in [sibling.join("fresh"), sibling.join("fresh/deeper")] {
+            let mode = d.metadata().unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "created directories stay private: {}", d.display());
+        }
+        let _ = std::fs::remove_dir_all(sibling);
+        let _ = std::fs::remove_dir_all(v);
     }
 
     /// G0b: the default callers keep the default path.
