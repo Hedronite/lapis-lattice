@@ -180,15 +180,9 @@ fn is_canon(doc_type: &str) -> bool {
 /// Returns the byte count.
 pub fn write_composed(vault: &Path, rel: &str, text: &str) -> Result<u64> {
     let abs: PathBuf = contained_new(vault, rel)?;
-    if let Some(parent) = abs.parent() {
-        std::fs::create_dir_all(parent)?;
-        // Re-check after the mkdir: a self-symlink swap or a retargeted
-        // ancestor between the check and here cannot carry the bytes out.
-        if !parent.canonicalize()?.starts_with(&vault.canonicalize()?) {
-            return Err(Error::Path(format!("{rel}: a folder on the way escapes the vault")));
-        }
-    }
-    crate::fsutil::publish_new(&abs, text.as_bytes())?;
+    // The publish step re-checks the canonical parent inside the vault, so the
+    // folder swap cannot matter to the caller.
+    crate::fsutil::publish_new(&abs, text.as_bytes(), vault)?;
     Ok(text.len() as u64)
 }
 
@@ -448,19 +442,18 @@ mod tests {
     #[test]
     fn a_target_created_before_the_publish_is_refused_with_bytes_kept() {
         let v = vault();
-        let rel = "notes/incident.md";
-        // The check runs clean: nothing exists at the target yet.
-        let contained = crate::contained_new(&v, rel).unwrap();
-        // The target appears inside the window.
-        std::fs::write(&contained, b"first bytes").unwrap();
-        match write_composed(&v, rel, "---\ntags: []\n---\nInterrupted body") {
-            Err(err) => assert!(
-                err.message().contains("exists") || err.message().contains("refuse"),
-                "expected a publish refusal, got {err}"
-            ),
-            Ok(w) => panic!("the window write overwrote the first bytes: {w} bytes written"),
+        // The publish step is driven directly, since write_composed would
+        // re-run contained_new and refuse before the window matters: this
+        // test is about the window inside publish.
+        let target = v.join("notes/incident.md");
+        std::fs::write(&target, b"first bytes").unwrap();
+        match crate::fsutil::publish_new(&target, b"---\ntags: []\n---\nInterrupted body", &v) {
+            Err(err) => {
+                assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists, "got {err}")
+            }
+            Ok(()) => panic!("the window write overwrote the first bytes"),
         }
-        assert_eq!(std::fs::read(&contained).unwrap(), b"first bytes", "the earlier bytes keep the target");
+        assert_eq!(std::fs::read(&target).unwrap(), b"first bytes", "the earlier bytes keep the target");
         let _ = std::fs::remove_dir_all(&v);
     }
 
@@ -477,14 +470,16 @@ mod tests {
         // The check runs clean while the folder is a real directory.
         let contained = crate::contained_new(&v, rel).unwrap();
         assert_eq!(contained, v.canonicalize().unwrap().join("away/leak.md"));
-        // The parent is swapped for a symlink that leaves the vault.
+        // The parent is swapped for a symlink that leaves the vault; the
+        // publish step is driven directly (the same contained path), so the
+        // recheck inside publish is what refuses it.
         std::fs::remove_dir(v.join("away")).unwrap();
         std::os::unix::fs::symlink(&outside, v.join("away")).unwrap();
-        match write_composed(&v, rel, "---\ntags: []\n---\nLeaked body") {
+        match crate::fsutil::publish_new(&contained, "---\ntags: []\n---\nLeaked body".as_bytes(), &v) {
             Err(err) => {
-                assert!(err.message().contains("escapes the vault"), "got {err}")
+                assert!(err.to_string().contains("escapes the vault"), "got {err}")
             }
-            Ok(w) => panic!("the swapped parent carried the write out: {w} bytes written"),
+            Ok(()) => panic!("the swapped parent carried the write out"),
         }
         assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0, "nothing written outside the vault");
         let _ = std::fs::remove_dir_all(&outside);
