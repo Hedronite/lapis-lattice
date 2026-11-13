@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Dependencies and MSRV
+
+- `rusqlite` 0.40.2 → 0.42.0 (bundled `libsqlite3-sys` 0.38.2 → 0.40.0) to clear RUSTSEC-2026-0459 (CVE-2026-119375).
+- `pulldown-cmark` 0.13.5 → 0.13.6 to clear RUSTSEC-2026-0433.
+- `rmcp` 3.2.0 → 3.10.0 to clear RUSTSEC-2026-0457, RUSTSEC-2026-0461, and RUSTSEC-2026-0462. The MCP server's `get_info` now returns `ServerConfig` instead of the deprecated `ServerInfo` alias; the initialize payload is unchanged.
+- `async-executor` 1.14.0 → 1.14.1 to replace a yanked crate.
+- `rustix` 1.1.4 → 1.1.6 to clear RUSTSEC-2026-0486 (unsound zero-length xattr buffer).
+- Declared MSRV **1.89** (`rust-version = "1.89"`) on the workspace packages, the floor `rusqlite` 0.42 requires. The toolchain file stays on `stable`.
+- `lapis-desktop` is now `publish = false`, so a workspace publish cannot ship that crate by accident.
+
 ### Lapis as a library for phone apps
 
 - `Engine::open_in(vault, index_dir, embedder)` keeps the index in a directory the caller chooses, and the vault tree gains no file. `Engine::stored_embedder_in` reads that index's embedder. `Engine::open` and `Engine::open_with` still use `<vault>/.lapis/`.
