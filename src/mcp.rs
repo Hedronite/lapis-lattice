@@ -11,7 +11,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CallToolResult, ContentBlock, ErrorData, Implementation, ListResourceTemplatesResult,
     ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
-    ReadResourceResult, ResourceContents, ResourceTemplate, ServerCapabilities, ServerInfo,
+    ReadResourceResult, ResourceContents, ResourceTemplate, ServerCapabilities, ServerConfig,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
@@ -772,8 +772,8 @@ impl LapisServer {
 
 #[tool_handler(router = self.router)]
 impl ServerHandler for LapisServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().enable_resources().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().enable_resources().build())
             .with_server_info(Implementation::new("lapis", env!("CARGO_PKG_VERSION")))
             .with_instructions(INSTRUCTIONS)
     }

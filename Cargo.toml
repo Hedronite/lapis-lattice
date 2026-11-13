@@ -7,6 +7,7 @@ exclude = ["vendor/gpui-base"]
 name = "lapis"
 version = "0.4.2"
 edition = "2024"
+rust-version = "1.89"
 description = "Agent-first notes vault: JSON CLI, MCP, and TUI over Markdown files indexed by Lapis Lattice."
 license = "MIT"
 repository = "https://github.com/Hedronite/lapis-lattice"
@@ -38,13 +39,13 @@ gray_matter = "0.3"
 jiff = "0.2"
 notify = "8"
 pdf-extract = "0.12"
-pulldown-cmark = { version = "0.13", default-features = false }
+pulldown-cmark = { version = "0.13.6", default-features = false }
 ratatui = "0.30"
 # Upstream #30 exposes the renderer's scroll and Unicode coordinate mapping.
 ratatui-textarea = { git = "https://github.com/ratatui/ratatui-textarea", rev = "bf06674937cbdde4b00d73b3255d1d49d0bf5fc0", features = ["search"] }
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
-rmcp = { version = "3", features = ["server", "transport-io", "macros"] }
+rmcp = { version = "3.9", features = ["server", "transport-io", "macros"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

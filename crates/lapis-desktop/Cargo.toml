@@ -2,6 +2,8 @@
 name = "lapis-desktop"
 version = "0.4.2"
 edition = "2024"
+rust-version = "1.89"
+publish = false
 description = "Lapis desktop shell: GPUI window (feature `gpui`), HTML renderer, graph scene."
 license = "MIT"
 
@@ -17,7 +19,7 @@ gpui = ["dep:gpui-omarchy", "dep:gpui-kit", "dep:image", "dep:log"]
 image = { version = "0.25", optional = true, default-features = false }
 # GPUI reports dropped frames through `log`; the shell prints its warnings.
 log = { version = "0.4", optional = true }
-pulldown-cmark = { version = "0.13", default-features = false }
+pulldown-cmark = { version = "0.13.6", default-features = false }
 # The layout's repulsion runs across cores.
 rayon = "1.12"
 unicode-segmentation = "1.13.3"

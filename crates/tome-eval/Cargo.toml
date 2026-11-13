@@ -2,6 +2,7 @@
 name = "tome-eval"
 version = "0.0.1"
 edition = "2024"
+rust-version = "1.89"
 description = "tome-tree spike A/B harness: lapis search --rerank-jev vs tome walk(), one shared answerer, Jev as scorer."
 license = "MIT"
 publish = false

@@ -2,6 +2,7 @@
 name = "lapis-lattice"
 version = "0.4.2"
 edition = "2024"
+rust-version = "1.89"
 description = "Embedded SQLite index for a local Markdown vault: FTS5 BM25, sqlite-vec KNN, wikilink graph, allowlisted analytics. No HTTP daemon, no Turso, no DuckDB."
 license = "MIT"
 repository = "https://github.com/Hedronite/lapis-lattice"
@@ -16,7 +17,7 @@ exclude = []
 # Gitignore semantics for `.lapisignore`: the same engine ripgrep uses.
 ignore = "0.4"
 regex = "1"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
 # Vector KNN inside the same SQLite file. Linked into the binary and registered
 # as an auto-extension, so there is no `.so` to find on PATH and
 # `load_extension` never has to be enabled. Pre-1.0 upstream, pinned exactly.
