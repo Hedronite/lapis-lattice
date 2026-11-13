@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## 0.5.0 — 2026-11-13
+
 ### Dependencies and MSRV
 
 - `rusqlite` 0.40.2 → 0.42.0 (bundled `libsqlite3-sys` 0.38.2 → 0.40.0) to clear RUSTSEC-2026-0459 (CVE-2026-119375).

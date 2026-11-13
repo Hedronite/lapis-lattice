@@ -33,7 +33,7 @@
           # workspace binary. `tome-eval` is picked up here once that bin exists.
           bins = rustPlatform.buildRustPackage {
             pname = "lapis";
-            version = "0.4.2";
+            version = "0.5.0";
             src = ./.;
             inherit cargoLock;
             buildFeatures = [ "tome" ];

@@ -1,6 +1,6 @@
 [package]
 name = "lapis-notes"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Creating notes without the CLI: HAL create-set, slugging, the inbox bucket, containment, and the write."
